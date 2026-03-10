@@ -1,0 +1,1 @@
+python pipeline.py --execution-provider cuda

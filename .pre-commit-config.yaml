@@ -1,0 +1,54 @@
+# Pre-commit hooks for roop-cam
+# Install with: pre-commit install
+# Run manually: pre-commit run --all-files
+# Bypass hooks: git commit --no-verify (NOT recommended)
+
+repos:
+  # Flake8: Python linting (E3, E4, F checks)
+  - repo: https://github.com/pycqa/flake8
+    rev: 7.0.0
+    hooks:
+      - id: flake8
+        name: flake8 (Python linting)
+        args: [--config=.flake8]
+        files: ^(run\.py|roop/)
+        language: python
+        types: [python]
+
+  # Mypy: Static type checking
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.8.0
+    hooks:
+      - id: mypy
+        name: mypy (Type checking)
+        args: [--config-file=mypy.ini]
+        files: ^(run\.py|roop/)
+        language: python
+        types: [python]
+        additional_dependencies: [types-all]
+
+  # Trailing whitespace cleanup
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+        name: Trim trailing whitespace
+        stages: [commit]
+      - id: end-of-file-fixer
+        name: Fix end of file
+        stages: [commit]
+      - id: check-yaml
+        name: Check YAML validity
+        args: [--unsafe]
+      - id: check-json
+        name: Check JSON validity
+      - id: check-merge-conflict
+        name: Check for merge conflicts
+      - id: check-added-large-files
+        name: Check for large files
+        args: [--maxkb=5000]
+
+# Optional: Run specific hooks or stages
+# pre-commit run flake8 --all-files
+# pre-commit run mypy --all-files
+# pre-commit run --all-files --hook-stage push
