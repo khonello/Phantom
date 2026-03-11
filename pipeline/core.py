@@ -133,9 +133,9 @@ def suggest_execution_providers() -> List[str]:
 
 
 def suggest_execution_threads() -> int:
-    if 'DmlExecutionProvider' in pipeline.globals.execution_providers:
+    if 'DmlExecutionProvider' in CONFIG.execution_providers:
         return 1
-    if 'ROCMExecutionProvider' in pipeline.globals.execution_providers:
+    if 'ROCMExecutionProvider' in CONFIG.execution_providers:
         return 1
     return 8
 
@@ -148,10 +148,10 @@ def limit_resources() -> None:
             tensorflow.config.experimental.VirtualDeviceConfiguration(memory_limit=1024)
         ])
     # limit memory usage
-    if pipeline.globals.max_memory:
-        memory = pipeline.globals.max_memory * 1024 ** 3
+    if CONFIG.max_memory:
+        memory = CONFIG.max_memory * 1024 ** 3
         if platform.system().lower() == 'darwin':
-            memory = pipeline.globals.max_memory * 1024 ** 6
+            memory = CONFIG.max_memory * 1024 ** 6
         if platform.system().lower() == 'windows':
             import ctypes
             kernel32 = ctypes.windll.kernel32
@@ -162,16 +162,17 @@ def limit_resources() -> None:
 
 
 def release_resources() -> None:
-    if 'CUDAExecutionProvider' in pipeline.globals.execution_providers:
+    if 'CUDAExecutionProvider' in CONFIG.execution_providers:
         torch.cuda.empty_cache()
 
 
 def pre_check() -> bool:
+    import shutil
     if sys.version_info < (3, 9):
-        update_status('Python version is not supported - please upgrade to 3.9 or higher.')
+        emit_status('Python version is not supported - please upgrade to 3.9 or higher.', scope='CORE')
         return False
     if not shutil.which('ffmpeg'):
-        update_status('ffmpeg is not installed.')
+        emit_status('ffmpeg is not installed.', scope='CORE')
         return False
     return True
 
