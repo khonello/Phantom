@@ -250,25 +250,40 @@ with pyvirtualcam.Camera(backend='obs') as cam:
 
 ### Concurrent Components
 
-- **Webcam thread**: Reads frames, broadcasts to pipeline
-- **Enhancement thread**: Async face enhancement queue
-- **WebSocket thread**: Receives processed frames, writes to virtual camera
-- **Stream processing thread**: Core face swapping loop
-- **HTTP server thread**: Handles control requests
-- **Virtual camera thread**: Writes to camera driver
+- **Capture thread** (InputSource): Reads frames from webcam/file/network
+- **Processing thread** (ProcessingPipeline): Runs frame processor chain
+- **Async enhancement thread** (AsyncProcessor): Background GFPGAN enhancement
+- **WebSocket server thread**: Receives commands, broadcasts events
+- **Event bus** (EventBus): Pub/sub dispatch (synchronous, in calling thread)
+- **Desktop bridge**: Subscribes to events, updates UI
 
 ### Synchronization
 
-- **Global state** (`pipeline/globals.py`): Shared settings (not locked, assumed atomic)
-- **Frame queues** (`queue.Queue`): Thread-safe, dropping oldest on overflow
-- **Stop events** (`threading.Event`): Safe for cross-thread signaling
-- **Status updates** (`QTimer.singleShot`): Main thread delivery via Qt event loop
+- **Observable config** (`CONFIG`): Uses listeners instead of locks
+  - `CONFIG.on_change(callback)` — fires on any field update
+  - All services and processors subscribe to config changes
+- **Event bus** (`BUS`): Synchronous pub/sub (no race conditions)
+  - Emitters and listeners same thread (no cross-thread calls)
+  - Event constants prevent string typos: `FRAME_READY`, `DETECTION`, etc.
+- **Stop events** (`CONFIG.shutdown_event`): `threading.Event` for graceful shutdown
+- **Frame queues**: `AsyncProcessor` uses size-1 queue (drop-newest on overflow)
 
 ## Caching & Memory
 
-- **Face embeddings** (source): Cached in memory (~256KB)
-- **Frame buffers**: Rolling buffers with max size = 3 frames
-- **Model weights**: CUDA memory (if available) or RAM
-- **GC tuning**: Thresholds raised to reduce pauses during frame allocation
+- **Face embeddings** (FaceDatabase): Cached in memory (~256KB per embedding)
+  - Loaded from `.npy` files or computed from images
+  - Averaged across multiple source images
+  - Reused across frames (not recomputed)
+- **Frame buffers** (AsyncProcessor): Size-1 queue
+  - Drops frame if processor thread hasn't caught up
+  - Keeps latest, discards oldest on overflow
+- **Model weights**: Lazy loaded, cached in memory or CUDA
+  - InsightFace (det_size=480) — ~200MB
+  - Inswapper_128 (ONNX) — ~350MB
+  - GFPGAN (optional) — ~350MB
+- **Memory limits** (`CONFIG.max_memory`):
+  - Set via `--max-memory` flag or GUI
+  - Enforced per `limit_resources()` on startup
+  - Prevents OOM on GPU with multiple processes
 
-See [DEVELOPMENT.md](DEVELOPMENT.md) for debugging and profiling.
+See [DEVELOPMENT.md](DEVELOPMENT.md) for profiling and optimization.
