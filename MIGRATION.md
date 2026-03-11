@@ -460,10 +460,16 @@ Handlers:
 ---
 
 ### Phase 5: Desktop Bridge (Thin Layer)
-**Status**: Not Started
+**Status**: ✓ Complete
 **Estimated**: 1-2 hours
 
 Simplify `desktop/bridge.py` - it becomes a pure translation layer.
+
+**Completed:**
+- FrameBuffer and FrameDisplay kept unchanged (UI infrastructure)
+- Bridge class delegates all API calls to PipelineClient (WebSocket API)
+- Minimal business logic - only state management and signal emission
+- Frame display and WebSocket reception still working as before
 
 #### 5.1 Simplified Bridge
 **Depends on**: Phase 0, Phase 4
@@ -490,10 +496,23 @@ Bridge:
 ---
 
 ### Phase 6: Migration of Existing Code
-**Status**: Not Started
+**Status**: ✓ Complete
 **Estimated**: 2-3 hours
 
 Update batch and realtime pipelines to use new architecture.
+
+**Completed:**
+- 6.1 core.py refactored to use ProcessingPipeline.run_batch()
+  - Replaced monolithic frame processor loop with ProcessingPipeline
+  - Updated parse_args() to use CONFIG instead of pipeline.globals
+  - Simplified run_headless() to ~30 lines
+  - Integrated WebSocketAPIServer for API layer
+
+- 6.2 stream.py refactored to use ProcessingPipeline.run_stream()
+  - Replaced 356-line monolithic _pipeline_loop() with ~57-line wrapper
+  - ProcessingPipeline handles all streaming logic
+  - Backward-compatible start_pipeline() and stop_pipeline() interface
+  - All global state removed, uses CONFIG and BUS
 
 #### 6.1 Batch Mode Migration
 **Depends on**: Phase 2.3
@@ -832,15 +851,15 @@ Phase 4: API
   [██████████████████████████] 100% - ✓ Complete
 
 Phase 5: Desktop
-  [░░░░░░░░░░░░░░░░░░░░░░░░░] 0% - Not Started
+  [██████████████████████████] 100% - ✓ Complete
 
 Phase 6: Migration
-  [░░░░░░░░░░░░░░░░░░░░░░░░░] 0% - Not Started
+  [██████████████████████████] 100% - ✓ Complete
 
 Phase 7: Cleanup
   [░░░░░░░░░░░░░░░░░░░░░░░░░] 0% - Not Started
 
-OVERALL: [█████████████░░░░░░░░░░░] 60%
+OVERALL: [█████████████████░░░░░░░] 84%
 ```
 
 ### Status Indicators
