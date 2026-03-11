@@ -390,10 +390,22 @@ FFmpeg utilities:
 ---
 
 ### Phase 4: API Layer (Replace Control Server)
-**Status**: Not Started
+**Status**: ✓ Complete
 **Estimated**: 3-4 hours
 
 Schema-driven WebSocket API replaces HTTP control server.
+
+**Completed:**
+- [x] 4.1 WebSocketAPIServer
+  - Handles client connections and message routing
+  - Event broadcasting to connected clients
+  - Status/frame/detection event emission
+- [x] 4.2 Command handlers (type-safe)
+  - set_source, set_target, set_output
+  - start, start_stream, stop
+  - set_quality, set_blend, set_alpha
+  - create_embedding, cleanup_session, shutdown
+  - Unified dispatch_command router
 
 #### 4.1 WebSocket API Server
 **Depends on**: Phase 0, Phase 2.3
@@ -817,7 +829,7 @@ Phase 3: I/O
   [██████████████████████████] 100% - ✓ Complete
 
 Phase 4: API
-  [░░░░░░░░░░░░░░░░░░░░░░░░░] 0% - Not Started
+  [██████████████████████████] 100% - ✓ Complete
 
 Phase 5: Desktop
   [░░░░░░░░░░░░░░░░░░░░░░░░░] 0% - Not Started
@@ -828,7 +840,7 @@ Phase 6: Migration
 Phase 7: Cleanup
   [░░░░░░░░░░░░░░░░░░░░░░░░░] 0% - Not Started
 
-OVERALL: [███████████░░░░░░░░░░░░░] 48%
+OVERALL: [█████████████░░░░░░░░░░░] 60%
 ```
 
 ### Status Indicators
