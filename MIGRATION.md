@@ -307,10 +307,19 @@ ProcessingPipeline:
 ---
 
 ### Phase 3: I/O Layer
-**Status**: Not Started
+**Status**: ✓ Complete
 **Estimated**: 2-3 hours
 
 Abstract input/output sources for flexibility.
+
+**Completed:**
+- [x] 3.1 InputSource ABC with 4 implementations
+  - WebcamInput, NetworkInput, FileInput, ImageSequenceInput
+- [x] 3.2 OutputSink ABC with 4 implementations
+  - FileOutput, HTTPFrameOutput, WebSocketOutput, RTMPOutput
+- [x] 3.3 FFmpeg utilities module
+  - Extracted from utilities.py with config-based parameters
+  - run_ffmpeg, detect_fps, extract_frames, create_video, restore_audio, etc.
 
 #### 3.1 Input Sources
 **Depends on**: Phase 0
@@ -805,7 +814,7 @@ Phase 2: Processing
   [██████████████████████████] 100% - ✓ Complete
 
 Phase 3: I/O
-  [░░░░░░░░░░░░░░░░░░░░░░░░░] 0% - Not Started
+  [██████████████████████████] 100% - ✓ Complete
 
 Phase 4: API
   [░░░░░░░░░░░░░░░░░░░░░░░░░] 0% - Not Started
@@ -819,7 +828,7 @@ Phase 6: Migration
 Phase 7: Cleanup
   [░░░░░░░░░░░░░░░░░░░░░░░░░] 0% - Not Started
 
-OVERALL: [█████████░░░░░░░░░░░░░░░] 36%
+OVERALL: [███████████░░░░░░░░░░░░░] 48%
 ```
 
 ### Status Indicators
