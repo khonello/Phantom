@@ -1,71 +1,181 @@
-Take a video and replace the face in it with a face of your choice. You only need one image of the desired face. No dataset, no training.
+# Phantom — Real-Time Face Swapping
 
-You can watch some demos [here](https://drive.google.com/drive/folders/1KHv8n_rd3Lcr2v7jBq1yPSTWM554Gq8e?usp=sharing). A StableDiffusion extension is also available, [here](https://github.com/s0md3v/sd-webui-roop).
+Replace faces in videos and images with a single reference image. No dataset, no training required.
+
+**Modern Architecture**: Event-driven, service-oriented design with WebSocket API, composable frame processors, and zero global state.
+
+**Key Features:**
+- Single-face and multi-face swapping
+- Real-time webcam processing
+- Batch video processing
+- Face enhancement (optional GFPGAN)
+- Face tracking for temporal consistency
+- Configurable quality presets (fast/optimal/production)
+- WebSocket API for integration
 
 ![demo-gif](demo.gif)
 
-## Disclaimer
-This software is meant to be a productive contribution to the rapidly growing AI-generated media industry. It will help artists with tasks such as animating a custom character or using the character as a model for clothing etc.
+## Installation
 
-The developers of this software are aware of its possible unethical applicaitons and are committed to take preventative measures against them. It has a built-in check which prevents the program from working on inappropriate media including but not limited to nudity, graphic content, sensitive material such as war footage etc. We will continue to develop this project in the positive direction while adhering to law and ethics. This project may be shut down or include watermarks on the output if requested by law.
+**Requirements:**
+- Python 3.9+
+- FFmpeg (for video processing)
+- CUDA (optional, for GPU acceleration)
 
-Users of this software are expected to use this software responsibly while abiding the local law. If face of a real person is being used, users are suggested to get consent from the concerned person and clearly mention that it is a deepfake when posting content online. Developers of this software will not be responsible for actions of end-users.
+**Quick Start:**
 
-## How do I install it?
+```bash
+# Clone the repository
+git clone <repo-url>
+cd Phantom
 
-**Issues regarding installation will be closed from now on, we cannot handle the amount of requests.**
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # or `venv\Scripts\activate` on Windows
 
-- **Basic:** It is more likely to work on your computer but it will also be very slow. You can follow instructions for the basic install [here](https://github.com/s0md3v/roop/wiki/1.-Installation).
+# Install dependencies
+pip install -r requirements.txt
 
-- **Acceleration:** If you have a good GPU and are ready for solving any software issues you may face, you can enable GPU which is wayyy faster. To do this, first follow the basic install instructions given above and then follow GPU-specific instructions [here](https://github.com/s0md3v/roop/wiki/2.-Acceleration).
+# Run headless engine
+python pipeline.py
 
-## How do I use it?
-> Note: When you run this program for the first time, it will download some models ~300MB in size.
+# Or run with GPU (if available)
+python pipeline.py --execution-provider cuda
+```
 
-Executing `python pipeline.py` command will launch this window:
-![gui-demo](gui-demo.png)
+**For Desktop GUI:**
+```bash
+python desktop.py
+```
 
-Choose a face (image with desired face) and the target image/video (image/video in which you want to replace the face) and click on `Start`. Open file explorer and navigate to the directory you select your output to be in. You will find a directory named `<video_title>` where you can see the frames being swapped in realtime. Once the processing is done, it will create the output file. That's it.
+See [Installation Guide](docs/INSTALLATION.md) for detailed instructions including GPU setup.
 
-## For the webcam mode
-Just follow the clicks on the screenshot
-1. Select a face
-2. Click live
-3. Wait for a few second (it takes a longer time, usually 10 to 30 seconds before the preview shows up)
+## Usage
 
-![roop-cam](roop-cam.gif)
+### Batch Mode (CLI)
 
-Just use your favorite screencapture to stream like OBS
-> Note: In case you want to change your face, just select another picture, the preview mode will then restart (so just wait a bit).
+Process a video in one command:
 
+```bash
+python pipeline.py \
+  -s <source_image> \
+  -t <target_video> \
+  -o <output_path>
 
-Additional command line arguments are given below. To learn out what they do, check [this guide](https://github.com/s0md3v/roop/wiki/Advanced-Options).
+# Example:
+python pipeline.py \
+  -s face.jpg \
+  -t video.mp4 \
+  -o output.mp4
+```
+
+### Stream Mode (Real-Time Webcam)
+
+```bash
+# Start pipeline engine
+python pipeline.py --input-url 0  # Use webcam 0
+
+# In another terminal, open desktop GUI
+python desktop.py
+```
+
+Select a source face image, click "Live", and the preview will show real-time face-swapped video.
+
+### Desktop GUI
+
+```bash
+python desktop.py
+```
+
+The GUI supports both batch and stream modes with:
+- Source image selection
+- Quality presets (fast/optimal/production)
+- Blend controls
+- Tracker selection
+- Live preview and frame serving
+
+## Command-Line Options
 
 ```
+usage: pipeline.py [-h] [-s SOURCE_PATH] [-t TARGET_PATH] [-o OUTPUT_PATH]
+                   [--keep-fps] [--keep-audio] [--keep-frames] [--many-faces]
+                   [--video-encoder {libx264,libx265,libvpx-vp9}]
+                   [--video-quality [0-51]] [--max-memory MAX_MEMORY]
+                   [--execution-provider {cpu,cuda,rocm,dml}]
+                   [--execution-threads EXECUTION_THREADS]
+                   [--quality {fast,optimal,production}]
+                   [--tracker {csrt,kcf,mosse}]
+                   [--alpha ALPHA] [--blend BLEND]
+                   [--input-url INPUT_URL] [--control-port PORT]
+                   [-v]
+
 options:
-  -h, --help                                               show this help message and exit
-  -s SOURCE_PATH, --source SOURCE_PATH                     select an source image
-  -t TARGET_PATH, --target TARGET_PATH                     select an target image or video
-  -o OUTPUT_PATH, --output OUTPUT_PATH                     select output file or directory
-  --frame-processor FRAME_PROCESSOR [FRAME_PROCESSOR ...]  frame processors (choices: face_swapper, face_enhancer, ...)
-  --keep-fps                                               keep original fps
-  --keep-audio                                             keep original audio
-  --keep-frames                                            keep temporary frames
-  --many-faces                                             process every face
-  --video-encoder {libx264,libx265,libvpx-vp9}             adjust output video encoder
-  --video-quality [0-51]                                   adjust output video quality
-  --max-memory MAX_MEMORY                                  maximum amount of RAM in GB
-  --execution-provider {cpu} [{cpu} ...]                   available execution provider (choices: cpu, ...)
-  --execution-threads EXECUTION_THREADS                    number of execution threads
-  -v, --version                                            show program's version number and exit
+  -s, --source              Source image or embedding (.npy file)
+  -t, --target              Target image or video
+  -o, --output              Output file or directory
+  --keep-fps                Preserve original frame rate
+  --keep-audio              Preserve original audio
+  --keep-frames             Keep temporary extracted frames
+  --many-faces              Process all faces (not just largest)
+  --video-encoder           Encoder: libx264 (default), libx265, libvpx-vp9
+  --video-quality           Quality 0-51 (default 18, lower=better)
+  --max-memory              Max RAM in GB (default 16)
+  --execution-provider      GPU provider: cpu, cuda, rocm, dml
+  --execution-threads       Worker threads (default 8)
+  --quality                 Preset: fast, optimal (default), production
+  --tracker                 Face tracking: csrt (default), kcf, mosse
+  --alpha                   EMA smoothing 0.0-1.0 (default 0.6)
+  --blend                   Swap blend 0.0-1.0 (default 0.65)
+  --input-url               Network stream URL (RTSP/RTMP/HTTP)
+  --control-port            API server port (default 9000)
+  -v, --version             Show version
 ```
 
-Looking for a CLI mode? Using the -s/--source argument will make the run program in cli mode.
+See [Usage Guide](docs/USAGE.md) for detailed examples and advanced options.
+
+## Development
+
+### Project Structure
+
+See [CLAUDE.md](CLAUDE.md) for:
+- Architecture documentation
+- Code style guidelines
+- Type checking and linting requirements
+- PR guidelines and contribution standards
+
+See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for:
+- Setting up development environment
+- Running tests
+- Extending with new processors or services
+- Performance profiling
+
+### Type Safety & Code Quality
+
+```bash
+# Type checking (strict mode)
+mypy pipeline.py pipeline desktop
+
+# Linting
+flake8 pipeline.py pipeline desktop
+
+# Run test
+python pipeline.py -s=.github/examples/source.jpg -t=.github/examples/target.mp4 -o=/tmp/test.mp4
+```
+
+## Disclaimer
+
+This software is designed for artistic and productive use cases. Users are responsible for:
+- Obtaining consent from individuals whose faces are used
+- Complying with local laws and regulations
+- Clearly disclosing deepfake content when shared online
+
+The developers are committed to ethical use and will comply with takedown requests.
 
 ## Credits
-- [henryruhs](https://github.com/henryruhs): for being an irreplaceable contributor to the project
-- [ffmpeg](https://ffmpeg.org/): for making video related operations easy
-- [deepinsight](https://github.com/deepinsight): for their [insightface](https://github.com/deepinsight/insightface) project which provided a well-made library and models.
-- [havok2-htwo](https://github.com/havok2-htwo) : for sharing the code for webcam
-- [GosuDRM](https://github.com/GosuDRM/nsfw-roop) : for uncensoring roop
-- and all developers behind libraries used in this project.
+
+Built with:
+- [InsightFace](https://github.com/deepinsight/insightface) — Face detection and analysis
+- [ONNX Runtime](https://onnxruntime.ai/) — Model inference
+- [FFmpeg](https://ffmpeg.org/) — Video encoding/decoding
+- [OpenCV](https://opencv.org/) — Computer vision utilities
+- [GFPGAN](https://github.com/TencentARC/GFPGAN) — Face enhancement (optional)

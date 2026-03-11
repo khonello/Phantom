@@ -1,14 +1,14 @@
 # Development Guide
 
-This guide covers setting up your development environment, running tests, and contributing to roop-cam.
+This guide covers setting up your development environment, running tests, and contributing to Phantom.
 
 ## Development Setup
 
 ### 1. Clone & Environment
 
 ```bash
-git clone https://github.com/s0md3v/roop-cam.git
-cd roop-cam
+git clone <repo-url>
+cd Phantom
 
 # Create virtual environment
 python -m venv venv
@@ -23,41 +23,52 @@ source venv/bin/activate
 ### 2. Install Dependencies
 
 ```bash
-# Development dependencies (includes testing/linting tools)
-pip install -r requirements-pipeline-cpu.txt
+# Install base dependencies
+pip install -r requirements.txt
 
-# OR if using GPU:
-pip install -r requirements-pipeline-gpu.txt
+# For development (adds mypy, flake8, pytest)
+pip install -r requirements-ci.txt
 
-# Desktop controller only (no AI/ML needed):
-pip install -r requirements-desktop.txt
-# Currently stdlib-only — no additional packages required.
-# When the Qt QML interface is added, PySide6>=6.5.0 will be required.
+# For GPU support (optional)
+# CUDA:
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+pip install onnxruntime-gpu
+
+# OR ROCm (AMD):
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm5.7
+pip install onnxruntime-training
 ```
 
 ### 3. Verify Installation
 
-First, ensure the face swap model is available in `models/inswapper_128.onnx` (it will auto-download on first run if network allows).
+Models are auto-downloaded on first run. Verify the environment:
 
-Run the test suite:
 ```bash
-python pipeline.py -s .github/examples/source.jpg -t .github/examples/target.mp4 -o .github/examples/output.mp4
+# Test imports
+python -c "from pipeline.config import CONFIG; from pipeline.events import BUS; print('OK')"
+
+# Run full test with example files
+python pipeline.py -s .github/examples/source.jpg -t .github/examples/target.mp4 -o /tmp/test.mp4
 ```
 
-This processes example files and ensures the environment is working.
-
 ## Code Quality
+
+### Type Checking (mypy)
+
+Strict type checking is enforced. Run before committing:
+
+```bash
+mypy pipeline.py pipeline desktop
+```
+
+All functions and methods must have complete type annotations. No `# type: ignore` without justification.
 
 ### Linting with flake8
 
 Check code style (E3, E4, F rules):
 
 ```bash
-# Pipeline code
-flake8 pipeline.py roop
-
-# Desktop controller code (lint alongside pipeline)
-flake8 pipeline.py roop desktop desktop.py
+flake8 pipeline.py pipeline desktop
 ```
 
 **Key Rules:**

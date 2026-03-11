@@ -2,65 +2,135 @@
 
 ## System Design
 
-roop-cam is a face-swapping application with two main components:
+Phantom is a modern, event-driven face-swapping application refactored for composability and testability.
 
 ### 1. Pipeline Engine (`pipeline/`)
 
-The headless processing engine that:
-- Detects faces using InsightFace
-- Performs face swapping with ONNX models
-- Runs in real-time or batch mode
-- Communicates via HTTP on port 9000
+**Event-driven, service-oriented processing:**
+- Detects faces using InsightFace (FaceDetector service)
+- Performs face swapping with ONNX models (FaceSwapper service)
+- Runs in real-time or batch mode via ProcessingPipeline
+- Communicates via WebSocket on port 9000 (async, no polling)
 
-**Key modules:**
-- `pipeline/core.py` — Argument parsing and entry point
-- `pipeline/globals.py` — Shared application state
-- `pipeline/face_analyser.py` — Face detection (InsightFace)
-- `pipeline/predicter.py` — High-level prediction API
-- `pipeline/processors/frame/` — Frame processing (face swap, enhancement)
-- `pipeline/stream.py` — Real-time webcam processing loop
-- `pipeline/control.py` — HTTP control server and frame serving
-- `pipeline/utilities.py` — Video/image utilities (FFmpeg, frame extraction)
+**Core Layers:**
+
+**Configuration & Infrastructure:**
+- `pipeline/config.py` — Observable FaceSwapConfig (no global state)
+- `pipeline/events.py` — EventBus pub/sub system (inter-module communication)
+- `pipeline/logging.py` — Structured logging with event emission
+- `pipeline/types.py` — Typed dataclasses (Detection, VideoProperties, etc.)
+
+**Services (ML/CV):**
+- `pipeline/services/face_detection.py` — InsightFace wrapper
+- `pipeline/services/face_swapping.py` — ONNX face swap model
+- `pipeline/services/enhancement.py` — GFPGAN enhancement (optional)
+- `pipeline/services/face_tracking.py` — OpenCV tracking state
+- `pipeline/services/database.py` — Embedding cache & averaging
+
+**Processing Pipeline:**
+- `pipeline/processing/pipeline.py` — Main orchestrator (batch & stream modes)
+- `pipeline/processing/frame_processor.py` — Composable processor chain
+- `pipeline/processing/async_processor.py` — Background processing wrapper
+
+**I/O Layer:**
+- `pipeline/io/capture.py` — Abstract input sources (webcam, file, network)
+- `pipeline/io/output.py` — Abstract output sinks (file, HTTP, WebSocket)
+- `pipeline/io/ffmpeg.py` — FFmpeg utilities
+
+**API & Control:**
+- `pipeline/api/server.py` — WebSocket API server (replaces HTTP control)
+- `pipeline/api/handlers.py` — Type-safe command handlers
+- `pipeline/api/schema.py` — Message types and constants
+
+**Entry Points:**
+- `pipeline/core.py` — CLI argument parsing and orchestration (~100 lines)
+- `pipeline/stream.py` — Stream mode convenience wrapper (~57 lines)
 
 ### 2. Desktop GUI (`desktop/`)
 
-A Qt/QML interface that:
-- Provides user controls (source selection, quality, start/stop)
-- Displays live preview via WebSocket
-- Sends webcam frames to the pipeline
+A modern interface that:
+- Provides user controls (source selection, quality presets, start/stop)
+- Displays live preview via WebSocket events
+- Sends commands via WebSocket (no polling)
 - Manages virtual camera output for video calls
-- Communicates with pipeline via HTTP + WebSocket
 
 **Key modules:**
-- `desktop/main.qml` — UI layout and interactions
-- `desktop/bridge.py` — Qt/Python integration and pipeline communication
-- `desktop/controller.py` — HTTP client for pipeline API
+- `desktop/ui.py` — CustomTkinter interface
+- `desktop/bridge.py` — Signal mapping and WebSocket event subscription
+- `desktop/controller.py` — WebSocket client for pipeline API
 
-## Data Flow
+## Data Flow (Event-Driven)
 
 ```
-┌──────────────────────────────────────────────┐
-│          Desktop GUI (Qt/QML)                │
-│  - User selects face image                   │
-│  - Clicks START                              │
-└─────────────────┬──────────────────────────┬─┘
-                  │                          │
-          HTTP POST               WebSocket JPEG
-       /control, /status          (binary frames)
-                  │                          │
-                  ▼                          ▼
-         ┌─────────────────────────────────────┐
-         │    Pipeline Engine (Python)         │
-         │  - Face detection (InsightFace)     │
-         │  - Face swapping (ONNX)             │
-         │  - Real-time processing loop        │
-         │  - WebSocket frame broadcast        │
-         └─────────────────────────────────────┘
-                  ▲
-                  │
-           Webcam / Input URL
-         (OpenCV VideoCapture)
+┌──────────────────────────────┐
+│    Desktop GUI               │
+│  - User selects source       │
+│  - Sends command via WS      │
+└──────────────┬───────────────┘
+               │ WebSocket command
+               ▼
+    ┌──────────────────────────┐
+    │  WebSocketAPIServer      │
+    │  - Routes commands       │
+    │  - Broadcasts events     │
+    └──────────┬───────────────┘
+               │
+    ┌──────────▼───────────────┐
+    │  ProcessingPipeline      │
+    │  - Orchestrates services │
+    │  - Emits FRAME_READY,    │
+    │    DETECTION, etc.       │
+    └──────────┬───────────────┘
+               │ EventBus (pub/sub)
+    ┌──────────▼───────────────┐
+    │  frame_processor chain    │
+    │  - Detection              │
+    │  - Tracking              │
+    │  - Swapping              │
+    │  - Enhancement           │
+    │  - Blending              │
+    └──────────┬───────────────┘
+               │
+    ┌──────────▼───────────────┐
+    │  Events back to server   │
+    │  → WebSocket broadcast   │
+    │  → Desktop receives      │
+    └──────────────────────────┘
+
+    ┌──────────────────────────┐
+    │  Input Sources           │
+    │  - Webcam                │
+    │  - File                  │
+    │  - Network Stream        │
+    └──────────────────────────┘
 ```
+
+## Key Design Principles
+
+**1. Observable Configuration**
+- Single source of truth: `CONFIG` dataclass
+- Changes propagate via `CONFIG.on_change()` callbacks
+- No hidden mutable state
+
+**2. Event-Driven Communication**
+- Inter-module communication via `EventBus`
+- Decoupled publishers and subscribers
+- No direct module imports for side effects
+
+**3. Composable Processing**
+- `FrameProcessor` ABC with 5 implementations
+- Chain without modification or side effects
+- Easy to add new processors (color correction, face morphing, etc.)
+
+**4. Service-Oriented**
+- Each service has one responsibility
+- Pure interfaces (deterministic, testable)
+- Lazy initialization (models load on demand)
+
+**5. Type-Safe API**
+- All commands and responses are typed dataclasses
+- mypy strict mode enforced
+- Validation at system boundaries
 
 ## Virtual Camera Integration
 
