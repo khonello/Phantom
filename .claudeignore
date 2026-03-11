@@ -1,0 +1,43 @@
+# Large model files and data
+models/
+*.bin
+*.pth
+*.pt
+*.onnx
+*.pb
+*.h5
+*.pkl
+
+# Large output files
+output/
+*.mp4
+*.mov
+*.avi
+*.mkv
+
+# Python cache and virtual environments
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+env/
+Python_3_12_0venv/
+environ/
+
+# IDE and editor cache
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Temporary files
+temp/
+tmp/
+*.tmp
+.DS_Store
+
+# Large generated files
+*.heapsnapshot
+*-diagnostics.json

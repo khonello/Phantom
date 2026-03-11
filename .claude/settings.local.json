@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python:*)",
-      "Bash(do python:*)",
-      "Bash(mv roop:*)"
-    ]
-  }
-}
