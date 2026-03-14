@@ -126,20 +126,25 @@ class TrackingProcessor(FrameProcessor):
         self._frame_count = 0
         self.latest_detection: Optional[Detection] = None
 
-    def set_tracked_face(self, detection: Detection) -> None:
+    def set_tracked_face(self, detection: Detection, frame: Optional[Frame] = None) -> None:
         """
         Initialize tracking with a detected face.
 
-        Called by upstream processor when face is detected.
+        Called by upstream processor or pipeline when face is detected.
+        Pass `frame` to immediately initialize the CV2 tracker; without it
+        the tracker is created but stays uninitialized until the next process() call.
 
         Args:
             detection: Detection to track
+            frame: Current frame (required to initialize the CV2 tracker)
         """
         self._tracker = FaceTrackerState(
             tracker_type=self.config.tracker,
             ema_alpha=self.config.alpha,
         )
         self.latest_detection = detection
+        if frame is not None:
+            self._tracker.initialize(frame, detection)
 
     def process(self, frame: Frame) -> Frame:
         """
@@ -153,25 +158,23 @@ class TrackingProcessor(FrameProcessor):
         """
         self._frame_count += 1
 
-        # If no tracker, try to initialize from detection
+        # If no valid tracker, nothing to do this frame
         if self._tracker is None or not self._tracker.is_valid:
-            # Request re-detection from upstream
             return frame
 
         # Try to update tracker
         if self._tracker.update(frame):
-            # Tracker is still valid
             pass
         else:
             # Tracker lost face
             self.latest_detection = None
             self._tracker.reset()
 
-        # Re-detect periodically to handle missed frames
+        # Re-detect periodically to handle drift / re-entry
         if self._frame_count % self.redetect_interval == 0:
             det = self.detector.detect_one(frame)
             if det:
-                self.set_tracked_face(det)
+                self.set_tracked_face(det, frame)
 
         return frame
 

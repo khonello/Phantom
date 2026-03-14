@@ -180,8 +180,10 @@ class FaceDatabase:
         if not hasattr(face, 'normed_embedding'):
             return
 
-        # Create directory if needed
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # Create directory if needed (dirname is '' for bare filenames)
+        dir_name = os.path.dirname(path)
+        if dir_name:
+            os.makedirs(dir_name, exist_ok=True)
 
         try:
             np.save(path, face.normed_embedding)

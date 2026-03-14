@@ -4,6 +4,26 @@ Step-by-step instructions for deploying Phantom to RunPod.io for GPU-accelerated
 
 ---
 
+## Table of Contents
+
+1. [GPU Tier Recommendations](#gpu-tier-recommendations)
+2. [First-Time Setup](#first-time-setup)
+   - [Step 1: Create a Pod](#step-1-create-a-pod)
+   - [Step 2: Set Up SSH Access](#step-2-set-up-ssh-access)
+   - [Step 3: Connect to the Pod](#step-3-connect-to-the-pod)
+   - [Step 4: Fix DNS (if needed)](#step-4-fix-dns-if-needed)
+   - [Step 5: Install Phantom](#step-5-install-phantom)
+   - [Step 6: Start the Pipeline](#step-6-start-the-pipeline)
+   - [Step 7: Connect the Desktop GUI](#step-7-connect-the-desktop-gui)
+3. [Reconnecting to a New Pod](#reconnecting-to-a-new-pod)
+4. [WebSocket Protocol](#websocket-protocol)
+5. [Troubleshooting](#troubleshooting)
+6. [Cost Optimization](#cost-optimization)
+7. [Security Notes](#security-notes)
+8. [Production Checklist](#production-checklist)
+
+---
+
 ## GPU Tier Recommendations
 
 | GPU | VRAM | Use Case | Est. Cost/hr |
@@ -17,14 +37,16 @@ Step-by-step instructions for deploying Phantom to RunPod.io for GPU-accelerated
 
 ---
 
-## Step 1: Create a Pod
+## First-Time Setup
+
+### Step 1: Create a Pod
 
 1. Go to [RunPod.io](https://runpod.io) → **Deploy** → **GPU Pod**
 2. Choose your GPU tier (RTX 4090 recommended)
 3. Select the **PyTorch template** — this pre-installs PyTorch, CUDA, and JupyterLab
 4. Click **Customize Deployment** to open **Pod Template Overrides**
 
-### Pod Template Overrides
+#### Pod Template Overrides
 
 Configure the following before deploying:
 
@@ -45,7 +67,7 @@ Configure the following before deploying:
 
 ---
 
-## Step 2: Set Up SSH Access
+### Step 2: Set Up SSH Access
 
 Once the pod is running, the **Connect** tab will show an SSH setup prompt. Do this — it gives you a reliable terminal that doesn't break when your browser tab closes.
 
@@ -71,17 +93,15 @@ ssh sipo66pbzzdcir-64411f5f@ssh.runpod.io -i ~/.ssh/id_ed25519
 
 Use that exact command — it routes through RunPod's SSH proxy and is more reliable than the direct IP.
 
-> **Note**: The Connect tab also shows a **Direct TCP Ports** section at the bottom. It looks like: `213.192.2.110:40152 → :9000`. The left side (`213.192.2.110:40152`) is the public address RunPod assigned to your pod's port 9000. The right side (`:9000`) is the internal port inside the pod. You will use the left side value for `PHANTOM_API_URL` (see Step 7).
+> **Note**: The Connect tab also shows a **Direct TCP Ports** section at the bottom. It looks like: `213.192.2.110:40152 → :9000`. The left side (`213.192.2.110:40152`) is the public address RunPod assigned to your pod's port 9000. You will use this for `PHANTOM_API_URL` (see Step 7).
 
 ---
 
-## Step 3: Connect to the Pod
+### Step 3: Connect to the Pod
 
 Wait for JupyterLab to show **Ready** (green dot) on the Connect tab, then SSH in:
 
 ```bash
-# Format: ssh <pod-id>-<hash>@ssh.runpod.io -i ~/.ssh/id_ed25519
-# Example:
 ssh sipo66pbzzdcir-64411f5f@ssh.runpod.io -i ~/.ssh/id_ed25519
 ```
 
@@ -93,7 +113,7 @@ cd /workspace
 
 ---
 
-## Step 4: Fix DNS (if needed)
+### Step 4: Fix DNS (if needed)
 
 > **Known issue**: Some RunPod pods start with broken DNS, blocking `git clone` and `pip install`.
 
@@ -114,7 +134,7 @@ Retry the curl after fixing. If it still fails, terminate the pod and create a n
 
 ---
 
-## Step 5: Install Phantom
+### Step 5: Install Phantom
 
 ```bash
 cd /workspace
@@ -136,7 +156,7 @@ pip install -r requirements-pipeline-gpu.txt
 > ```
 > Generate a token at GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic) → repo scope.
 
-### Known dependency issues
+#### Known dependency issues
 
 **numpy conflict (Python 3.11)**
 
@@ -161,7 +181,7 @@ python -c "import torch; import cv2; import insightface; print('OK')"
 
 ---
 
-## Step 6: Start the Pipeline
+### Step 6: Start the Pipeline
 
 **Always use tmux** — if you run the pipeline directly in the SSH terminal and your connection drops (WiFi loss, laptop sleep, etc.), the process dies and you lose the session. tmux keeps it running independently.
 
@@ -176,7 +196,7 @@ python pipeline.py --stream --execution-provider cuda
 # Reattach later: tmux attach -t phantom
 ```
 
-### If the process is stuck / won't respond to Ctrl+C
+#### If the process is stuck / won't respond to Ctrl+C
 
 This happens when an SSH session disconnects mid-run (e.g. WiFi drops). Reconnect and kill it:
 
@@ -195,7 +215,7 @@ python pipeline.py --stream --execution-provider cuda
 
 **Always use `--execution-provider cuda` on RunPod** — you are paying for a GPU, use it.
 
-### `--execution-provider` explained
+#### `--execution-provider` explained
 
 | Command | Provider | Inference runs on | Expected latency |
 |---------|----------|-------------------|-----------------|
@@ -206,7 +226,7 @@ python pipeline.py --stream --execution-provider cuda
 
 **What to expect with `--cuda`**: Face detection and the ONNX swap model both run on the GPU. Frame processing is fast enough for real-time display. You will see `Applied providers: ['CUDAExecutionProvider']` in the logs confirming GPU is active.
 
-### Expected startup output (with CUDA)
+#### Expected startup output (with CUDA)
 
 ```
 [CORE] INFO: GPU available: NVIDIA GeForce RTX 3090
@@ -220,13 +240,11 @@ Applied providers: ['CUDAExecutionProvider'], with options: {...}
 
 > **First run only**: InsightFace will download `buffalo_l.zip` (~275MB) on first start. This is a one-time download — it caches to `/workspace/models/insightface/` on the Network Volume and will not re-download on subsequent pod starts.
 
-> Use `--stream` for real-time mode. Without it, the pipeline runs in batch mode and exits after processing a file.
-
 ---
 
-## Step 7: Connect the Desktop GUI
+### Step 7: Connect the Desktop GUI
 
-### Finding your connection URL
+#### Finding your connection URL
 
 1. Go to your pod on RunPod → click **Connect**
 2. Scroll to the **Direct TCP Ports** section at the bottom
@@ -235,7 +253,7 @@ Applied providers: ['CUDAExecutionProvider'], with options: {...}
    - `40152` — the public port RunPod assigned to your internal port 9000
    - This mapping changes every time you restart the pod — always check here for the current value
 
-### Set up your local `.env`
+#### Set up your local `.env`
 
 On your **local machine**, in the root of the Phantom project:
 
@@ -253,11 +271,80 @@ PHANTOM_API_URL=ws://213.192.2.110:40152/ws
 
 > Use `ws://` with the direct TCP address. The RunPod proxy URL (`wss://<pod-id>-9000.proxy.runpod.net/ws`) also works but the direct TCP connection is lower latency.
 
-### Start the desktop
+#### Start the desktop
 
 ```bash
 python desktop.py
 ```
+
+---
+
+## Reconnecting to a New Pod
+
+When you **delete a pod and create a new one**, two things change: the pod's SSH host key and its public IP/port. Both need to be refreshed on your local machine.
+
+### 1 — Remove the old host key
+
+Every pod has a unique SSH host key. When you connect to a new pod at the same address, SSH will refuse with **"WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED"** and refuse to connect. Clear the old entry first:
+
+```bash
+# If you used the RunPod SSH proxy URL:
+ssh-keygen -R "ssh.runpod.io"
+
+# If you used a direct IP (replace with the old pod's actual IP):
+ssh-keygen -R "[213.192.2.110]:40152"
+```
+
+Or open `~/.ssh/known_hosts` and manually delete the line that contains the old pod's address.
+
+> **Your private key stays the same** — do not delete `~/.ssh/id_ed25519`. Only the known_hosts entry changes.
+
+On your first SSH connection to the new pod, you will be prompted:
+
+```
+The authenticity of host 'ssh.runpod.io' can't be established.
+Are you sure you want to continue connecting (yes/no)?
+```
+
+Type `yes` — this adds the new pod's host key to `known_hosts`.
+
+### 2 — Get the new connection details
+
+The new pod will have a different SSH command and a different Direct TCP address. From the RunPod **Connect** tab:
+
+- Copy the new SSH command (new pod ID / hash)
+- Scroll to **Direct TCP Ports** and note the new public IP and port for `PHANTOM_API_URL`
+
+### 3 — Update your local `.env`
+
+Open `.env` and update `PHANTOM_API_URL` with the new pod's address:
+
+```
+PHANTOM_API_URL=ws://<new-ip>:<new-port>/ws
+```
+
+### 4 — Re-install Phantom on the new pod
+
+The **container disk is wiped** when a pod is deleted. The **Network Volume** (`/workspace`) persists — your model cache survives. On the new pod:
+
+```bash
+cd /workspace
+git clone https://github.com/khonello/Phantom.git   # or git pull if already cloned
+cd Phantom
+bash runpod/startup.sh
+pip install -r requirements-pipeline-gpu.txt
+```
+
+Models in `/workspace/models/insightface/` are already there from the previous session — no re-download needed.
+
+### Quick reconnect checklist
+
+- [ ] Removed old host key from `~/.ssh/known_hosts`
+- [ ] Accepted new host key on first SSH connection
+- [ ] Updated `PHANTOM_API_URL` in local `.env` with new pod's Direct TCP address
+- [ ] Re-cloned / pulled repo on new pod (container disk was wiped)
+- [ ] `runpod/startup.sh` and `pip install` completed
+- [ ] Pipeline started in tmux with `--execution-provider cuda`
 
 ---
 
@@ -298,6 +385,16 @@ echo "nameserver 8.8.8.8" > /etc/resolv.conf
 ```
 If this doesn't work, terminate and recreate the pod.
 
+### SSH refuses connection — "REMOTE HOST IDENTIFICATION HAS CHANGED"
+
+You deleted the old pod and the new one has a different host key. Remove the stale entry:
+```bash
+ssh-keygen -R "ssh.runpod.io"
+# or for direct IP:
+ssh-keygen -R "[<old-ip>]:<old-port>"
+```
+Then reconnect and accept the new host key.
+
 ### Port 9000 not reachable
 
 1. Confirm port 9000 is in **Expose TCP Ports** (not HTTP Ports) in pod settings
@@ -318,9 +415,11 @@ python pipeline.py --stream --execution-provider cpu
 
 Models auto-download on first run to `/workspace/models/insightface/`. If the Network Volume is attached at `/workspace`, they persist across pod restarts. If you see repeated downloads every start, check the volume is mounted correctly.
 
-### Connection drop / disconnection
+### Desktop shows "disconnected — reconnecting..."
 
-The desktop client uses exponential backoff reconnection. Check `PHANTOM_API_URL` is correct and the pipeline is still running on the pod.
+- Check `PHANTOM_API_URL` matches the current pod's Direct TCP address (changes on every new pod)
+- Confirm the pipeline is still running on the pod (`tmux attach -t phantom`)
+- The desktop client will automatically reconnect once the URL is correct and the server is up
 
 ### First frame spike (1–3s delay)
 
@@ -347,6 +446,7 @@ Expected on first run — models load on first frame. Subsequent frames will be 
 
 ## Production Checklist
 
+### First-time setup
 - [ ] Pod created with correct GPU and disk size
 - [ ] Port 9000 in **Expose TCP Ports** in pod settings
 - [ ] Network Volume attached at `/workspace` (20GB+)
@@ -360,3 +460,11 @@ Expected on first run — models load on first frame. Subsequent frames will be 
 - [ ] `PHANTOM_API_URL` set on local machine
 - [ ] Desktop connects and frames appear in preview
 - [ ] Health check passes: `{"action": "health"}` returns `{"status": "healthy", ...}`
+
+### Reconnecting after pod deletion
+- [ ] Old host key removed from `~/.ssh/known_hosts`
+- [ ] New host key accepted on first SSH connection
+- [ ] `PHANTOM_API_URL` updated in local `.env`
+- [ ] Repo re-cloned / pulled on new pod
+- [ ] `runpod/startup.sh` and `pip install` re-run
+- [ ] Pipeline running in tmux with `--execution-provider cuda`

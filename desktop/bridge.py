@@ -306,16 +306,36 @@ class Bridge(QObject):
             return
         self._source_thumbnail = valid[0].replace('\\', '/')
         if len(valid) == 1:
-            self._client.set_source(valid[0])
             self._source_label = self._source_thumbnail.split('/')[-1]
             self._set_source_set(True)
             self._set_status(f'face set: {self._source_label}')
+            # Run off the main thread — _send() blocks for a network round-trip
+            threading.Thread(
+                target=self._client.set_source,
+                args=(valid[0],),
+                daemon=True,
+            ).start()
         else:
             self._source_label = f'{len(valid)} faces · averaged'
             self._set_source_set(True)
             self._set_embedding_pending(True)
             self._set_status(f'creating embedding from {len(valid)} images...')
-            self._client.create_embedding(valid)
+
+            def _do_embedding(paths: List[str]) -> None:
+                # Run off the Qt main thread — _send() blocks while waiting
+                # for the server response; blocking here would freeze the UI.
+                result = self._client.create_embedding(paths)
+                # Clear pending state based on the server's direct response —
+                # this is more reliable than watching for a status string match.
+                if result.get('success', False):
+                    self._set_embedding_pending(False)
+                    self._set_status('embedding ready')
+                else:
+                    error = result.get('error', 'embedding failed')
+                    self._set_embedding_pending(False)
+                    self._set_status(f'embedding error: {error}')
+
+            threading.Thread(target=_do_embedding, args=(valid,), daemon=True).start()
 
     @Slot()
     def resetSource(self) -> None:
@@ -405,19 +425,10 @@ class Bridge(QObject):
         event = data.get('event', '')
         if event == 'STATUS_CHANGED':
             message = data.get('message', '')
-            if message:
-                # Check embedding readiness from status message
-                if self._embedding_pending:
-                    if 'embedding' in message.lower() and 'ready' in message.lower():
-                        self._set_embedding_pending(False)
-                        self._set_status('embedding ready')
-                    elif 'no face detected' in message.lower():
-                        self._set_embedding_pending(False)
-                        self._set_status('no face detected in selected images')
-                    else:
-                        self._set_status(message)
-                elif not self._pipeline_running:
-                    self._set_status(message)
+            # Show status messages only when the pipeline is not running
+            # (avoids drowning the UI in per-frame debug messages during a run)
+            if message and not self._pipeline_running:
+                self._set_status(message)
         elif event == 'PIPELINE_STARTED':
             self._set_pipeline_running(True)
         elif event == 'PIPELINE_STOPPED':

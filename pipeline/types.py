@@ -135,8 +135,8 @@ class VideoProperties:
     fps: float
 
     @property
-    def frame_count(self) -> int:
-        """Return frame dimensions as tuple."""
+    def frame_size(self) -> tuple:
+        """Return frame dimensions as (height, width) tuple."""
         return (self.height, self.width)
 
     def to_dict(self) -> dict:

@@ -206,7 +206,12 @@ class ProcessingPipeline:
             [self.config.source_path] if self.config.source_path else []
         )
         if sources:
-            self._swapping_proc.set_source(sources)
+            if not self._swapping_proc.set_source(sources):
+                emit_error(
+                    'No face detected in source image(s) — stream will run '
+                    'without face swapping until a valid source is set',
+                    scope='PIPELINE',
+                )
 
         # Start async enhancement
         self._async_enhancement.start()
@@ -252,9 +257,11 @@ class ProcessingPipeline:
                 # Run tracking (and swap if we have detections)
                 if detections:
                     for detection in detections:
-                        # Initialize or update tracker
-                        if not self._tracking_proc._tracker or not self._tracking_proc._tracker.is_valid:
-                            self._tracking_proc.set_tracked_face(detection)
+                        # Initialize tracker if not already tracking a face.
+                        # Pass the current frame so the CV2 tracker is initialized
+                        # immediately — without it, update() always returns False.
+                        if self._tracking_proc.get_tracked_detection() is None:
+                            self._tracking_proc.set_tracked_face(detection, frame)
 
                 frame = self._tracking_proc.process(frame)
                 tracked = self._tracking_proc.get_tracked_detection()

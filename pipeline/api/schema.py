@@ -128,6 +128,9 @@ class ResponseMessage(APIMessage):
 
     def to_dict(self) -> Dict[str, Any]:
         result = super().to_dict()
+        # Include 'action' so _dispatch_message() can route by key without
+        # relying on 'type' as a fallback. Both fields carry the command name.
+        result['action'] = self.type
         result['success'] = self.success
         if self.request_id:
             result['request_id'] = self.request_id

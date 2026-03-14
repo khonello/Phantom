@@ -489,14 +489,18 @@ def handle_set_input_url(config: FaceSwapConfig, url: str) -> ResponseMessage:
 
 def handle_create_embedding(config: FaceSwapConfig, paths: List[str]) -> ResponseMessage:
     """
-    Create and save face embedding from source paths.
+    Set source face paths for averaging (multi-image embedding).
+
+    Validates all paths, sets source_paths on config (so the pipeline loads
+    and averages them at stream start), then emits an 'Embedding ready' status
+    so the desktop bridge can clear its pending indicator.
 
     Args:
         config: FaceSwapConfig
         paths: Source image paths
 
     Returns:
-        ResponseMessage with success status and embedding path
+        ResponseMessage with success status
     """
     if not paths:
         return ResponseMessage(
@@ -506,24 +510,31 @@ def handle_create_embedding(config: FaceSwapConfig, paths: List[str]) -> Respons
             error='No source paths provided',
         )
 
-    if not config.save_embedding_path:
-        return ResponseMessage(
-            type='create_embedding',
-            data={'paths': paths},
-            success=False,
-            error='save_embedding_path not configured',
-        )
+    for path in paths:
+        if not os.path.exists(path):
+            return ResponseMessage(
+                type='create_embedding',
+                data={'paths': paths},
+                success=False,
+                error=f'Source path does not exist: {path}',
+            )
+        if not is_image(path):
+            return ResponseMessage(
+                type='create_embedding',
+                data={'paths': paths},
+                success=False,
+                error=f'Source must be an image file: {path}',
+            )
 
     try:
-        # Note: Actual embedding creation requires access to pipeline services
-        # This handler just validates and prepares config
         config.set('source_paths', paths)
         config.set('embedding_ready', True)
-        emit_status(f'Embedding prepared for {len(paths)} sources', scope='API')
+        # 'Embedding ready' matches bridge.py's status detection pattern
+        emit_status('Embedding ready', scope='API')
 
         return ResponseMessage(
             type='create_embedding',
-            data={'paths': paths, 'embedding_path': config.save_embedding_path},
+            data={'paths': paths, 'count': len(paths)},
             success=True,
         )
     except Exception as e:

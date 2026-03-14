@@ -220,10 +220,13 @@ def run_headless() -> None:
 
     # Stream mode: start realtime pipeline
     if getattr(CONFIG, 'stream_mode', False):
-        pipeline = ProcessingPipeline(CONFIG, BUS)
+        # Reuse the server's pipeline — creating a second instance would cause
+        # two capture loops fighting over the same webcam/URL, and WebSocket
+        # commands (start/stop) would target a different pipeline than the one
+        # actually running.
         emit_status('Starting in stream mode', scope='CORE')
         import threading
-        t = threading.Thread(target=pipeline.run_stream, daemon=True)
+        t = threading.Thread(target=server.pipeline.run_stream, daemon=True)
         t.start()
         CONFIG.shutdown_event.wait()
     elif CONFIG.headless:
