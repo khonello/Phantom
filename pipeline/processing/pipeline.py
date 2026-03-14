@@ -199,19 +199,19 @@ class ProcessingPipeline:
         that needs them blocks for 10-30s while 500MB+ of ONNX weights are
         loaded into CUDA. Pre-loading them here makes the first swap instant.
         """
-        emit_status('Loading detection model...', scope='PIPELINE')
+        emit_status('Loading detection model...', scope='MODEL_LOAD')
         try:
             self._get_detector()._get_analyser()
         except Exception as e:
             emit_error(f"Detection model load failed: {e}", exception=e, scope='PIPELINE')
 
-        emit_status('Loading swap model...', scope='PIPELINE')
+        emit_status('Loading swap model...', scope='MODEL_LOAD')
         try:
             self._get_swapper()._get_swapper()
         except Exception as e:
             emit_error(f"Swap model load failed: {e}", exception=e, scope='PIPELINE')
 
-        emit_status('Models ready', scope='PIPELINE')
+        emit_status('Models ready', scope='MODEL_LOAD')
 
     def _run_stream_impl(self) -> None:
         """Implementation of stream mode."""

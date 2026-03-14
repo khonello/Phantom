@@ -162,6 +162,7 @@ class Bridge(QObject):
     sourceThumbnailChanged = Signal(str)
     sourceLabelChanged = Signal(str)
     detectionStatusChanged = Signal(str)
+    loadingMessageChanged = Signal(str)
 
     def __init__(self, client: PipelineClient) -> None:
         super().__init__()
@@ -176,6 +177,7 @@ class Bridge(QObject):
         self._connection_label = 'connecting...'
         self._status_message = 'idle'
         self._detection_status = ''
+        self._loading_message = ''
         self._webcam_version = 0
         self._live_version = 0
         self._quality = 'optimal'
@@ -256,6 +258,10 @@ class Bridge(QObject):
     def detectionStatus(self) -> str:
         return self._detection_status
 
+    @Property(str, notify=loadingMessageChanged)
+    def loadingMessage(self) -> str:
+        return self._loading_message
+
     # ── Slots ─────────────────────────────────────────────────────────
 
     @Slot()
@@ -272,6 +278,7 @@ class Bridge(QObject):
         self._client.start_stream()
         self._ws_push_active.set()
         self._last_frame_time = time.time()
+        self._set_loading_message('Initializing...')
         self._set_pipeline_running(True)
         self._set_status('pipeline connected · processing')
 
@@ -416,6 +423,11 @@ class Bridge(QObject):
             self._detection_status = msg
             self.detectionStatusChanged.emit(msg)
 
+    def _set_loading_message(self, msg: str) -> None:
+        if self._loading_message != msg:
+            self._loading_message = msg
+            self.loadingMessageChanged.emit(msg)
+
     def _poll_frames(self) -> None:
         if webcam_buffer.is_dirty():
             webcam_buffer.promote()
@@ -442,19 +454,22 @@ class Bridge(QObject):
             message = data.get('message', '')
             scope = data.get('scope', '')
             level = data.get('level', 'info')
-            # Always update the detection badge regardless of pipeline state
-            if scope == 'DETECTION':
+            if scope == 'MODEL_LOAD':
+                # Update loading overlay; clear when models are ready
+                self._set_loading_message('' if message == 'Models ready' else message)
+            elif scope == 'DETECTION':
                 if level == 'warning':
                     self._set_detection_status('no face detected')
                 else:
                     self._set_detection_status('')
             # Show general status messages only when the pipeline is not running
-            # (avoids drowning the UI in per-frame debug messages during a run)
             if message and not self._pipeline_running:
                 self._set_status(message)
         elif event == 'PIPELINE_STARTED':
+            self._set_loading_message('')
             self._set_pipeline_running(True)
         elif event == 'PIPELINE_STOPPED':
+            self._set_loading_message('')
             self._set_pipeline_running(False)
             self._set_detection_status('')
             self._set_status('stopped')

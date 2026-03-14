@@ -592,6 +592,51 @@ Window {
                 }
             }
 
+            // ── Model loading overlay ─────────────────────────────────
+            Rectangle {
+                anchors.fill: parent
+                radius: parent.radius
+                visible: bridge.loadingMessage !== ""
+                color: "#d8090b12"
+
+                Column {
+                    anchors.centerIn: parent
+                    spacing: 18
+
+                    Text {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        text: bridge.loadingMessage
+                        color: "#cbd5e1"
+                        font.pixelSize: 13
+                        font.letterSpacing: 0.8
+                    }
+
+                    // Indeterminate sweep bar
+                    Rectangle {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        width: 180; height: 2; radius: 1
+                        color: "#1e1e38"
+                        clip: true
+
+                        Rectangle {
+                            width: 80; height: parent.height; radius: parent.radius
+                            gradient: Gradient {
+                                orientation: Gradient.Horizontal
+                                GradientStop { position: 0.0; color: "transparent" }
+                                GradientStop { position: 0.5; color: "#8b5cf6" }
+                                GradientStop { position: 1.0; color: "transparent" }
+                            }
+
+                            SequentialAnimation on x {
+                                running: bridge.loadingMessage !== ""
+                                loops: Animation.Infinite
+                                NumberAnimation { from: -80; to: 180; duration: 1400; easing.type: Easing.InOutSine }
+                            }
+                        }
+                    }
+                }
+            }
+
             // ── Self-monitor PiP (top-right) ──────────────────────────
             Rectangle {
                 id: miniScreen
