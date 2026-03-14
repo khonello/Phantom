@@ -149,8 +149,8 @@ class WebSocketAPIServer:
         if self._ws_server is not None:
             try:
                 self._ws_server.shutdown()
-            except Exception:
-                pass
+            except Exception as e:
+                emit_error(f'Server shutdown error: {type(e).__name__}: {e}', scope='API_SERVER')
             self._ws_server = None
 
         # Close all client connections
@@ -158,8 +158,8 @@ class WebSocketAPIServer:
             for ws in list(self._clients):
                 try:
                     ws.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    emit_error(f'Client close error: {type(e).__name__}: {e}', scope='API_SERVER')
             self._clients.clear()
 
         if self._server_thread is not None:
@@ -320,7 +320,8 @@ class WebSocketAPIServer:
             for ws in self._clients:
                 try:
                     ws.send(message)
-                except Exception:
+                except Exception as e:
+                    emit_error(f'Broadcast text failed ({ws.remote_address}): {type(e).__name__}: {e}', scope='API_SERVER')
                     disconnected.add(ws)
             for ws in disconnected:
                 self._clients.discard(ws)
@@ -337,7 +338,8 @@ class WebSocketAPIServer:
             for ws in self._clients:
                 try:
                     ws.send(data)
-                except Exception:
+                except Exception as e:
+                    emit_error(f'Broadcast binary failed ({ws.remote_address}): {type(e).__name__}: {e}', scope='API_SERVER')
                     disconnected.add(ws)
             for ws in disconnected:
                 self._clients.discard(ws)
@@ -368,7 +370,8 @@ class WebSocketAPIServer:
                 for ws in self._clients:
                     try:
                         ws.ping()
-                    except Exception:
+                    except Exception as e:
+                        emit_error(f'Heartbeat ping failed ({ws.remote_address}): {type(e).__name__}: {e}', scope='API_SERVER')
                         disconnected.add(ws)
                 for ws in disconnected:
                     self._clients.discard(ws)

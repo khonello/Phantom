@@ -460,8 +460,8 @@ class BlendingProcessor(FrameProcessor):
             # Adaptive blend: reduce when delta is high
             adaptive_blend = 0.65 * max(0.5, 1.0 - lum_delta / 255.0)
             return cv2.addWeighted(swapped, adaptive_blend, original, 1.0 - adaptive_blend, 0)
-        except Exception:
-            # Fallback to normal blend if LAB conversion fails
+        except Exception as e:
+            emit_warning(f'Luminance blend error: {type(e).__name__}: {e}', scope='BLENDER')
             return cv2.addWeighted(swapped, 0.65, original, 0.35, 0)
 
 

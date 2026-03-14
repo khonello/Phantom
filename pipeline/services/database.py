@@ -96,7 +96,9 @@ class FaceDatabase:
             embedding = np.load(npy_path)
             # Create a Face-like object with just the embedding
             return types.SimpleNamespace(normed_embedding=embedding)
-        except Exception:
+        except Exception as e:
+            import sys
+            print(f'[FaceDatabase] _load_embedding error ({npy_path}): {type(e).__name__}: {e}', file=sys.stderr)
             return None
 
     def _extract_from_image(self, image_path: str) -> Optional[Face]:
@@ -189,8 +191,9 @@ class FaceDatabase:
 
         try:
             np.save(path, face.normed_embedding)
-        except Exception:
-            pass
+        except Exception as e:
+            import sys
+            print(f'[FaceDatabase] save_embedding error ({path}): {type(e).__name__}: {e}', file=sys.stderr)
 
     def clear(self) -> None:
         """Clear all cached embeddings."""

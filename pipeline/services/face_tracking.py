@@ -34,7 +34,9 @@ def make_tracker(tracker_name: str) -> Optional[cv2.Tracker]:
             creator = getattr(cv2, 'TrackerCSRT_create', None) or getattr(cv2.legacy, 'TrackerCSRT_create', None)
 
         return creator() if creator else None
-    except Exception:
+    except Exception as e:
+        import sys
+        print(f'[FaceTracking] make_tracker({tracker_name!r}) error: {type(e).__name__}: {e}', file=sys.stderr)
         return None
 
 
@@ -126,7 +128,9 @@ class FaceTrackerState:
             self._tracker.init(frame, bbox_tuple)
             self._initialized = True
             return True
-        except Exception:
+        except Exception as e:
+            import sys
+            print(f'[FaceTracking] tracker init error: {type(e).__name__}: {e}', file=sys.stderr)
             self._initialized = False
             return False
 
@@ -157,7 +161,9 @@ class FaceTrackerState:
             )
             self._bbox = Bbox(x=x, y=y, w=w, h=h)
             return True
-        except Exception:
+        except Exception as e:
+            import sys
+            print(f'[FaceTracking] tracker update error: {type(e).__name__}: {e}', file=sys.stderr)
             return False
 
     def get_bbox(self) -> Optional[Bbox]:

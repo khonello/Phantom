@@ -126,8 +126,9 @@ class AsyncProcessor:
             # Process frame
             try:
                 processed = self.processor.process(frame)
-            except Exception:
-                # If processing fails, pass through original
+            except Exception as e:
+                import sys
+                print(f'[AsyncProcessor] frame processing error (seq={seq}): {type(e).__name__}: {e}', file=sys.stderr)
                 processed = frame
 
             # Put output (drop old result if queue full)

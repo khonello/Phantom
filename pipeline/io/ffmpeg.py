@@ -57,9 +57,11 @@ def run_ffmpeg(config: FaceSwapConfig, args: List[str]) -> bool:
     except FileNotFoundError:
         emit_warning('FFmpeg not found in PATH', scope='FFMPEG')
         return False
-    except subprocess.CalledProcessError:
+    except subprocess.CalledProcessError as e:
+        emit_warning(f'FFmpeg command failed (exit {e.returncode}): {e.output.decode(errors="replace").strip() if e.output else "no output"}', scope='FFMPEG')
         return False
-    except Exception:
+    except Exception as e:
+        emit_warning(f'FFmpeg unexpected error: {type(e).__name__}: {e}', scope='FFMPEG')
         return False
 
 
@@ -90,7 +92,8 @@ def detect_fps(video_path: str) -> float:
         else:
             return float(output)
 
-    except Exception:
+    except Exception as e:
+        emit_warning(f'FPS detection failed for {video_path}: {type(e).__name__}: {e} — defaulting to 30fps', scope='FFMPEG')
         return 30.0
 
 

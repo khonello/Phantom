@@ -170,7 +170,9 @@ class HTTPFrameOutput(OutputSink):
         try:
             _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
             return bytes(buffer)
-        except Exception:
+        except Exception as e:
+            import sys
+            print(f'[HTTPOutput] JPEG encode error: {type(e).__name__}: {e}', file=sys.stderr)
             return None
 
     def close(self) -> None:
@@ -220,7 +222,9 @@ class WebSocketOutput(OutputSink):
             try:
                 _, buffer = cv2.imencode('.jpg', self._latest_frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
                 return bytes(buffer)
-            except Exception:
+            except Exception as e:
+                import sys
+                print(f'[WebSocketOutput] JPEG encode error: {type(e).__name__}: {e}', file=sys.stderr)
                 return None
 
     def close(self) -> None:

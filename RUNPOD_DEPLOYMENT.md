@@ -195,7 +195,7 @@ python -c "import torch; import cv2; import insightface; print('OK')"
 tmux new -s phantom
 
 # Inside tmux, start the pipeline
-python pipeline.py --stream --execution-provider cuda
+python pipeline.py --execution-provider cuda
 
 # Detach from tmux (pipeline keeps running): Ctrl+B, then D
 # Reattach later: tmux attach -t phantom
@@ -215,7 +215,7 @@ ps aux | grep pipeline.py
 
 # Restart cleanly
 tmux new -s phantom
-python pipeline.py --stream --execution-provider cuda
+python pipeline.py --execution-provider cuda
 ```
 
 **Always use `--execution-provider cuda` on RunPod** — you are paying for a GPU, use it.
@@ -224,8 +224,8 @@ python pipeline.py --stream --execution-provider cuda
 
 | Command | Provider | Inference runs on | Expected latency |
 |---------|----------|-------------------|-----------------|
-| `python pipeline.py --stream` | CPU | All CPU cores | High — 500ms+ per frame, not suitable for real-time |
-| `python pipeline.py --stream --execution-provider cuda` | GPU (CUDA) | RTX 3090 / 4090 | Low — 30–80ms per frame, real-time capable |
+| `python pipeline.py ` | CPU | All CPU cores | High — 500ms+ per frame, not suitable for real-time |
+| `python pipeline.py  --execution-provider cuda` | GPU (CUDA) | RTX 3090 / 4090 | Low — 30–80ms per frame, real-time capable |
 
 **What to expect without `--cuda`**: The pipeline starts and works but face detection and swapping run on CPU. On a video feed you will see significant lag — frames process slowly and the desktop preview will stutter or freeze. The GPU sits idle despite you paying for it.
 
@@ -416,7 +416,7 @@ Then reconnect and accept the new host key.
 nvidia-smi
 
 # Use CPU fallback
-python pipeline.py --stream --execution-provider cpu
+python pipeline.py --execution-provider cpu
 ```
 
 ### Models not found

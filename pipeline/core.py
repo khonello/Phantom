@@ -132,8 +132,8 @@ def parse_args() -> None:
             emit_status(f'GPU available: {gpu_name}', scope='CORE')
         else:
             emit_status('No GPU detected, using CPU', scope='CORE')
-    except Exception:
-        pass
+    except Exception as e:
+        emit_status(f'GPU detection error: {type(e).__name__}: {e}', scope='CORE', level='warning')
 
 
 def encode_execution_providers(execution_providers: List[str]) -> List[str]:

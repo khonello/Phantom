@@ -157,15 +157,20 @@ class PipelineClient:
                             if self.on_frame:
                                 try:
                                     self.on_frame(message)
-                                except Exception:
-                                    pass
+                                except Exception as e:
+                                    import sys
+                                    print(f'[CONTROLLER] on_frame callback error: {type(e).__name__}: {e}', file=sys.stderr)
                         elif isinstance(message, str):
                             # Text: JSON event or response
                             try:
                                 data = json.loads(message)
                                 self._dispatch_message(data)
-                            except (json.JSONDecodeError, Exception):
-                                pass
+                            except json.JSONDecodeError as e:
+                                import sys
+                                print(f'[CONTROLLER] JSON decode error: {e} — raw: {message[:120]}', file=sys.stderr)
+                            except Exception as e:
+                                import sys
+                                print(f'[CONTROLLER] message dispatch error: {type(e).__name__}: {e}', file=sys.stderr)
 
             except Exception as e:
                 import sys
@@ -207,8 +212,9 @@ class PipelineClient:
         if self.on_event:
             try:
                 self.on_event(data)
-            except Exception:
-                pass
+            except Exception as e:
+                import sys
+                print(f'[CONTROLLER] on_event callback error: {type(e).__name__}: {e}', file=sys.stderr)
 
     def _set_connected(self, value: bool) -> None:
         """Update connection status and fire callback."""
@@ -217,8 +223,9 @@ class PipelineClient:
             if self.on_connected:
                 try:
                     self.on_connected(value)
-                except Exception:
-                    pass
+                except Exception as e:
+                    import sys
+                    print(f'[CONTROLLER] on_connected callback error: {type(e).__name__}: {e}', file=sys.stderr)
 
     def close(self) -> None:
         """Stop the receiver loop and close connection."""
@@ -227,8 +234,9 @@ class PipelineClient:
             if self._ws is not None:
                 try:
                     self._ws.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    import sys
+                    print(f'[CONTROLLER] WebSocket close error: {type(e).__name__}: {e}', file=sys.stderr)
         if self._recv_thread is not None:
             self._recv_thread.join(timeout=3)
 
@@ -385,8 +393,9 @@ class PipelineClient:
         try:
             if self._ws is not None:
                 self._ws.send(jpeg_bytes)
-        except Exception:
-            pass
+        except Exception as e:
+            import sys
+            print(f'[CONTROLLER] send_frame error: {type(e).__name__}: {e}', file=sys.stderr)
         finally:
             self._ws_lock.release()
 

@@ -112,7 +112,8 @@ class FaceDetector:
                 det = Detection.from_insightface(face)
                 detections.append(det)
             return detections
-        except IndexError:
+        except IndexError as e:
+            emit_status(f'Detection IndexError: {e}', scope='FACE_DETECTOR', level='error')
             return []
         except Exception as e:
             emit_status(f'Detection error: {type(e).__name__}: {e}', scope='FACE_DETECTOR', level='error')

@@ -530,7 +530,8 @@ def handle_upload_source(
             )
         try:
             image_bytes = base64.b64decode(b64)
-        except Exception:
+        except Exception as e:
+            emit_error(f'Base64 decode failed for {name}: {type(e).__name__}: {e}', scope='HANDLERS')
             return ResponseMessage(
                 type='upload_source',
                 data={},
