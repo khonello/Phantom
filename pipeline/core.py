@@ -56,7 +56,7 @@ def parse_args() -> None:
     program.add_argument('--max-memory', help='maximum amount of RAM in GB', dest='max_memory',
                         type=int, default=suggest_max_memory())
     program.add_argument('--execution-provider', help='available execution provider', dest='execution_provider',
-                        default=['cpu'], choices=suggest_execution_providers(), nargs='+')
+                        default=suggest_default_execution_providers(), choices=suggest_execution_providers(), nargs='+')
     program.add_argument('--execution-threads', help='number of execution threads', dest='execution_threads',
                         type=int, default=suggest_execution_threads())
     program.add_argument('--quality', help='stream quality preset', dest='quality',
@@ -158,6 +158,11 @@ def suggest_max_memory() -> int:
 
 def suggest_execution_providers() -> List[str]:
     return encode_execution_providers(onnxruntime.get_available_providers())
+
+
+def suggest_default_execution_providers() -> List[str]:
+    available = encode_execution_providers(onnxruntime.get_available_providers())
+    return ['cuda'] if 'cuda' in available else ['cpu']
 
 
 def suggest_execution_threads() -> int:
