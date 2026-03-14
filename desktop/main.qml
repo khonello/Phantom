@@ -595,7 +595,6 @@ Window {
             // ── Model loading overlay ─────────────────────────────────
             Rectangle {
                 anchors.fill: parent
-                radius: parent.radius
                 visible: bridge.loadingMessage !== ""
                 color: "#d8090b12"
 
