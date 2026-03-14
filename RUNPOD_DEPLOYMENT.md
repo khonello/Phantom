@@ -71,7 +71,7 @@ ssh sipo66pbzzdcir-64411f5f@ssh.runpod.io -i ~/.ssh/id_ed25519
 
 Use that exact command — it routes through RunPod's SSH proxy and is more reliable than the direct IP.
 
-> **Note**: The Connect tab also shows a **Direct TCP** address. Example: `213.192.2.110:40152 → :9000`. This is the direct address for port 9000 — use it for `PHANTOM_API_URL` on your local machine (see Step 6).
+> **Note**: The Connect tab also shows a **Direct TCP Ports** section at the bottom. It looks like: `213.192.2.110:40152 → :9000`. The left side (`213.192.2.110:40152`) is the public address RunPod assigned to your pod's port 9000. The right side (`:9000`) is the internal port inside the pod. You will use the left side value for `PHANTOM_API_URL` (see Step 7).
 
 ---
 
@@ -200,15 +200,34 @@ Applied providers: ['CUDAExecutionProvider'], with options: {...}
 
 ## Step 7: Connect the Desktop GUI
 
-On your **local machine**, set `PHANTOM_API_URL` in your `.env` file to the pod's direct TCP address shown on the Connect tab:
+### Finding your connection URL
+
+1. Go to your pod on RunPod → click **Connect**
+2. Scroll to the **Direct TCP Ports** section at the bottom
+3. You will see a line like: `213.192.2.110:40152 → :9000`
+   - `213.192.2.110` — the pod's public IP
+   - `40152` — the public port RunPod assigned to your internal port 9000
+   - This mapping changes every time you restart the pod — always check here for the current value
+
+### Set up your local `.env`
+
+On your **local machine**, in the root of the Phantom project:
+
+```bash
+cp .env.example .env
+```
+
+Open `.env` and set:
 
 ```
+# Format: ws://<public-ip>:<public-port>/ws
+# Example (replace with your actual values from the Connect tab):
 PHANTOM_API_URL=ws://213.192.2.110:40152/ws
 ```
 
-> Use `ws://` with the direct TCP address (IP:port format), not `wss://`. The RunPod proxy URL (`wss://<pod-id>-9000.proxy.runpod.net/ws`) also works but the direct TCP connection is lower latency.
+> Use `ws://` with the direct TCP address. The RunPod proxy URL (`wss://<pod-id>-9000.proxy.runpod.net/ws`) also works but the direct TCP connection is lower latency.
 
-Then run:
+### Start the desktop
 
 ```bash
 python desktop.py
