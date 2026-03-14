@@ -143,7 +143,12 @@ cd /workspace
 git clone https://github.com/khonello/Phantom.git
 cd Phantom
 
-# Run startup script (installs FFmpeg, checks CUDA, sets up model dirs)
+# Run the RunPod startup script — located at runpod/startup.sh inside the repo.
+# Run it from the repo root (do NOT cd into runpod/ first).
+# It installs FFmpeg, checks CUDA, and creates the model cache directory.
+#
+# Note: scripts/setup.sh is a separate local-dev script (creates a venv on
+# Linux/macOS). Do NOT use it on RunPod.
 bash runpod/startup.sh
 
 # Install Python dependencies
@@ -331,7 +336,10 @@ The **container disk is wiped** when a pod is deleted. The **Network Volume** (`
 cd /workspace
 git clone https://github.com/khonello/Phantom.git   # or git pull if already cloned
 cd Phantom
+
+# runpod/startup.sh is inside the repo — run from the repo root
 bash runpod/startup.sh
+
 pip install -r requirements-pipeline-gpu.txt
 ```
 
