@@ -53,7 +53,7 @@ Once the pod is running, the **Connect** tab will show an SSH setup prompt. Do t
 
 ```bash
 # Generate an SSH key if you don't have one
-ssh-keygen -t ed25519 -C "your@email.com"
+ssh-keygen -t ed25519 -C "you@email.com"
 
 # Copy your public key
 cat ~/.ssh/id_ed25519.pub
@@ -64,12 +64,14 @@ Paste the public key into the SSH public key field on the RunPod Connect tab and
 RunPod will then show you a connection command like:
 
 ```bash
-ssh <pod-id>-<hash>@ssh.runpod.io -i ~/.ssh/id_ed25519
+# Format: ssh <pod-id>-<hash>@ssh.runpod.io -i ~/.ssh/id_ed25519
+# Example:
+ssh sipo66pbzzdcir-64411f5f@ssh.runpod.io -i ~/.ssh/id_ed25519
 ```
 
 Use that exact command — it routes through RunPod's SSH proxy and is more reliable than the direct IP.
 
-> **Note**: The Connect tab also shows a **Direct TCP** address (e.g. `213.192.2.110:40152 → :9000`). This is the direct address for port 9000 — use it for `PHANTOM_API_URL` on your local machine (see Step 6).
+> **Note**: The Connect tab also shows a **Direct TCP** address. Example: `213.192.2.110:40152 → :9000`. This is the direct address for port 9000 — use it for `PHANTOM_API_URL` on your local machine (see Step 6).
 
 ---
 
@@ -78,7 +80,9 @@ Use that exact command — it routes through RunPod's SSH proxy and is more reli
 Wait for JupyterLab to show **Ready** (green dot) on the Connect tab, then SSH in:
 
 ```bash
-ssh <pod-id>-<hash>@ssh.runpod.io -i ~/.ssh/id_ed25519
+# Format: ssh <pod-id>-<hash>@ssh.runpod.io -i ~/.ssh/id_ed25519
+# Example:
+ssh sipo66pbzzdcir-64411f5f@ssh.runpod.io -i ~/.ssh/id_ed25519
 ```
 
 You will land in `/` (root). Navigate to the workspace:
