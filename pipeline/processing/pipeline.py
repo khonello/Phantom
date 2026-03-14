@@ -237,6 +237,11 @@ class ProcessingPipeline:
         frame = self._tracking_proc.process(frame)
         tracked = self._tracking_proc.get_tracked_detection()
 
+        # If the CV2 tracker is unavailable (e.g. opencv-python without contrib),
+        # fall back to the raw detection so swapping still works.
+        if tracked is None and detections:
+            tracked = detections[0]
+
         if tracked and self._swapping_proc.source_face:
             frame = self._swapping_proc.swap_detection(frame, tracked)
             self.bus.emit(DETECTION, detection=tracked.to_dict(), seq=seq)
