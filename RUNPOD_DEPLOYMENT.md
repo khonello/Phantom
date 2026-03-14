@@ -163,11 +163,37 @@ python -c "import torch; import cv2; import insightface; print('OK')"
 
 ## Step 6: Start the Pipeline
 
-**Always use `--execution-provider cuda` on RunPod** — you are paying for a GPU, use it:
+**Always use tmux** — if you run the pipeline directly in the SSH terminal and your connection drops (WiFi loss, laptop sleep, etc.), the process dies and you lose the session. tmux keeps it running independently.
 
 ```bash
+# Start a named tmux session
+tmux new -s phantom
+
+# Inside tmux, start the pipeline
+python pipeline.py --stream --execution-provider cuda
+
+# Detach from tmux (pipeline keeps running): Ctrl+B, then D
+# Reattach later: tmux attach -t phantom
+```
+
+### If the process is stuck / won't respond to Ctrl+C
+
+This happens when an SSH session disconnects mid-run (e.g. WiFi drops). Reconnect and kill it:
+
+```bash
+ssh sipo66pbzzdcir-64411f5f@ssh.runpod.io -i ~/.ssh/id_ed25519
+
+pkill -f pipeline.py
+
+# Confirm it's gone
+ps aux | grep pipeline.py
+
+# Restart cleanly
+tmux new -s phantom
 python pipeline.py --stream --execution-provider cuda
 ```
+
+**Always use `--execution-provider cuda` on RunPod** — you are paying for a GPU, use it.
 
 ### `--execution-provider` explained
 
