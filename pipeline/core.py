@@ -141,8 +141,13 @@ def encode_execution_providers(execution_providers: List[str]) -> List[str]:
 
 
 def decode_execution_providers(execution_providers: List[str]) -> List[str]:
-    return [provider for provider, encoded_execution_provider in zip(onnxruntime.get_available_providers(), encode_execution_providers(onnxruntime.get_available_providers()))
-            if any(execution_provider in encoded_execution_provider for execution_provider in execution_providers)]
+    decoded = [provider for provider, encoded_execution_provider in zip(onnxruntime.get_available_providers(), encode_execution_providers(onnxruntime.get_available_providers()))
+               if any(execution_provider in encoded_execution_provider for execution_provider in execution_providers)]
+    # Always include CPUExecutionProvider as fallback — InsightFace and ONNX
+    # silently fall back to CPU if CUDA init fails without it in the list.
+    if 'CPUExecutionProvider' not in decoded:
+        decoded.append('CPUExecutionProvider')
+    return decoded
 
 
 def suggest_max_memory() -> int:
