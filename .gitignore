@@ -1,4 +1,6 @@
 .idea
+.env
+
 models
 temp
 __pycache__
