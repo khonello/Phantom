@@ -112,12 +112,12 @@ Use the provided helper script:
 
 **Linux/macOS:**
 ```bash
-scripts/local-run-tests.sh
+local/run-tests.sh
 ```
 
 **Windows:**
 ```bash
-scripts/local-run-tests.bat
+local/run-tests.bat
 ```
 
 Or manually:

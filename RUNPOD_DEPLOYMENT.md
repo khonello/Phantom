@@ -147,7 +147,7 @@ cd Phantom
 # Run it from the repo root (do NOT cd into runpod/ first).
 # It installs FFmpeg, checks CUDA, and creates the model cache directory.
 #
-# Note: scripts/local-setup.sh is a separate local-dev script (creates a venv on
+# Note: local/setup.sh is a separate local-dev script (creates a venv on
 # Linux/macOS). Do NOT use it on RunPod.
 bash runpod/startup.sh
 

@@ -44,11 +44,11 @@ help:
 setup-dev:
 	@echo "Setting up development environment..."
 ifeq ($(UNAME_S),Linux)
-	@bash scripts/local-setup.sh
+	@bash local/setup.sh
 else ifeq ($(UNAME_S),Darwin)
-	@bash scripts/local-setup.sh
+	@bash local/setup.sh
 else
-	@echo "Windows detected - run: scripts\setup-windows.bat"
+	@echo "Windows detected - run: local\setup-windows.bat"
 endif
 
 install:
@@ -75,11 +75,11 @@ typecheck:
 test:
 	@echo "Running all tests..."
 ifeq ($(UNAME_S),Linux)
-	@bash scripts/local-run-tests.sh
+	@bash local/run-tests.sh
 else ifeq ($(UNAME_S),Darwin)
-	@bash scripts/local-run-tests.sh
+	@bash local/run-tests.sh
 else
-	@echo "Windows detected - run: scripts\run-tests.bat"
+	@echo "Windows detected - run: local\run-tests.bat"
 endif
 
 run:

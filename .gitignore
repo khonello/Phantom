@@ -6,8 +6,3 @@ __pycache__
 environ
 models
 Python_3_12_0venv
-
-# Local environment and editor config
-.env
-venv/
-.claude/settings.local.json
