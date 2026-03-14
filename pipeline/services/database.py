@@ -132,7 +132,9 @@ class FaceDatabase:
             face = detection.face
             self._cache[image_path] = face
             return face
-        except Exception:
+        except Exception as e:
+            import sys
+            print(f'[FaceDatabase] _extract_from_image error: {type(e).__name__}: {e}', file=sys.stderr)
             return None
 
     def _average_faces(self, faces: List[Face]) -> Optional[Face]:

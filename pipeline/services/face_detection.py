@@ -114,7 +114,8 @@ class FaceDetector:
             return detections
         except IndexError:
             return []
-        except Exception:
+        except Exception as e:
+            emit_status(f'Detection error: {type(e).__name__}: {e}', scope='FACE_DETECTOR', level='error')
             return []
 
     def detect_one(self, frame: Frame) -> Optional[Detection]:
