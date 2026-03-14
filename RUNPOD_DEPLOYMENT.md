@@ -163,14 +163,36 @@ python -c "import torch; import cv2; import insightface; print('OK')"
 
 ## Step 6: Start the Pipeline
 
+**Always use `--execution-provider cuda` on RunPod** — you are paying for a GPU, use it:
+
 ```bash
-python pipeline.py --stream
+python pipeline.py --stream --execution-provider cuda
 ```
 
-You should see:
+### `--execution-provider` explained
+
+| Command | Provider | Inference runs on | Expected latency |
+|---------|----------|-------------------|-----------------|
+| `python pipeline.py --stream` | CPU | All CPU cores | High — 500ms+ per frame, not suitable for real-time |
+| `python pipeline.py --stream --execution-provider cuda` | GPU (CUDA) | RTX 3090 / 4090 | Low — 30–80ms per frame, real-time capable |
+
+**What to expect without `--cuda`**: The pipeline starts and works but face detection and swapping run on CPU. On a video feed you will see significant lag — frames process slowly and the desktop preview will stutter or freeze. The GPU sits idle despite you paying for it.
+
+**What to expect with `--cuda`**: Face detection and the ONNX swap model both run on the GPU. Frame processing is fast enough for real-time display. You will see `Applied providers: ['CUDAExecutionProvider']` in the logs confirming GPU is active.
+
+### Expected startup output (with CUDA)
+
 ```
-WebSocket server listening on ws://0.0.0.0:9000/ws
+[CORE] INFO: GPU available: NVIDIA GeForce RTX 3090
+[API_SERVER] INFO: WebSocket API server started on port 9000
+[CORE] INFO: Starting in stream mode
+[PIPELINE] INFO: Stream pipeline started
+[FACE_DETECTOR] INFO: Using RunPod model cache: /workspace/models/insightface
+[API_SERVER] INFO: WebSocket server listening on ws://0.0.0.0:9000/ws
+Applied providers: ['CUDAExecutionProvider'], with options: {...}
 ```
+
+> **First run only**: InsightFace will download `buffalo_l.zip` (~275MB) on first start. This is a one-time download — it caches to `/workspace/models/insightface/` on the Network Volume and will not re-download on subsequent pod starts.
 
 > Use `--stream` for real-time mode. Without it, the pipeline runs in batch mode and exits after processing a file.
 
