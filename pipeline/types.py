@@ -114,7 +114,8 @@ class Detection:
         """
         bbox = Bbox.from_insightface(face.bbox)
         kps = face.kps if hasattr(face, 'kps') and face.kps is not None else np.array([])
-        confidence = float(face.score) if hasattr(face, 'score') else 0.0
+        score = getattr(face, 'det_score', None) or getattr(face, 'score', None)
+        confidence = float(score) if score is not None else 0.0
         return cls(face=face, bbox=bbox, kps=kps, confidence=confidence)
 
     def to_dict(self) -> dict:
