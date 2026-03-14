@@ -70,12 +70,22 @@ class FaceSwapper:
 
     def _resolve_model_path(self) -> str:
         """
-        Resolve the model path (relative to package or absolute).
+        Resolve the model path, checking known locations in priority order.
+
+        Priority:
+        1. RunPod Network Volume (/workspace/models/)
+        2. Relative to repo root (models/)
+        3. Working directory fallback
 
         Returns:
             Full path to inswapper_128.onnx model
         """
-        # Try relative path first (from pipeline/__init__)
+        # RunPod Network Volume (highest priority)
+        runpod_model = '/workspace/models/inswapper_128.onnx'
+        if os.path.exists(runpod_model):
+            return runpod_model
+
+        # Relative to repo root (pipeline package lives one level down)
         pipeline_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         relative_model = os.path.join(pipeline_dir, 'models', 'inswapper_128.onnx')
         if os.path.exists(relative_model):
