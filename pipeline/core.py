@@ -207,6 +207,9 @@ def pre_check() -> bool:
     if not shutil.which('ffmpeg'):
         emit_status('ffmpeg is not installed.', scope='CORE')
         return False
+    from pipeline.services.face_swapping import FaceSwapper
+    if not FaceSwapper(CONFIG).pre_check():
+        return False
     return True
 
 

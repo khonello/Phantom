@@ -137,28 +137,27 @@ class FaceSwapper:
         if not os.path.exists(model_dir):
             os.makedirs(model_dir, exist_ok=True)
 
-        # Prompt user for download
+        # Auto-download — no prompt; model is required for the app to function
         hf_url = (
             'https://huggingface.co/xingren23/comfyflow-models/resolve/'
             '976de8449674de379b02c144d0b3cfa2b61482f2/insightface/inswapper_128.onnx'
             '?download=true'
         )
 
-        answer = input('Download face swap model from Hugging Face? (y/n): ').strip().lower()
-        if answer == 'y':
-            try:
-                from pipeline.io.ffmpeg import conditional_download
-                conditional_download(model_dir, [hf_url])
-                if os.path.exists(model_path):
-                    emit_status('Model downloaded successfully.', scope='SWAPPER')
-                    return True
-            except Exception as e:
-                emit_error(f"Model download failed: {e}", exception=e, scope='SWAPPER')
+        emit_status('Downloading inswapper_128.onnx from Hugging Face...', scope='SWAPPER')
+        try:
+            from pipeline.io.ffmpeg import conditional_download
+            conditional_download(model_dir, [hf_url])
+            if os.path.exists(model_path):
+                emit_status('Model downloaded successfully.', scope='SWAPPER')
+                return True
+        except Exception as e:
+            emit_error(f"Model download failed: {e}", exception=e, scope='SWAPPER')
 
         emit_status(
-            'Please download inswapper_128.onnx manually from: '
+            'Auto-download failed. Download inswapper_128.onnx manually from: '
             'https://drive.google.com/file/d/1krOLgjW2tAPaqV-Bw4YALz0xT5zlb5HF/view '
-            f'and place it in: {model_path}',
+            f'and place it at: {model_path}',
             scope='SWAPPER',
             level='warning',
         )
