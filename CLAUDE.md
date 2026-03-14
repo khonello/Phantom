@@ -57,23 +57,40 @@ Phantom is a modern, composable face-swapping application for videos and images.
 - **pipeline/io/ffmpeg.py**: FFmpeg utilities (extract_frames, create_video, restore_audio, etc.)
 
 **API & Control:**
-- **pipeline/api/server.py**: `WebSocketAPIServer` (replaces HTTP control server)
-- **pipeline/api/handlers.py**: Type-safe command handlers (12 handlers for all commands)
+- **pipeline/api/server.py**: `WebSocketAPIServer` — real WebSocket server on single port 9000
+  - Text frames: JSON commands and events
+  - Binary frames: JPEG-encoded video frames pushed to all clients
+  - Health check: `{"action": "health"}` → `{"status": "healthy", "uptime": <seconds>}`
+  - Heartbeat ping/pong every 30s
+- **pipeline/api/handlers.py**: Type-safe command handlers; `HandlerContext` dataclass (no globals)
 - **pipeline/api/schema.py**: Message types, command/event constants
 
 **Simplified Entry Points:**
-- **pipeline/core.py**: Argument parsing, headless orchestration (~100 lines, down from 275)
-- **pipeline/stream.py**: Stream mode wrapper (~57 lines, down from 356)
-- **desktop/bridge.py**: Simplified to signal mapping + frame buffering (unchanged ~638 lines)
-- **desktop/controller.py**: WebSocket client for pipeline communication
+- **pipeline/core.py**: Argument parsing, headless orchestration; supports `--stream`, `--log-level`
+- **pipeline/stream.py**: Stream mode wrapper
+- **desktop/bridge.py**: Push-based frame display (no HTTP polling, no 2s status timer)
+- **desktop/controller.py**: WebSocket client (`websockets` library, single connection, auto-reconnect)
+
+### Removed Files (Dead Code Deleted)
+The following files were deleted in the Phase 2 cleanup:
+- `pipeline/processors/frame/face_swapper.py` → replaced by `pipeline/processing/frame_processor.py::SwappingProcessor`
+- `pipeline/processors/frame/face_enhancer.py` → replaced by `EnhancementProcessor`
+- `pipeline/processors/frame/core.py` → orphaned
+- `pipeline/processors/` directory → fully removed
+- `pipeline/face_analyser.py` → replaced by `pipeline/services/face_detection.py::FaceDetector`
+- `pipeline/typing.py` → replaced by `pipeline/types.py`
+- `pipeline/ws_server.py` → replaced by `pipeline/api/server.py`
+- `pipeline/capturer.py` → replaced by `pipeline/io/capture.py`
+- `pipeline/utilities.py` → functions migrated to `pipeline/io/ffmpeg.py`
 
 ### Data Flow (Event-Driven)
-1. `pipeline.py` → `core.run_headless()` parses args → updates `CONFIG`
-2. `WebSocketAPIServer` starts on port 9000, listening for commands
+1. `pipeline.py` → `core.run_headless()` parses args → loads `.env` → updates `CONFIG`
+2. `WebSocketAPIServer` starts on port 9000 (`ws://host:9000/ws`), single port
 3. **Batch mode**: `ProcessingPipeline.run_batch()` → detects faces → swaps → enhances → outputs
 4. **Stream mode**: `ProcessingPipeline.run_stream()` → captures frames → detects/tracks → swaps → async enhancement → emits `FRAME_READY` event
-5. Events broadcast to clients via WebSocket (no polling)
-6. `desktop/bridge.py` subscribes to events, updates UI
+5. `FRAME_READY` → server encodes JPEG → pushes binary to all WebSocket clients (no polling)
+6. `STATUS_CHANGED`, `DETECTION` events → server pushes JSON text to all clients
+7. `desktop/bridge.py` receives push callbacks, updates frame buffers and UI state
 
 **Event Flow:**
 ```

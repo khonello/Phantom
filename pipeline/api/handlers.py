@@ -9,35 +9,37 @@ commands are received from clients.
 
 Extracted from pipeline/control.py:_dispatch() but with proper typing
 and separation of concerns.
+
+HandlerContext provides dependency injection — no module-level globals.
 """
 
 import os
 import threading
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from pipeline.config import FaceSwapConfig
 from pipeline.api.schema import ResponseMessage
 from pipeline.processing.pipeline import ProcessingPipeline
 from pipeline.logging import emit_status, emit_error
-from pipeline.utilities import is_image, is_video, normalize_output_path
+from pipeline.io.ffmpeg import is_image, is_video, normalize_output_path
 
 
-# Global reference to current pipeline (set by server)
-_pipeline: Optional[ProcessingPipeline] = None
-_shutdown_event: Optional[threading.Event] = None
-
-
-def set_pipeline(pipeline: ProcessingPipeline, shutdown_event: threading.Event) -> None:
+@dataclass
+class HandlerContext:
     """
-    Set references to the pipeline and shutdown event (called by server).
+    Dependency injection context for command handlers.
 
-    Args:
+    Replaces module-level globals (_pipeline, _shutdown_event).
+    Passed through dispatch_command() so handlers remain testable.
+
+    Attributes:
         pipeline: ProcessingPipeline instance
         shutdown_event: threading.Event for shutdown signaling
     """
-    global _pipeline, _shutdown_event
-    _pipeline = pipeline
-    _shutdown_event = shutdown_event
+
+    pipeline: Optional[ProcessingPipeline]
+    shutdown_event: Optional[threading.Event]
 
 
 # ============================================================================
@@ -592,7 +594,7 @@ def dispatch_command(
     command_type: str,
     data: Dict[str, Any],
     config: FaceSwapConfig,
-    pipeline: Optional[ProcessingPipeline],
+    ctx: HandlerContext,
 ) -> ResponseMessage:
     """
     Dispatch a command to the appropriate handler.
@@ -601,7 +603,7 @@ def dispatch_command(
         command_type: Type of command (e.g., 'set_source', 'start')
         data: Command data dictionary
         config: FaceSwapConfig
-        pipeline: ProcessingPipeline (may be None)
+        ctx: HandlerContext with pipeline and shutdown_event references
 
     Returns:
         ResponseMessage with result
@@ -620,13 +622,13 @@ def dispatch_command(
             return handle_set_output(config, data.get('path', ''))
 
         elif command_type == 'start':
-            return handle_start(config, pipeline)
+            return handle_start(config, ctx.pipeline)
 
         elif command_type == 'start_stream':
-            return handle_start_stream(config, pipeline)
+            return handle_start_stream(config, ctx.pipeline)
 
         elif command_type == 'stop':
-            return handle_stop(pipeline)
+            return handle_stop(ctx.pipeline)
 
         elif command_type == 'set_quality':
             return handle_set_quality(config, data.get('preset', 'optimal'))
@@ -647,7 +649,7 @@ def dispatch_command(
             return handle_cleanup_session(config)
 
         elif command_type == 'shutdown':
-            return handle_shutdown(_shutdown_event)
+            return handle_shutdown(ctx.shutdown_event)
 
         else:
             return ResponseMessage(

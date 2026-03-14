@@ -3,16 +3,43 @@ Face detection service for the Phantom pipeline.
 
 Extracted from pipeline/face_analyser.py. Provides a clean interface
 for detecting and analyzing faces in frames without global state.
+
+Model cache priority:
+1. /workspace/models/insightface/ (RunPod Network Volume)
+2. ~/.insightface/models/ (default InsightFace path)
 """
 
+import os
 import threading
 from typing import Any, List, Optional
 
 import insightface
-import numpy as np
 
 from pipeline.config import FaceSwapConfig
-from pipeline.types import Frame, Detection, Bbox
+from pipeline.types import Frame, Detection
+from pipeline.logging import emit_status
+
+# RunPod Network Volume model cache path
+_RUNPOD_CACHE = '/workspace/models/insightface'
+# Default InsightFace model cache path
+_DEFAULT_CACHE = os.path.expanduser('~/.insightface')
+
+
+def _get_insightface_root() -> str:
+    """
+    Resolve InsightFace model root directory.
+
+    Checks RunPod Network Volume first, falls back to default.
+
+    Returns:
+        Absolute path to InsightFace model root
+    """
+    if os.path.isdir(_RUNPOD_CACHE):
+        emit_status(f'Using RunPod model cache: {_RUNPOD_CACHE}', scope='FACE_DETECTOR')
+        # insightface uses INSIGHTFACE_HOME env var to override root
+        return os.path.dirname(_RUNPOD_CACHE)  # parent of 'insightface/'
+    emit_status(f'Using default model cache: {_DEFAULT_CACHE}', scope='FACE_DETECTOR')
+    return _DEFAULT_CACHE
 
 
 class FaceDetector:
@@ -21,6 +48,9 @@ class FaceDetector:
 
     This service is thread-safe and maintains an internal cache of the
     face analysis model. Configuration is passed in the constructor.
+
+    Checks RunPod Network Volume (/workspace/models/insightface/) before
+    downloading to the default InsightFace cache (~/.insightface/models/).
 
     Example:
         detector = FaceDetector(CONFIG)
@@ -40,17 +70,24 @@ class FaceDetector:
         self._analyser: Optional[Any] = None
         self._lock = threading.Lock()
 
+        # Eager loading: start model load in background thread to avoid
+        # first-frame spike. Model will be ready by the time first frame arrives.
+        threading.Thread(target=self._get_analyser, daemon=True, name='FaceDetector.preload').start()
+
     def _get_analyser(self) -> Any:
         """
         Get or create the FaceAnalysis model (lazy initialization).
 
         Thread-safe. Model is cached after first access.
+        Resolves model root to RunPod volume if available.
         """
         if self._analyser is None:
             with self._lock:
                 if self._analyser is None:
+                    root = _get_insightface_root()
                     self._analyser = insightface.app.FaceAnalysis(
                         name='buffalo_l',
+                        root=root,
                         providers=self.config.execution_providers,
                     )
                     self._analyser.prepare(ctx_id=0, det_size=(640, 640))
@@ -74,13 +111,7 @@ class FaceDetector:
 
             detections = []
             for face in raw_faces:
-                bbox = Bbox.from_insightface(face.bbox)
-                det = Detection(
-                    face=face,
-                    bbox=bbox,
-                    kps=face.kps if hasattr(face, 'kps') else np.array([]),
-                    confidence=float(face.score) if hasattr(face, 'score') else 0.0,
-                )
+                det = Detection.from_insightface(face)
                 detections.append(det)
             return detections
         except IndexError:

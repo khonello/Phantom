@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"from pipeline.config import CONFIG; from pipeline.events import BUS; from pipeline.logging import emit_status; print\\('Foundation imports successful'\\)\" 2>&1)",
+      "Bash(git commit:*)"
+    ]
+  }
+}

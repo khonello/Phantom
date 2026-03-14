@@ -93,7 +93,7 @@ class Detection:
     Represents a detected face in a frame.
 
     Combines the face model (for swapping) with its spatial location
-    and confidence score.
+    and confidence score. This is the single canonical face type.
     """
 
     face: Face
@@ -101,12 +101,28 @@ class Detection:
     kps: np.ndarray  # keypoints array
     confidence: float
 
+    @classmethod
+    def from_insightface(cls, face: 'Face') -> 'Detection':
+        """
+        Create a Detection from a raw InsightFace Face object.
+
+        Args:
+            face: Raw InsightFace Face object
+
+        Returns:
+            Detection wrapping the face with parsed bbox and kps
+        """
+        bbox = Bbox.from_insightface(face.bbox)
+        kps = face.kps if hasattr(face, 'kps') and face.kps is not None else np.array([])
+        confidence = float(face.score) if hasattr(face, 'score') else 0.0
+        return cls(face=face, bbox=bbox, kps=kps, confidence=confidence)
+
     def to_dict(self) -> dict:
         """Serialize to dictionary for logging/debugging."""
         return {
             'bbox': {'x': self.bbox.x, 'y': self.bbox.y, 'w': self.bbox.w, 'h': self.bbox.h},
             'confidence': float(self.confidence),
-            'kps_shape': self.kps.shape if self.kps is not None else None,
+            'kps_shape': list(self.kps.shape) if self.kps is not None else None,
         }
 
 

@@ -1,304 +1,413 @@
 """
 WebSocket API server for the Phantom pipeline.
 
-Replaces the HTTP control server (pipeline/control.py) with a modern,
-type-safe, event-driven API using WebSockets.
+Provides a real WebSocket server for push-based frame delivery and event streaming.
+Replaces the HTTP-based implementation with:
+- Text frames: JSON messages for commands and events
+- Binary frames: JPEG-encoded video frames pushed to all clients
 
-Responsibilities:
-- Accept WebSocket connections from clients
-- Route incoming commands to handlers
-- Broadcast pipeline events to all connected clients
-- Maintain connection state
+Protocol:
+  - Client sends: {"action": "<command>", "data": {...}}
+  - Server pushes events: {"type": "event", "event": "<name>", "data": {...}}
+  - Server pushes frames: raw JPEG bytes (binary frames)
 
-Uses the simplejson-compatible JSON serialization.
+Server listens on ws://host:9000/ws
+Health check: send {"action": "health"}, receive {"status": "healthy", "uptime": <seconds>}
 """
 
 import json
 import threading
 import time
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, Optional, Set
 
 from pipeline.config import FaceSwapConfig, CONFIG
 from pipeline.events import BUS, FRAME_READY, DETECTION, STATUS_CHANGED, PIPELINE_STARTED, PIPELINE_STOPPED
-from pipeline.api.schema import ResponseMessage, CommandMessage
-from pipeline.api.handlers import dispatch_command, set_pipeline
+from pipeline.api.schema import ResponseMessage
+from pipeline.api.handlers import dispatch_command, HandlerContext
 from pipeline.processing.pipeline import ProcessingPipeline
 from pipeline.logging import emit_status, emit_error
 
 
-class SimpleWebSocketServer:
+class WebSocketAPIServer:
     """
-    Minimal WebSocket server for demonstration purposes.
+    WebSocket API server for Phantom pipeline.
 
-    In production, use websockets or aiohttp library.
-    This version uses HTTP polling as a fallback.
-    """
+    Accepts WebSocket connections at ws://host:9000/ws.
+    Pushes JPEG frames (binary) and JSON events (text) to all connected clients.
+    Receives commands as JSON text frames.
 
-    def __init__(self, config: FaceSwapConfig, pipeline: ProcessingPipeline, port: int = 9001) -> None:
-        """
-        Initialize WebSocket server.
-
-        Args:
-            config: FaceSwapConfig
-            pipeline: ProcessingPipeline instance
-            port: Server port
-        """
-        self.config = config
-        self.pipeline = pipeline
-        self.port = port
-
-        self._running = False
-        self._stop_event = threading.Event()
-        self._server_thread: Optional[threading.Thread] = None
-        self._clients: Set[str] = set()  # Client IDs
-        self._client_messages: Dict[str, List[Dict[str, Any]]] = {}  # Messages per client
-        self._client_lock = threading.Lock()
-
-        # Register event handlers
-        BUS.on(FRAME_READY, self._on_frame_ready)
-        BUS.on(DETECTION, self._on_detection)
-        BUS.on(STATUS_CHANGED, self._on_status)
-        BUS.on(PIPELINE_STARTED, self._on_pipeline_started)
-        BUS.on(PIPELINE_STOPPED, self._on_pipeline_stopped)
-
-        # Set pipeline reference for handlers
-        set_pipeline(pipeline, config.shutdown_event)
-
-    def start(self) -> None:
-        """Start the server."""
-        if self._running:
-            return
-
-        self._running = True
-        self._stop_event.clear()
-
-        self._server_thread = threading.Thread(target=self._server_loop, daemon=True)
-        self._server_thread.start()
-
-        emit_status(f'API server started on port {self.port}', scope='API_SERVER')
-
-    def stop(self) -> None:
-        """Stop the server."""
-        self._running = False
-        self._stop_event.set()
-
-        if self._server_thread is not None:
-            self._server_thread.join(timeout=2.0)
-            self._server_thread = None
-
-        emit_status('API server stopped', scope='API_SERVER')
-
-    def _server_loop(self) -> None:
-        """Main server loop."""
-        while self._running and not self._stop_event.is_set():
-            try:
-                # Simulate message processing from clients
-                self._process_pending_messages()
-                time.sleep(0.1)
-            except Exception as e:
-                emit_error(f'Server loop error: {e}', exception=e, scope='API_SERVER')
-
-    def _process_pending_messages(self) -> None:
-        """Process pending messages from all clients."""
-        with self._client_lock:
-            for client_id in list(self._client_messages.keys()):
-                messages = self._client_messages.get(client_id, [])
-                if messages:
-                    msg = messages.pop(0)
-                    self._handle_message(client_id, msg)
-
-    def _handle_message(self, client_id: str, message: Dict[str, Any]) -> None:
-        """
-        Handle a message from a client.
-
-        Args:
-            client_id: Client identifier
-            message: Message dictionary
-        """
-        try:
-            command_type = message.get('type')
-            request_id = message.get('request_id')
-            data = message.get('data', {})
-
-            if not command_type:
-                return
-
-            # Dispatch to handler
-            response = dispatch_command(command_type, data, self.config, self.pipeline)
-
-            # Set request ID if provided
-            if request_id:
-                response.request_id = request_id
-
-            # Send response to client
-            self._send_to_client(client_id, response.to_dict())
-
-        except Exception as e:
-            emit_error(f'Message handling error: {e}', exception=e, scope='API_SERVER')
-
-    def _broadcast_message(self, message: Dict[str, Any]) -> None:
-        """
-        Broadcast a message to all connected clients.
-
-        Args:
-            message: Message dictionary
-        """
-        with self._client_lock:
-            for client_id in list(self._clients):
-                self._send_to_client(client_id, message)
-
-    def _send_to_client(self, client_id: str, message: Dict[str, Any]) -> None:
-        """
-        Send a message to a specific client.
-
-        Args:
-            client_id: Client identifier
-            message: Message dictionary
-        """
-        # In a real WebSocket implementation, this would queue the message
-        # For now, this is a placeholder for client messaging
-        pass
-
-    def _add_client(self, client_id: str) -> None:
-        """Register a new client."""
-        with self._client_lock:
-            self._clients.add(client_id)
-            self._client_messages[client_id] = []
-
-    def _remove_client(self, client_id: str) -> None:
-        """Unregister a client."""
-        with self._client_lock:
-            self._clients.discard(client_id)
-            self._client_messages.pop(client_id, None)
-
-    def add_client_message(self, client_id: str, message: Dict[str, Any]) -> None:
-        """
-        Add a message from a client (called by HTTP handler or WebSocket handler).
-
-        Args:
-            client_id: Client identifier
-            message: Message dictionary
-        """
-        self._add_client(client_id)
-        with self._client_lock:
-            if client_id in self._client_messages:
-                self._client_messages[client_id].append(message)
-
-    def get_client_response(self, client_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Get a response for a client (called by HTTP handler).
-
-        In a real WebSocket implementation, clients would receive messages
-        via the persistent connection. For HTTP polling, responses are
-        fetched via this method.
-
-        Args:
-            client_id: Client identifier
-
-        Returns:
-            Latest response message or None
-        """
-        # Placeholder for response queue per client
-        return None
-
-    # ========================================================================
-    # Event Handlers
-    # ========================================================================
-
-    def _on_frame_ready(self, frame: Any, seq: int) -> None:
-        """Handle FRAME_READY event."""
-        # Don't broadcast raw frame data (too large)
-        # Just emit a notification
-        self._broadcast_message({
-            'type': 'event',
-            'event': 'frame_ready',
-            'data': {'seq': seq},
-        })
-
-    def _on_detection(self, detection: Dict[str, Any], seq: int) -> None:
-        """Handle DETECTION event."""
-        self._broadcast_message({
-            'type': 'event',
-            'event': 'detection',
-            'data': {'detection': detection, 'seq': seq},
-        })
-
-    def _on_status(self, message: str, scope: str = 'PHANTOM', level: str = 'info') -> None:
-        """Handle STATUS_CHANGED event."""
-        self._broadcast_message({
-            'type': 'event',
-            'event': 'status',
-            'data': {'message': message, 'scope': scope, 'level': level},
-        })
-
-    def _on_pipeline_started(self) -> None:
-        """Handle PIPELINE_STARTED event."""
-        self._broadcast_message({
-            'type': 'event',
-            'event': 'pipeline_started',
-            'data': {},
-        })
-
-    def _on_pipeline_stopped(self) -> None:
-        """Handle PIPELINE_STOPPED event."""
-        self._broadcast_message({
-            'type': 'event',
-            'event': 'pipeline_stopped',
-            'data': {},
-        })
-
-
-class WebSocketAPIServer(SimpleWebSocketServer):
-    """
-    Main WebSocket API server for Phantom.
-
-    Extends SimpleWebSocketServer with full WebSocket support when
-    websockets library is available.
+    Supports:
+    - Frame streaming (FRAME_READY event → binary JPEG push)
+    - Status updates (STATUS_CHANGED event → JSON text push)
+    - Command dispatch (JSON text received → handler response)
+    - Health check ({"action": "health"} command)
+    - Heartbeat ping/pong every 30 seconds
 
     Attributes:
         config: FaceSwapConfig
         pipeline: ProcessingPipeline
-        port: Server port (default 9001)
+        port: Server port (default 9000)
     """
 
     def __init__(
         self,
         config: FaceSwapConfig = CONFIG,
         pipeline: Optional[ProcessingPipeline] = None,
-        port: int = 9001,
+        port: int = 9000,
     ) -> None:
         """
-        Initialize API server.
+        Initialize WebSocket API server.
 
         Args:
             config: FaceSwapConfig instance
-            pipeline: ProcessingPipeline instance (if None, created later)
-            port: Server port
+            pipeline: ProcessingPipeline instance (created if None)
+            port: Server port (default 9000)
         """
-        if pipeline is None:
-            from pipeline.processing.pipeline import ProcessingPipeline
-            pipeline = ProcessingPipeline(config, BUS)
+        self.config = config
+        self.port = port
 
-        super().__init__(config, pipeline, port)
+        if pipeline is None:
+            pipeline = ProcessingPipeline(config, BUS)
+        self.pipeline = pipeline
+
+        self._running = False
+        self._stop_event = threading.Event()
+        self._server_thread: Optional[threading.Thread] = None
+        self._heartbeat_thread: Optional[threading.Thread] = None
+
+        # Connected WebSocket clients (set of websocket objects)
+        self._clients: Set[Any] = set()
+        self._clients_lock = threading.Lock()
+
+        # Start time for uptime reporting
+        self._start_time = time.time()
+
+        # Handler context (dependency injection — no globals)
+        self._ctx = HandlerContext(
+            pipeline=self.pipeline,
+            shutdown_event=self.config.shutdown_event,
+        )
+
+        # Register event handlers
+        BUS.on(FRAME_READY, self._on_frame_ready)
+        BUS.on(STATUS_CHANGED, self._on_status_changed)
+        BUS.on(DETECTION, self._on_detection)
+        BUS.on(PIPELINE_STARTED, self._on_pipeline_started)
+        BUS.on(PIPELINE_STOPPED, self._on_pipeline_stopped)
 
     @classmethod
     def create_with_pipeline(
         cls,
         config: FaceSwapConfig,
         bus: Any,
-        port: int = 9001,
+        port: int = 9000,
     ) -> 'WebSocketAPIServer':
         """
         Create server with a new pipeline.
 
         Args:
             config: FaceSwapConfig
-            bus: EventBus
+            bus: EventBus (unused, kept for API compatibility)
             port: Server port
 
         Returns:
             Initialized WebSocketAPIServer
         """
-        from pipeline.processing.pipeline import ProcessingPipeline
-        pipeline = ProcessingPipeline(config, bus)
+        pipeline = ProcessingPipeline(config, BUS)
         return cls(config, pipeline, port)
+
+    def start(self) -> None:
+        """Start the WebSocket server in a background thread."""
+        if self._running:
+            return
+
+        self._running = True
+        self._stop_event.clear()
+        self._start_time = time.time()
+
+        self._server_thread = threading.Thread(target=self._server_loop, daemon=True)
+        self._server_thread.start()
+
+        self._heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
+        self._heartbeat_thread.start()
+
+        emit_status(f'WebSocket API server started on port {self.port}', scope='API_SERVER')
+
+    def stop(self) -> None:
+        """Stop the WebSocket server."""
+        self._running = False
+        self._stop_event.set()
+
+        # Close all client connections
+        with self._clients_lock:
+            for ws in list(self._clients):
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+            self._clients.clear()
+
+        if self._server_thread is not None:
+            self._server_thread.join(timeout=3.0)
+            self._server_thread = None
+
+        if self._heartbeat_thread is not None:
+            self._heartbeat_thread.join(timeout=3.0)
+            self._heartbeat_thread = None
+
+        emit_status('WebSocket API server stopped', scope='API_SERVER')
+
+    # ── Server loop ──────────────────────────────────────────────────────────
+
+    def _server_loop(self) -> None:
+        """Main WebSocket server loop using websockets.sync.server."""
+        try:
+            from websockets.sync.server import serve as ws_serve
+
+            def handler(websocket: Any) -> None:
+                """Handle a new WebSocket connection."""
+                with self._clients_lock:
+                    self._clients.add(websocket)
+
+                emit_status(f'Client connected: {websocket.remote_address}', scope='API_SERVER')
+
+                try:
+                    for message in websocket:
+                        if self._stop_event.is_set():
+                            break
+                        if isinstance(message, str):
+                            self._handle_text_message(websocket, message)
+                        # Binary messages: could be file uploads (Phase 4B.5)
+                        # For now, ignore inbound binary frames
+                except Exception as e:
+                    if self._running:
+                        emit_error(
+                            f'Client connection error: {e}',
+                            exception=e,
+                            scope='API_SERVER',
+                        )
+                finally:
+                    with self._clients_lock:
+                        self._clients.discard(websocket)
+                    emit_status(
+                        f'Client disconnected: {websocket.remote_address}',
+                        scope='API_SERVER',
+                    )
+
+            with ws_serve(
+                handler,
+                '0.0.0.0',
+                self.port,
+                max_size=64 * 1024 * 1024,  # 64 MB max message (for file transfers)
+            ) as server:
+                emit_status(
+                    f'WebSocket server listening on ws://0.0.0.0:{self.port}/ws',
+                    scope='API_SERVER',
+                )
+                self._stop_event.wait()
+                server.shutdown()
+
+        except OSError as e:
+            if 'Address already in use' in str(e):
+                emit_error(f'Port {self.port} already in use', scope='API_SERVER')
+            else:
+                emit_error(f'Server error: {e}', exception=e, scope='API_SERVER')
+        except Exception as e:
+            emit_error(f'Server loop error: {e}', exception=e, scope='API_SERVER')
+
+    # ── Message handling ──────────────────────────────────────────────────────
+
+    def _handle_text_message(self, websocket: Any, message: str) -> None:
+        """
+        Handle a JSON text message from a client.
+
+        Args:
+            websocket: The WebSocket connection that sent the message
+            message: JSON string
+        """
+        try:
+            data = json.loads(message)
+        except json.JSONDecodeError as e:
+            self._send_json(websocket, {
+                'type': 'error',
+                'error': f'Invalid JSON: {e}',
+            })
+            return
+
+        action = data.get('action')
+        if not action:
+            self._send_json(websocket, {
+                'type': 'error',
+                'error': 'Missing "action" field',
+            })
+            return
+
+        # Health check — fast path
+        if action == 'health':
+            self._send_json(websocket, {
+                'type': 'response',
+                'action': 'health',
+                'status': 'healthy',
+                'uptime': time.time() - self._start_time,
+            })
+            return
+
+        # Dispatch to handler
+        try:
+            response = dispatch_command(
+                action,
+                data,
+                self.config,
+                self._ctx,
+            )
+            self._send_json(websocket, response.to_dict())
+        except Exception as e:
+            emit_error(f'Command dispatch error: {e}', exception=e, scope='API_SERVER')
+            self._send_json(websocket, {
+                'type': 'response',
+                'action': action,
+                'success': False,
+                'error': str(e),
+            })
+
+    # ── Push helpers ──────────────────────────────────────────────────────────
+
+    def _broadcast_text(self, payload: Dict[str, Any]) -> None:
+        """
+        Broadcast a JSON message to all connected clients.
+
+        Args:
+            payload: Dictionary to serialize and send as JSON text
+        """
+        message = json.dumps(payload)
+        with self._clients_lock:
+            disconnected = set()
+            for ws in self._clients:
+                try:
+                    ws.send(message)
+                except Exception:
+                    disconnected.add(ws)
+            for ws in disconnected:
+                self._clients.discard(ws)
+
+    def _broadcast_binary(self, data: bytes) -> None:
+        """
+        Broadcast binary data (JPEG frame) to all connected clients.
+
+        Args:
+            data: Raw bytes to send (JPEG-encoded frame)
+        """
+        with self._clients_lock:
+            disconnected = set()
+            for ws in self._clients:
+                try:
+                    ws.send(data)
+                except Exception:
+                    disconnected.add(ws)
+            for ws in disconnected:
+                self._clients.discard(ws)
+
+    def _send_json(self, websocket: Any, payload: Dict[str, Any]) -> None:
+        """
+        Send JSON to a single client.
+
+        Args:
+            websocket: Target WebSocket connection
+            payload: Dictionary to serialize and send
+        """
+        try:
+            websocket.send(json.dumps(payload))
+        except Exception as e:
+            emit_error(f'Failed to send response: {e}', scope='API_SERVER')
+
+    # ── Heartbeat ────────────────────────────────────────────────────────────
+
+    def _heartbeat_loop(self) -> None:
+        """Send WebSocket ping to all clients every 30 seconds."""
+        while self._running and not self._stop_event.is_set():
+            self._stop_event.wait(timeout=30.0)
+            if not self._running:
+                break
+            with self._clients_lock:
+                disconnected = set()
+                for ws in self._clients:
+                    try:
+                        ws.ping()
+                    except Exception:
+                        disconnected.add(ws)
+                for ws in disconnected:
+                    self._clients.discard(ws)
+
+    # ── Event handlers ───────────────────────────────────────────────────────
+
+    def _on_frame_ready(self, frame: Any, seq: int) -> None:
+        """
+        Handle FRAME_READY event — encode frame as JPEG and broadcast to clients.
+
+        Args:
+            frame: numpy frame array
+            seq: Sequence number
+        """
+        import cv2
+        try:
+            success, jpeg_data = cv2.imencode(
+                '.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85]
+            )
+            if success:
+                self._broadcast_binary(jpeg_data.tobytes())
+        except Exception as e:
+            emit_error(f'Frame encoding error: {e}', exception=e, scope='API_SERVER')
+
+    def _on_status_changed(
+        self,
+        message: str,
+        scope: str = 'PHANTOM',
+        level: str = 'info',
+    ) -> None:
+        """
+        Handle STATUS_CHANGED event — push JSON text to all clients.
+
+        Args:
+            message: Status message
+            scope: Source scope
+            level: Log level
+        """
+        self._broadcast_text({
+            'type': 'event',
+            'event': 'STATUS_CHANGED',
+            'message': message,
+            'scope': scope,
+            'level': level,
+        })
+        # Also update config status message
+        if self.config:
+            self.config.status_message = message
+
+    def _on_detection(self, detection: Any, seq: int) -> None:
+        """
+        Handle DETECTION event — push JSON text to all clients.
+
+        Args:
+            detection: Detection dictionary
+            seq: Sequence number
+        """
+        self._broadcast_text({
+            'type': 'event',
+            'event': 'DETECTION',
+            'detection': detection,
+            'seq': seq,
+        })
+
+    def _on_pipeline_started(self) -> None:
+        """Handle PIPELINE_STARTED event."""
+        self._broadcast_text({
+            'type': 'event',
+            'event': 'PIPELINE_STARTED',
+        })
+
+    def _on_pipeline_stopped(self) -> None:
+        """Handle PIPELINE_STOPPED event."""
+        self._broadcast_text({
+            'type': 'event',
+            'event': 'PIPELINE_STOPPED',
+        })

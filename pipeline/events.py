@@ -1,14 +1,22 @@
 """
 Event system for the Phantom pipeline.
 
-Provides a lightweight, synchronous pub/sub mechanism for inter-component
-communication without requiring external dependencies.
+Provides a lightweight pub/sub mechanism for inter-component communication.
+Handlers are dispatched in a ThreadPoolExecutor so the emitting thread is
+never blocked by slow handlers (e.g., WebSocket sends, UI updates).
 
 Events are identified by string constants to prevent typos and improve IDE
 autocomplete.
 """
 
+import concurrent.futures
 from typing import Callable, Dict, List, Any, Optional
+
+# Thread pool for async event dispatch (shared across all EventBus instances)
+_DISPATCH_POOL = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix='EventBus',
+)
 
 
 class EventBus:
@@ -50,19 +58,34 @@ class EventBus:
 
     def emit(self, event: str, **data: Any) -> None:
         """
-        Emit an event, calling all registered handlers synchronously.
+        Emit an event, dispatching all handlers asynchronously via ThreadPoolExecutor.
+
+        The calling thread returns immediately — handlers run concurrently in the
+        shared thread pool. This prevents slow handlers (WebSocket sends, UI updates)
+        from blocking the main pipeline loop.
 
         Args:
             event: Event type name
             **data: Keyword arguments passed to all handlers
         """
-        for handler in self._handlers.get(event, []):
-            try:
-                handler(**data)
-            except Exception as e:
-                # Log but don't crash if a handler fails
-                import sys
-                print(f"Warning: event handler for '{event}' failed: {e}", file=sys.stderr)
+        for handler in list(self._handlers.get(event, [])):
+            _DISPATCH_POOL.submit(self._safe_call, event, handler, data)
+
+    @staticmethod
+    def _safe_call(event: str, handler: Callable[..., None], data: Dict[str, Any]) -> None:
+        """
+        Invoke a handler safely, logging exceptions without crashing.
+
+        Args:
+            event: Event name (for error reporting)
+            handler: Handler callable
+            data: Keyword arguments to pass
+        """
+        try:
+            handler(**data)
+        except Exception as e:
+            import sys
+            print(f"Warning: event handler for '{event}' failed: {e}", file=sys.stderr)
 
     def once(self, event: str, handler: Callable[..., None]) -> None:
         """

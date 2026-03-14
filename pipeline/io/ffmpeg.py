@@ -11,13 +11,17 @@ Extracted from pipeline/utilities.py. Uses config object instead of globals.
 """
 
 import glob
+import mimetypes
 import os
 import platform
 import shutil
 import ssl
 import subprocess
+import urllib.request
 from pathlib import Path
 from typing import List, Optional
+
+from tqdm import tqdm
 
 from pipeline.config import FaceSwapConfig
 from pipeline.logging import emit_status, emit_warning
@@ -292,3 +296,89 @@ def clean_temp(config: FaceSwapConfig, target_path: str) -> None:
     # Remove parent if empty
     if os.path.exists(parent_directory_path) and not os.listdir(parent_directory_path):
         os.rmdir(parent_directory_path)
+
+
+# ============================================================================
+# File type utilities (migrated from pipeline/utilities.py)
+# ============================================================================
+
+def is_image(image_path: str) -> bool:
+    """
+    Check if path points to an image file.
+
+    Args:
+        image_path: Path to check
+
+    Returns:
+        True if path is an existing image file
+    """
+    if image_path and os.path.isfile(image_path):
+        mimetype, _ = mimetypes.guess_type(image_path)
+        return bool(mimetype and mimetype.startswith('image/'))
+    return False
+
+
+def is_video(video_path: str) -> bool:
+    """
+    Check if path points to a video file.
+
+    Args:
+        video_path: Path to check
+
+    Returns:
+        True if path is an existing video file
+    """
+    if video_path and os.path.isfile(video_path):
+        mimetype, _ = mimetypes.guess_type(video_path)
+        return bool(mimetype and mimetype.startswith('video/'))
+    return False
+
+
+def has_image_extension(image_path: str) -> bool:
+    """
+    Check if path has a common image extension.
+
+    Args:
+        image_path: Path to check
+
+    Returns:
+        True if path has an image extension
+    """
+    return image_path.lower().endswith(('png', 'jpg', 'jpeg', 'webp'))
+
+
+def resolve_relative_path(path: str) -> str:
+    """
+    Resolve a path relative to the pipeline package directory.
+
+    Args:
+        path: Relative path
+
+    Returns:
+        Absolute path resolved from pipeline package root
+    """
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', path))
+
+
+def conditional_download(download_directory_path: str, urls: List[str]) -> None:
+    """
+    Download files if they don't already exist.
+
+    Args:
+        download_directory_path: Directory to save downloaded files
+        urls: List of URLs to download
+    """
+    if not os.path.exists(download_directory_path):
+        os.makedirs(download_directory_path)
+
+    for url in urls:
+        download_file_path = os.path.join(download_directory_path, os.path.basename(url))
+        if not os.path.exists(download_file_path):
+            request = urllib.request.urlopen(url)  # type: ignore[attr-defined]
+            total = int(request.headers.get('Content-Length', 0))
+            with tqdm(total=total, desc='Downloading', unit='B', unit_scale=True, unit_divisor=1024) as progress:
+                urllib.request.urlretrieve(  # type: ignore[attr-defined]
+                    url,
+                    download_file_path,
+                    reporthook=lambda count, block_size, total_size: progress.update(block_size),
+                )

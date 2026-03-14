@@ -43,12 +43,16 @@ class AsyncProcessor:
         self.processor = processor
         self.stop_event = stop_event
 
-        # Queues are size 1 — only keep latest frame
-        self._input_queue: queue.Queue = queue.Queue(maxsize=1)
-        self._output_queue: queue.Queue = queue.Queue(maxsize=1)
+        # Queues are size 3 to allow burst smoothing while still dropping
+        # under sustained overload. Size 1 caused too many silent drops.
+        self._input_queue: queue.Queue = queue.Queue(maxsize=3)
+        self._output_queue: queue.Queue = queue.Queue(maxsize=3)
 
         self._thread: Optional[threading.Thread] = None
         self._running = False
+
+        # Drop counter for backpressure visibility
+        self.drop_count: int = 0
 
     def submit(self, seq: int, frame: Frame) -> None:
         """
@@ -60,10 +64,11 @@ class AsyncProcessor:
             seq: Sequence number (for tracking frame order)
             frame: Frame to process
         """
-        # Drop old frame if queue full
+        # Drop old frame if queue full and record metric
         if self._input_queue.full():
             try:
                 self._input_queue.get_nowait()
+                self.drop_count += 1
             except queue.Empty:
                 pass
 
@@ -113,8 +118,8 @@ class AsyncProcessor:
         """Worker thread main loop (runs processor asynchronously)."""
         while not self.stop_event.is_set() and self._running:
             try:
-                # Get input with timeout to allow checking stop_event
-                seq, frame = self._input_queue.get(timeout=0.1)
+                # Get input with short timeout to allow checking stop_event
+                seq, frame = self._input_queue.get(timeout=0.01)
             except queue.Empty:
                 continue
 

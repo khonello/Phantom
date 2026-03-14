@@ -7,11 +7,11 @@ from typing import Any, Dict, List, Optional
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QObject, Signal, Slot, Property, QTimer, QSize, Qt
+from PySide6.QtCore import QObject, Signal, Slot, Property, QTimer, Qt
 from PySide6.QtGui import QPixmap, QImage, QPainter
 from PySide6.QtQuick import QQuickPaintedItem
 
-from pipeline.utilities import is_image
+from pipeline.io.ffmpeg import is_image
 from desktop.controller import PipelineClient, UDP_INGEST_PORT
 
 _PANEL_MAX_W = 800
@@ -186,19 +186,15 @@ class Bridge(QObject):
         self._webcam_stop = threading.Event()
         self._broadcast_active = threading.Event()
 
-        # WebSocket receiver
-        self._ws_thread: Optional[threading.Thread] = None
-        self._ws_stop: Optional[threading.Event] = None
-
         # Virtual camera output
         self._vcam_thread: Optional[threading.Thread] = None
         self._vcam_stop: Optional[threading.Event] = None
         self._vcam_queue: queue.Queue = queue.Queue(maxsize=2)
 
-        self._status_polling = False
-        self._status_timer = QTimer(self)
-        self._status_timer.timeout.connect(self._poll_status)
-        self._status_timer.start(2000)
+        # Wire up WebSocket push callbacks from the client
+        self._client.on_frame = self._on_ws_frame
+        self._client.on_event = self._on_ws_event
+        self._client.on_connected = self._on_ws_connected
 
         # Single timer drives all frame updates on the main thread (~30fps)
         self._frame_timer = QTimer(self)
@@ -262,9 +258,8 @@ class Bridge(QObject):
         if not self._source_set:
             self._set_status('select a face image first')
             return
-        result = self._client.status()
-        if 'error' in result:
-            self._set_status(f'cannot reach server — {result["error"]}')
+        if not self._connected:
+            self._set_status('cannot reach server — not connected')
             return
         self._client.set_quality(self._quality)
         self._client.set_input_url(
@@ -273,7 +268,6 @@ class Bridge(QObject):
         self._client.start_stream()
         self._broadcast_active.set()
         self._last_frame_time = time.time()
-        self._start_ws_receiver()
         self._set_pipeline_running(True)
         self._set_status('pipeline connected · processing')
 
@@ -283,7 +277,6 @@ class Bridge(QObject):
             self._stop_vcam()
             self._set_virtual_cam_active(False)
         self._broadcast_active.clear()
-        self._stop_ws_receiver()
         self._set_pipeline_running(False)
         self._client.stop_stream()
         self._set_status('stopped')
@@ -352,15 +345,14 @@ class Bridge(QObject):
     @Slot()
     def cleanup(self) -> None:
         self._frame_timer.stop()
-        self._status_timer.stop()
         self._stop_vcam()
-        self._stop_ws_receiver()
         self._broadcast_active.clear()
         self._webcam_stop.set()
         if self._webcam_thread is not None:
             self._webcam_thread.join(timeout=3)
         self._client.stop_stream()
         self._client.shutdown()
+        self._client.close()
 
     # ── Internal ──────────────────────────────────────────────────────
 
@@ -399,43 +391,49 @@ class Bridge(QObject):
             self._live_version += 1
             self.liveVersionChanged.emit(self._live_version)
 
-    def _poll_status(self) -> None:
-        if self._status_polling:
-            return
-        self._status_polling = True
-        threading.Thread(target=self._fetch_status_bg, daemon=True).start()
+    # ── WebSocket push callbacks (called from background thread) ──────────────
 
-    def _fetch_status_bg(self) -> None:
-        result = self._client.status()
-        label = f'{self._client.host}:{self._client.port}'
-        if 'error' in result:
-            print(f'[DESKTOP.BRIDGE] Status poll failed: {result["error"]}')
-        self._apply_status(result, label)
+    def _on_ws_frame(self, jpeg_bytes: bytes) -> None:
+        """Called by PipelineClient when a JPEG frame arrives."""
+        live_buffer.update_from_bytes(jpeg_bytes)
+        self._last_frame_time = time.time()
+        if self._virtual_cam_active:
+            self._push_to_vcam(jpeg_bytes)
 
-    def _apply_status(self, result: Dict, label: str) -> None:
-        self._status_polling = False
-        if 'error' in result:
-            if self._connected:
-                self._connected = False
-                self.connectedChanged.emit(False)
-        else:
-            if not self._connected:
-                self._connected = True
-                self.connectedChanged.emit(True)
-            if self._embedding_pending:
-                if result.get('embedding_ready'):
-                    self._set_embedding_pending(False)
-                    self._set_status('embedding ready')
-                elif 'no face detected' in result.get('status_message', ''):
-                    self._set_embedding_pending(False)
-                    self._set_status('no face detected in selected images')
-            elif not self._pipeline_running:
-                msg = result.get('status_message', '')
-                if msg:
-                    self._set_status(msg)
-        if self._connection_label != label:
-            self._connection_label = label
-            self.connectionLabelChanged.emit(label)
+    def _on_ws_event(self, data: Dict) -> None:
+        """Called by PipelineClient when a JSON event arrives."""
+        event = data.get('event', '')
+        if event == 'STATUS_CHANGED':
+            message = data.get('message', '')
+            if message:
+                # Check embedding readiness from status message
+                if self._embedding_pending:
+                    if 'embedding' in message.lower() and 'ready' in message.lower():
+                        self._set_embedding_pending(False)
+                        self._set_status('embedding ready')
+                    elif 'no face detected' in message.lower():
+                        self._set_embedding_pending(False)
+                        self._set_status('no face detected in selected images')
+                    else:
+                        self._set_status(message)
+                elif not self._pipeline_running:
+                    self._set_status(message)
+        elif event == 'PIPELINE_STARTED':
+            self._set_pipeline_running(True)
+        elif event == 'PIPELINE_STOPPED':
+            self._set_pipeline_running(False)
+
+    def _on_ws_connected(self, connected: bool) -> None:
+        """Called by PipelineClient when connection status changes."""
+        if self._connected != connected:
+            self._connected = connected
+            self.connectedChanged.emit(connected)
+            label = self._client._ws_url
+            if self._connection_label != label:
+                self._connection_label = label
+                self.connectionLabelChanged.emit(label)
+            if not connected:
+                self._set_status('disconnected — reconnecting...')
 
     # ── Webcam thread (preview + optional broadcast) ───────────────────
 
@@ -524,50 +522,6 @@ class Bridge(QObject):
         except Exception as e:
             print(f'[DESKTOP.BRIDGE] ffmpeg broadcast failed to start: {e}')
             return None
-
-    # ── WebSocket receiver ────────────────────────────────────────────
-
-    def _start_ws_receiver(self) -> None:
-        self._stop_ws_receiver()
-        stop_event = threading.Event()
-        thread = threading.Thread(
-            target=self._run_ws_receiver,
-            args=(stop_event,),
-            daemon=True,
-        )
-        self._ws_thread = thread
-        self._ws_stop = stop_event
-        thread.start()
-
-    def _stop_ws_receiver(self) -> None:
-        if self._ws_stop is not None:
-            self._ws_stop.set()
-        if self._ws_thread is not None:
-            self._ws_thread.join(timeout=3)
-        self._ws_thread = None
-        self._ws_stop = None
-
-    def _run_ws_receiver(self, stop_event: threading.Event) -> None:
-        from websockets.sync.client import connect
-        ws_url = f'ws://{self._client.host}:{self._client.port + 1}'
-        while not stop_event.is_set():
-            try:
-                with connect(ws_url) as ws:
-                    self._last_frame_time = time.time()
-                    while not stop_event.is_set():
-                        try:
-                            data = ws.recv(timeout=2.0)
-                            if isinstance(data, bytes):
-                                live_buffer.update_from_bytes(data)
-                                self._last_frame_time = time.time()
-                                if self._virtual_cam_active:
-                                    self._push_to_vcam(data)
-                        except TimeoutError:
-                            if time.time() - self._last_frame_time > 3.0:
-                                self._set_status('no signal from server')
-            except Exception:
-                if not stop_event.is_set():
-                    time.sleep(1.0)
 
     # ── Virtual camera output ─────────────────────────────────────────
 

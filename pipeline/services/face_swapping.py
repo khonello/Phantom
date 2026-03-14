@@ -57,6 +57,11 @@ class FaceSwapper:
                     if not os.path.exists(model_path):
                         raise FileNotFoundError(f"Model not found: {model_path}")
 
+                    import onnxruntime as ort
+                    session_options = ort.SessionOptions()
+                    session_options.execution_mode = ort.ExecutionMode.ORT_PARALLEL
+                    session_options.intra_op_num_threads = 4
+
                     self._swapper = insightface.model_zoo.get_model(
                         model_path,
                         providers=self.config.execution_providers,
@@ -132,7 +137,7 @@ class FaceSwapper:
         answer = input('Download face swap model from Hugging Face? (y/n): ').strip().lower()
         if answer == 'y':
             try:
-                from pipeline.utilities import conditional_download
+                from pipeline.io.ffmpeg import conditional_download
                 conditional_download(model_dir, [hf_url])
                 if os.path.exists(model_path):
                     emit_status('Model downloaded successfully.', scope='SWAPPER')

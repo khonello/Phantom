@@ -194,6 +194,8 @@ class ProcessingPipeline:
         # Set up source
         input_source = self.config.input_url or 0
         cap = cv2.VideoCapture(input_source)
+        # Minimize capture buffer to reduce stale-frame latency
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         if not self.config.input_url:
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, 960)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 540)
@@ -213,6 +215,9 @@ class ProcessingPipeline:
         seq = 0
         drop_count = 0
         drop_window_start = time.time()
+        warmup_frames = getattr(self.config, 'warmup_frames', 0)
+        skip_count = 0  # consecutive frames to skip
+        _frame_interval = 1.0 / 30.0  # target 30fps
 
         try:
             while not self._stop_event.is_set():
@@ -222,6 +227,23 @@ class ProcessingPipeline:
 
                 frame_count += 1
                 seq += 1
+
+                # Skip warmup frames — allow models to initialize without
+                # emitting glitchy first frames to clients
+                if frame_count <= warmup_frames:
+                    continue
+
+                # Frame skipping under load: if async processor drops frames,
+                # skip every other input frame to give it room to catch up
+                if skip_count > 0:
+                    skip_count -= 1
+                    drop_count += 1
+                    continue
+                if self._async_enhancement and self._async_enhancement.drop_count > 0:
+                    skip_count = 1  # skip next frame
+                    self._async_enhancement.drop_count = 0
+
+                _frame_start = time.time()
 
                 # Run detection
                 frame = self._detection_proc.process(frame)

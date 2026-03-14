@@ -2,6 +2,14 @@
 
 import os
 import sys
+
+# Load .env before any config initialization
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # single thread doubles cuda performance - needs to be set before torch import
 if any(arg.startswith('--execution-provider') for arg in sys.argv):
     os.environ['OMP_NUM_THREADS'] = '1'
@@ -22,9 +30,6 @@ from pipeline.processing.pipeline import ProcessingPipeline
 from pipeline.events import BUS
 from pipeline.logging import emit_status
 from pipeline.api.schema import PRESETS
-
-if 'ROCMExecutionProvider' in CONFIG.execution_providers:
-    del torch
 
 warnings.filterwarnings('ignore', category=FutureWarning, module='insightface')
 warnings.filterwarnings('ignore', category=UserWarning, module='torchvision')
@@ -67,7 +72,13 @@ def parse_args() -> None:
     program.add_argument('--input-url', help='network stream URL (RTSP/RTMP/HTTP)',
                         dest='input_url', default=None)
     program.add_argument('--control-port', help='API server port',
-                        dest='control_port', type=int, default=9000)
+                        dest='control_port', type=int,
+                        default=int(os.environ.get('API_PORT', '9000')))
+    program.add_argument('--stream', help='start in stream mode (realtime webcam/network)',
+                        dest='stream_mode', action='store_true', default=False)
+    program.add_argument('--log-level', help='logging level (debug/info/warning/error)',
+                        dest='log_level', default=os.environ.get('LOG_LEVEL', 'info'),
+                        choices=['debug', 'info', 'warning', 'error'])
     program.add_argument('-v', '--version', action='version',
                         version=f'{pipeline.metadata.name} {pipeline.metadata.version}')
 
@@ -104,13 +115,25 @@ def parse_args() -> None:
     if args.input_url:
         CONFIG.set('input_url', args.input_url)
     CONFIG.set('control_port', args.control_port)
+    CONFIG.set('log_level', args.log_level)
+    CONFIG.set('stream_mode', args.stream_mode)
 
     # Set output path (normalize if directory)
-    from pipeline.utilities import normalize_output_path
-    CONFIG.set('output_path', normalize_output_path(CONFIG.source_path, CONFIG.target_path, args.output_path))
+    from pipeline.io.ffmpeg import normalize_output_path
+    CONFIG.set('output_path', normalize_output_path(CONFIG.source_path or '', CONFIG.target_path or '', args.output_path or ''))
 
     # Determine if headless mode
     CONFIG.set('headless', bool(CONFIG.source_path and CONFIG.target_path and CONFIG.output_path))
+
+    # Log CUDA availability
+    try:
+        if torch.cuda.is_available():
+            gpu_name = torch.cuda.get_device_name(0)
+            emit_status(f'GPU available: {gpu_name}', scope='CORE')
+        else:
+            emit_status('No GPU detected, using CPU', scope='CORE')
+    except Exception:
+        pass
 
 
 def encode_execution_providers(execution_providers: List[str]) -> List[str]:
@@ -178,24 +201,32 @@ def pre_check() -> bool:
 
 
 def run_headless() -> None:
-    """Run headless (batch) pipeline with specified source/target/output."""
+    """Run headless (batch or stream) pipeline with specified source/target/output."""
     parse_args()
     if not pre_check():
         return
 
     limit_resources()
 
-    # Start API server
+    # Start WebSocket API server
     from pipeline.api.server import WebSocketAPIServer
     server = WebSocketAPIServer(CONFIG, None, CONFIG.control_port)
     server.start()
 
-    # Run batch processing if headless
-    if CONFIG.headless:
+    # Stream mode: start realtime pipeline
+    if getattr(CONFIG, 'stream_mode', False):
+        pipeline = ProcessingPipeline(CONFIG, BUS)
+        emit_status('Starting in stream mode', scope='CORE')
+        import threading
+        t = threading.Thread(target=pipeline.run_stream, daemon=True)
+        t.start()
+        CONFIG.shutdown_event.wait()
+    elif CONFIG.headless:
+        # Batch mode: run and exit
         pipeline = ProcessingPipeline(CONFIG, BUS)
         pipeline.run_batch()
     else:
-        # Wait for shutdown signal
+        # Server-only mode: wait for commands via WebSocket
         CONFIG.shutdown_event.wait()
 
     server.stop()
