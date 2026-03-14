@@ -72,6 +72,8 @@ class DetectionProcessor(FrameProcessor):
         self.config = config
         self.detector = detector
         self.latest_detections: List[Detection] = []
+        self._frame_count = 0
+        self._face_ever_detected = False
 
     def process(self, frame: Frame) -> Frame:
         """
@@ -83,6 +85,7 @@ class DetectionProcessor(FrameProcessor):
         Returns:
             Frame unchanged; detections stored in self.latest_detections
         """
+        self._frame_count += 1
         try:
             if self.config.many_faces:
                 self.latest_detections = self.detector.detect(frame)
@@ -92,6 +95,20 @@ class DetectionProcessor(FrameProcessor):
         except Exception as e:
             emit_warning(f"Detection failed: {e}", scope='DETECTION')
             self.latest_detections = []
+
+        if self.latest_detections:
+            if not self._face_ever_detected:
+                self._face_ever_detected = True
+                emit_status('Face detected — swap active', scope='DETECTION')
+        else:
+            # Log every 90 frames (~3s at 30fps) — visible but not spammy
+            if self._frame_count % 90 == 0:
+                emit_warning(
+                    f'No face detected in webcam frame '
+                    f'(frame {self._frame_count}) — ensure face is clearly '
+                    f'visible and well-lit',
+                    scope='DETECTION',
+                )
 
         return frame
 

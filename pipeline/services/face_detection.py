@@ -86,7 +86,9 @@ class FaceDetector:
                         root=root,
                         providers=self.config.execution_providers,
                     )
-                    self._analyser.prepare(ctx_id=0, det_size=(640, 640))
+                    # det_thresh=0.35: lower than the default 0.5 to handle
+                    # JPEG-compressed webcam frames and varied lighting.
+                    self._analyser.prepare(ctx_id=0, det_size=(640, 640), det_thresh=0.35)
         return self._analyser
 
     def detect(self, frame: Frame) -> List[Detection]:
