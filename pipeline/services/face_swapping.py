@@ -80,9 +80,10 @@ class FaceSwapper:
         Returns:
             Full path to inswapper_128.onnx model
         """
-        # RunPod Network Volume (highest priority)
+        # RunPod Network Volume (highest priority) — use if volume dir exists,
+        # even when the file hasn't been downloaded yet (pre_check will create it here)
         runpod_model = '/workspace/models/inswapper_128.onnx'
-        if os.path.exists(runpod_model):
+        if os.path.isdir('/workspace/models'):
             return runpod_model
 
         # Relative to repo root (pipeline package lives one level down)

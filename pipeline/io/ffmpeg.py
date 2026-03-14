@@ -17,6 +17,7 @@ import platform
 import shutil
 import ssl
 import subprocess
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import List, Optional
@@ -375,7 +376,7 @@ def conditional_download(download_directory_path: str, urls: List[str]) -> None:
         os.makedirs(download_directory_path)
 
     for url in urls:
-        download_file_path = os.path.join(download_directory_path, os.path.basename(url))
+        download_file_path = os.path.join(download_directory_path, os.path.basename(urllib.parse.urlparse(url).path))
         if not os.path.exists(download_file_path):
             request = urllib.request.urlopen(url)  # type: ignore[attr-defined]
             total = int(request.headers.get('Content-Length', 0))
