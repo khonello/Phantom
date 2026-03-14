@@ -74,6 +74,7 @@ class WebSocketAPIServer:
         self._stop_event = threading.Event()
         self._server_thread: Optional[threading.Thread] = None
         self._heartbeat_thread: Optional[threading.Thread] = None
+        self._ws_server: Optional[Any] = None
 
         # Connected WebSocket clients (set of websocket objects)
         self._clients: Set[Any] = set()
@@ -138,6 +139,14 @@ class WebSocketAPIServer:
         self._running = False
         self._stop_event.set()
 
+        # Shutdown the websockets server (unblocks serve_forever())
+        if self._ws_server is not None:
+            try:
+                self._ws_server.shutdown()
+            except Exception:
+                pass
+            self._ws_server = None
+
         # Close all client connections
         with self._clients_lock:
             for ws in list(self._clients):
@@ -200,12 +209,14 @@ class WebSocketAPIServer:
                 self.port,
                 max_size=64 * 1024 * 1024,  # 64 MB max message (for file transfers)
             ) as server:
+                self._ws_server = server
                 emit_status(
                     f'WebSocket server listening on ws://0.0.0.0:{self.port}/ws',
                     scope='API_SERVER',
                 )
-                self._stop_event.wait()
-                server.shutdown()
+                # serve_forever() drives the accept loop — without it connections
+                # queue but handshakes never complete. Shutdown from stop().
+                server.serve_forever()
 
         except OSError as e:
             if 'Address already in use' in str(e):
