@@ -191,9 +191,32 @@ class ProcessingPipeline:
             self._stop_event.set()
             self.bus.emit(PIPELINE_STOPPED)
 
+    def _warm_up_models(self) -> None:
+        """
+        Eagerly load ML models into GPU memory before the stream loop starts.
+
+        Both models are lazily initialized by default, meaning the first frame
+        that needs them blocks for 10-30s while 500MB+ of ONNX weights are
+        loaded into CUDA. Pre-loading them here makes the first swap instant.
+        """
+        emit_status('Loading detection model...', scope='PIPELINE')
+        try:
+            self._get_detector()._get_analyser()
+        except Exception as e:
+            emit_error(f"Detection model load failed: {e}", exception=e, scope='PIPELINE')
+
+        emit_status('Loading swap model...', scope='PIPELINE')
+        try:
+            self._get_swapper()._get_swapper()
+        except Exception as e:
+            emit_error(f"Swap model load failed: {e}", exception=e, scope='PIPELINE')
+
+        emit_status('Models ready', scope='PIPELINE')
+
     def _run_stream_impl(self) -> None:
         """Implementation of stream mode."""
         self._build_processors()
+        self._warm_up_models()
         emit_status('Stream pipeline started', scope='PIPELINE')
         self.bus.emit(PIPELINE_STARTED)
 
