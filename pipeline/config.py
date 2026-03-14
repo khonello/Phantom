@@ -61,6 +61,7 @@ class FaceSwapConfig:
     status_message: str = ''
     embedding_ready: bool = False
     headless: bool = False
+    stream_mode: bool = False
 
     # Internal state
     shutdown_event: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
