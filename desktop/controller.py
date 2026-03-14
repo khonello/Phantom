@@ -167,8 +167,9 @@ class PipelineClient:
                             except (json.JSONDecodeError, Exception):
                                 pass
 
-            except Exception:
-                pass
+            except Exception as e:
+                import sys
+                print(f'[CONTROLLER] Connection error ({self._ws_url}): {e}', file=sys.stderr)
             finally:
                 with self._ws_lock:
                     self._ws = None
