@@ -151,7 +151,7 @@ cd phantom
 apt-get update && apt-get install -y ffmpeg
 
 # Install Python dependencies
-pip install -r requirements.txt
+pip install -r requirements-pipeline-gpu.txt
 
 # Optional: Install CI/testing dependencies
 pip install -r requirements-ci.txt

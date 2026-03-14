@@ -33,8 +33,10 @@ cd Phantom
 python -m venv venv
 source venv/bin/activate  # or `venv\Scripts\activate` on Windows
 
-# Install dependencies
-pip install -r requirements.txt
+# Install dependencies (CPU)
+pip install -r requirements-pipeline-cpu.txt
+# Or for GPU (CUDA):
+pip install -r requirements-pipeline-gpu.txt
 
 # Run headless engine
 python pipeline.py

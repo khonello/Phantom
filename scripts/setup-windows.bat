@@ -79,10 +79,13 @@ echo.
 
 REM Install dependencies
 echo Installing dependencies...
-set REQUIREMENTS=requirements.txt
-if not exist "%REQUIREMENTS%" (
-    set REQUIREMENTS=requirements-ci.txt
-    echo Using !REQUIREMENTS! (GPU support not available^)
+python -c "import torch; exit(0 if torch.cuda.is_available() else 1)" >nul 2>&1
+if %errorlevel% equ 0 (
+    set REQUIREMENTS=requirements-pipeline-gpu.txt
+    echo CUDA detected -- using GPU requirements
+) else (
+    set REQUIREMENTS=requirements-pipeline-cpu.txt
+    echo No CUDA detected -- using CPU requirements
 )
 
 pip install -r "%REQUIREMENTS%"
@@ -90,7 +93,7 @@ if %errorlevel% neq 0 (
     echo Error: Failed to install dependencies
     exit /b 1
 )
-echo [OK] Dependencies installed
+echo [OK] Dependencies installed from %REQUIREMENTS%
 echo.
 
 REM Verify installation
@@ -101,14 +104,9 @@ python -c "import insightface; print('InsightFace: OK')"
 echo [OK] Key dependencies verified
 echo.
 
-REM Check CUDA (if available)
-find /i "cu118" requirements.txt >nul 2>&1
-if %errorlevel% equ 0 (
-    echo Checking CUDA support...
-    python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
-) else (
-    echo [INFO] CPU-only requirements detected
-)
+REM Report CUDA status
+echo Checking CUDA support...
+python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 echo.
 
 echo Setup complete!

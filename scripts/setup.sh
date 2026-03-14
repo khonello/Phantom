@@ -71,14 +71,16 @@ echo ""
 
 # Install dependencies
 echo "Installing dependencies..."
-REQUIREMENTS="requirements.txt"
-if [ ! -f "$REQUIREMENTS" ]; then
-    REQUIREMENTS="requirements-ci.txt"
-    echo -e "${YELLOW}Using $REQUIREMENTS (GPU support not available)${NC}"
+if python3 -c "import torch; exit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; then
+    REQUIREMENTS="requirements-pipeline-gpu.txt"
+    echo -e "${GREEN}CUDA detected — using GPU requirements${NC}"
+else
+    REQUIREMENTS="requirements-pipeline-cpu.txt"
+    echo -e "${YELLOW}No CUDA detected — using CPU requirements${NC}"
 fi
 
 pip install -r "$REQUIREMENTS"
-echo -e "${GREEN}✓ Dependencies installed${NC}"
+echo -e "${GREEN}✓ Dependencies installed from $REQUIREMENTS${NC}"
 echo ""
 
 # Verify installation
@@ -89,14 +91,15 @@ python3 -c "import insightface; print('InsightFace: OK')"
 echo -e "${GREEN}✓ Key dependencies verified${NC}"
 echo ""
 
-# Check CUDA (if using GPU)
-if grep -q "torch.*cu118" requirements.txt 2>/dev/null; then
-    echo "Checking CUDA support..."
-    python3 -c "import torch; cuda_available = torch.cuda.is_available(); print(f'CUDA available: {cuda_available}'); sys.exit(0 if cuda_available else 1)" && \
-        echo -e "${GREEN}✓ CUDA detected${NC}" || \
-        echo -e "${YELLOW}⚠ CUDA not available (will use CPU)${NC}"
-    echo ""
+# Report CUDA status
+echo "Checking CUDA support..."
+python3 -c "import torch; cuda_available = torch.cuda.is_available(); print(f'CUDA available: {cuda_available}')"
+if [ "$REQUIREMENTS" = "requirements-pipeline-gpu.txt" ]; then
+    echo -e "${GREEN}✓ GPU requirements installed${NC}"
+else
+    echo -e "${YELLOW}⚠ CPU-only mode (use requirements-pipeline-gpu.txt for GPU support)${NC}"
 fi
+echo ""
 
 echo -e "${GREEN}Setup complete!${NC}"
 echo ""

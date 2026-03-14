@@ -56,12 +56,12 @@ source venv/bin/activate
 
 **CPU-only (recommended for beginners):**
 ```bash
-pip install -r requirements-ci.txt
+pip install -r requirements-pipeline-cpu.txt
 ```
 
 **With CUDA 11.8 (NVIDIA GPU, faster):**
 ```bash
-pip install -r requirements.txt
+pip install -r requirements-pipeline-gpu.txt
 ```
 
 ### 4. Install Virtual Camera Driver (for webcam mode)
@@ -89,7 +89,7 @@ Virtual camera uses `v4l2loopback` (usually pre-installed on most distributions)
 sudo apt-get install v4l2loopback-dkms v4l2loopback-utils
 ```
 
-**Note:** Desktop GUI requires pyvirtualcam, which is included in `requirements-ci.txt` and `requirements.txt`. If upgrading, ensure it's installed:
+**Note:** Desktop GUI requires pyvirtualcam, which is included in `requirements-ci.txt`. If upgrading, ensure it's installed:
 ```bash
 pip install pyvirtualcam
 ```
@@ -115,7 +115,7 @@ These are cached in `models/` directory for subsequent runs.
    ```
 3. Install requirements with CUDA support:
    ```bash
-   pip install -r requirements.txt
+   pip install -r requirements-pipeline-gpu.txt
    ```
 4. Run with CUDA provider:
    ```bash
@@ -126,7 +126,7 @@ These are cached in `models/` directory for subsequent runs.
 
 **Linux/Windows with AMD GPU:**
 1. Install [ROCm](https://rocmdocs.amd.com/en/latest/deploy/linux/index.html)
-2. Modify `requirements.txt` to use ROCm PyTorch:
+2. Modify `requirements-pipeline-gpu.txt` to use ROCm PyTorch:
    ```bash
    pip uninstall torch -y
    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm5.7

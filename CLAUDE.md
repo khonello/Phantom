@@ -25,7 +25,8 @@ Phantom is a modern, composable face-swapping application for videos and images.
 - **Test**: `python pipeline.py -s=.github/examples/source.jpg -t=.github/examples/target.mp4 -o=.github/examples/output.mp4`
 
 ### Install Dependencies
-- **Basic**: `pip install -r requirements.txt`
+- **CPU (local dev)**: `pip install -r requirements-pipeline-cpu.txt`
+- **GPU (CUDA)**: `pip install -r requirements-pipeline-gpu.txt`
 - **CI/Testing**: `pip install -r requirements-ci.txt`
 
 ## Architecture

@@ -23,8 +23,10 @@ source venv/bin/activate
 ### 2. Install Dependencies
 
 ```bash
-# Install base dependencies
-pip install -r requirements.txt
+# Install base dependencies (CPU)
+pip install -r requirements-pipeline-cpu.txt
+# Or for GPU (CUDA):
+pip install -r requirements-pipeline-gpu.txt
 
 # For development (adds mypy, flake8, pytest)
 pip install -r requirements-ci.txt
@@ -443,7 +445,7 @@ roop-cam has two entry points with separate concerns:
 
 | Entry Point | Purpose | Dependencies |
 |-------------|---------|--------------|
-| `pipeline.py` | AI pipeline — GUI, CLI, headless live | `requirements.txt` / `requirements-ci.txt` |
+| `pipeline.py` | AI pipeline — GUI, CLI, headless live | `requirements-pipeline-cpu.txt` / `requirements-pipeline-gpu.txt` |
 | `desktop.py` | Pipeline controller — interactive REPL, scripting | `requirements-desktop.txt` (stdlib-only now) |
 
 When making changes that affect both (e.g. adding a new control command), update `roop/api/schema.py` first — it is the shared contract between the two processes.
