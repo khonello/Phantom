@@ -12,11 +12,13 @@ Responsibilities:
 - Manage I/O sources and sinks
 """
 
+import queue
 import threading
 import time
 from typing import Any, Callable, List, Optional
 
 import cv2
+import numpy as np
 
 from pipeline.config import FaceSwapConfig, CONFIG
 from pipeline.types import Frame
@@ -85,6 +87,10 @@ class ProcessingPipeline:
         # State
         self._running = False
         self._stop_event = threading.Event()
+
+        # Set by WebSocketAPIServer to enable push mode: desktop sends JPEG
+        # frames via WebSocket instead of the pipeline capturing a local device.
+        self.frame_queue: Optional[queue.Queue] = None
 
         # Listen to config changes
         self.config.on_change(self._on_config_changed)
@@ -191,16 +197,6 @@ class ProcessingPipeline:
         emit_status('Stream pipeline started', scope='PIPELINE')
         self.bus.emit(PIPELINE_STARTED)
 
-        # Set up source
-        input_source = self.config.input_url or 0
-        cap = cv2.VideoCapture(input_source)
-        # Minimize capture buffer to reduce stale-frame latency
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        if not self.config.input_url:
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 960)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 540)
-            cap.set(cv2.CAP_PROP_FPS, 30)
-
         # Load source faces
         sources = self.config.source_paths or (
             [self.config.source_path] if self.config.source_path else []
@@ -216,13 +212,77 @@ class ProcessingPipeline:
         # Start async enhancement
         self._async_enhancement.start()
 
+        try:
+            # Push mode: desktop sends JPEG frames via WebSocket binary messages.
+            # Used when no local VideoCapture source is available (e.g. RunPod).
+            if self.frame_queue is not None and not self.config.input_url:
+                emit_status('Stream mode: WebSocket push (receiving frames from desktop)', scope='PIPELINE')
+                self._stream_loop_push()
+            else:
+                self._stream_loop_capture()
+        finally:
+            self._async_enhancement.stop()
+            self._async_enhancement.join()
+
+    def _process_and_emit(self, frame: Frame, seq: int) -> None:
+        """Run detection → tracking → swap → enhance → emit for one frame."""
+        frame = self._detection_proc.process(frame)
+        detections = self._detection_proc.latest_detections
+
+        if detections:
+            for detection in detections:
+                if self._tracking_proc.get_tracked_detection() is None:
+                    self._tracking_proc.set_tracked_face(detection, frame)
+
+        frame = self._tracking_proc.process(frame)
+        tracked = self._tracking_proc.get_tracked_detection()
+
+        if tracked and self._swapping_proc.source_face:
+            frame = self._swapping_proc.swap_detection(frame, tracked)
+            self.bus.emit(DETECTION, detection=tracked.to_dict(), seq=seq)
+
+        self._async_enhancement.submit(seq, frame)
+        result = self._async_enhancement.get_latest()
+        if result:
+            _, enhanced_frame = result
+            frame = enhanced_frame
+
+        self.bus.emit(FRAME_READY, frame=frame, seq=seq)
+
+    def _stream_loop_push(self) -> None:
+        """Stream loop for WebSocket push mode — reads JPEG frames from frame_queue."""
+        assert self.frame_queue is not None
+        seq = 0
+        while not self._stop_event.is_set():
+            try:
+                jpeg_bytes = self.frame_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+
+            buf = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+            frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+            if frame is None:
+                continue
+
+            seq += 1
+            self._process_and_emit(frame, seq)
+
+    def _stream_loop_capture(self) -> None:
+        """Stream loop for VideoCapture mode — local webcam or network URL."""
+        input_source = self.config.input_url or 0
+        cap = cv2.VideoCapture(input_source)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        if not self.config.input_url:
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 960)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 540)
+            cap.set(cv2.CAP_PROP_FPS, 30)
+
         frame_count = 0
         seq = 0
         drop_count = 0
         drop_window_start = time.time()
         warmup_frames = getattr(self.config, 'warmup_frames', 0)
-        skip_count = 0  # consecutive frames to skip
-        _frame_interval = 1.0 / 30.0  # target 30fps
+        skip_count = 0
 
         try:
             while not self._stop_event.is_set():
@@ -233,55 +293,19 @@ class ProcessingPipeline:
                 frame_count += 1
                 seq += 1
 
-                # Skip warmup frames — allow models to initialize without
-                # emitting glitchy first frames to clients
                 if frame_count <= warmup_frames:
                     continue
 
-                # Frame skipping under load: if async processor drops frames,
-                # skip every other input frame to give it room to catch up
                 if skip_count > 0:
                     skip_count -= 1
                     drop_count += 1
                     continue
                 if self._async_enhancement and self._async_enhancement.drop_count > 0:
-                    skip_count = 1  # skip next frame
+                    skip_count = 1
                     self._async_enhancement.drop_count = 0
 
-                _frame_start = time.time()
+                self._process_and_emit(frame, seq)
 
-                # Run detection
-                frame = self._detection_proc.process(frame)
-                detections = self._detection_proc.latest_detections
-
-                # Run tracking (and swap if we have detections)
-                if detections:
-                    for detection in detections:
-                        # Initialize tracker if not already tracking a face.
-                        # Pass the current frame so the CV2 tracker is initialized
-                        # immediately — without it, update() always returns False.
-                        if self._tracking_proc.get_tracked_detection() is None:
-                            self._tracking_proc.set_tracked_face(detection, frame)
-
-                frame = self._tracking_proc.process(frame)
-                tracked = self._tracking_proc.get_tracked_detection()
-
-                # Swap
-                if tracked and self._swapping_proc.source_face:
-                    frame = self._swapping_proc.swap_detection(frame, tracked)
-                    self.bus.emit(DETECTION, detection=tracked.to_dict(), seq=seq)
-
-                # Async enhancement
-                self._async_enhancement.submit(seq, frame)
-                result = self._async_enhancement.get_latest()
-                if result:
-                    result_seq, enhanced_frame = result
-                    frame = enhanced_frame
-
-                # Emit frame ready
-                self.bus.emit(FRAME_READY, frame=frame, seq=seq)
-
-                # Track drops
                 if frame_count % 30 == 0:
                     now = time.time()
                     window = now - drop_window_start
@@ -290,10 +314,7 @@ class ProcessingPipeline:
                         self.bus.emit('drop_rate', dropped=drop_count, total=frame_count, rate=drop_rate)
                         drop_window_start = now
                         drop_count = 0
-
         finally:
-            self._async_enhancement.stop()
-            self._async_enhancement.join()
             cap.release()
 
     def run_batch(self) -> None:

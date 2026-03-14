@@ -365,6 +365,23 @@ class PipelineClient:
         """Stop stream (alias for stop)."""
         return self._send('stop')
 
+    def send_frame(self, jpeg_bytes: bytes) -> None:
+        """Send a raw JPEG frame to the pipeline (fire-and-forget, non-blocking).
+
+        Drops the frame silently if the connection is busy or unavailable.
+        """
+        if not self._connected:
+            return
+        if not self._ws_lock.acquire(blocking=False):
+            return  # drop frame — lock held by an in-flight command
+        try:
+            if self._ws is not None:
+                self._ws.send(jpeg_bytes)
+        except Exception:
+            pass
+        finally:
+            self._ws_lock.release()
+
     def cleanup_session(self) -> Dict[str, Any]:
         """Clean up session."""
         return self._send('cleanup_session')

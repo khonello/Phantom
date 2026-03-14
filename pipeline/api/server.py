@@ -16,6 +16,7 @@ Health check: send {"action": "health"}, receive {"status": "healthy", "uptime":
 """
 
 import json
+import queue
 import threading
 import time
 from typing import Any, Dict, Optional, Set
@@ -69,6 +70,10 @@ class WebSocketAPIServer:
         if pipeline is None:
             pipeline = ProcessingPipeline(config, BUS)
         self.pipeline = pipeline
+
+        # Frame queue for WebSocket push mode — desktop sends JPEG frames here,
+        # pipeline reads from it instead of opening a local VideoCapture.
+        self.pipeline.frame_queue: queue.Queue = queue.Queue(maxsize=10)  # type: ignore[assignment]
 
         self._running = False
         self._stop_event = threading.Event()
@@ -186,8 +191,8 @@ class WebSocketAPIServer:
                             break
                         if isinstance(message, str):
                             self._handle_text_message(websocket, message)
-                        # Binary messages: could be file uploads (Phase 4B.5)
-                        # For now, ignore inbound binary frames
+                        elif isinstance(message, bytes):
+                            self._handle_binary_frame(message)
                 except Exception as e:
                     if self._running:
                         emit_error(
@@ -280,6 +285,24 @@ class WebSocketAPIServer:
                 'success': False,
                 'error': str(e),
             })
+
+    def _handle_binary_frame(self, data: bytes) -> None:
+        """
+        Handle an inbound binary WebSocket message (JPEG frame from desktop).
+
+        Puts the raw JPEG bytes into the pipeline's frame_queue so the stream
+        loop can decode and process them. Drops the frame if the queue is full
+        (pipeline is falling behind) to avoid unbounded buffering.
+
+        Args:
+            data: Raw JPEG bytes sent by the desktop webcam thread
+        """
+        fq = getattr(self.pipeline, 'frame_queue', None)
+        if fq is not None:
+            try:
+                fq.put_nowait(data)
+            except queue.Full:
+                pass  # drop — pipeline is behind, keep latency low
 
     # ── Push helpers ──────────────────────────────────────────────────────────
 

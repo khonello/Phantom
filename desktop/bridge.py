@@ -1,6 +1,5 @@
 import gc
 import queue
-import subprocess
 import time
 import threading
 from typing import Any, Dict, List, Optional
@@ -12,7 +11,7 @@ from PySide6.QtGui import QPixmap, QImage, QPainter
 from PySide6.QtQuick import QQuickPaintedItem
 
 from pipeline.io.ffmpeg import is_image
-from desktop.controller import PipelineClient, UDP_INGEST_PORT
+from desktop.controller import PipelineClient
 
 _PANEL_MAX_W = 800
 _PANEL_MAX_H = 500
@@ -184,7 +183,8 @@ class Bridge(QObject):
         # Single webcam thread — always running
         self._webcam_thread: Optional[threading.Thread] = None
         self._webcam_stop = threading.Event()
-        self._broadcast_active = threading.Event()
+        # Set when pipeline is running — webcam thread sends frames via WebSocket
+        self._ws_push_active = threading.Event()
 
         # Virtual camera output
         self._vcam_thread: Optional[threading.Thread] = None
@@ -262,11 +262,8 @@ class Bridge(QObject):
             self._set_status('cannot reach server — not connected')
             return
         self._client.set_quality(self._quality)
-        self._client.set_input_url(
-            f'tcp://0.0.0.0:{UDP_INGEST_PORT}?listen'
-        )
         self._client.start_stream()
-        self._broadcast_active.set()
+        self._ws_push_active.set()
         self._last_frame_time = time.time()
         self._set_pipeline_running(True)
         self._set_status('pipeline connected · processing')
@@ -276,7 +273,7 @@ class Bridge(QObject):
         if self._virtual_cam_active:
             self._stop_vcam()
             self._set_virtual_cam_active(False)
-        self._broadcast_active.clear()
+        self._ws_push_active.clear()
         self._set_pipeline_running(False)
         self._client.stop_stream()
         self._set_status('stopped')
@@ -366,7 +363,7 @@ class Bridge(QObject):
     def cleanup(self) -> None:
         self._frame_timer.stop()
         self._stop_vcam()
-        self._broadcast_active.clear()
+        self._ws_push_active.clear()
         self._webcam_stop.set()
         if self._webcam_thread is not None:
             self._webcam_thread.join(timeout=3)
@@ -468,12 +465,6 @@ class Bridge(QObject):
 
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 960
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 540
-        fps = int(cap.get(cv2.CAP_PROP_FPS)) or 30
-
-        proc: Optional[subprocess.Popen] = None
-
         while not self._webcam_stop.is_set():
             ret, frame = cap.read()
             if not ret:
@@ -482,57 +473,13 @@ class Bridge(QObject):
 
             webcam_buffer.update_from_numpy(frame)
 
-            if self._broadcast_active.is_set():
-                if proc is None:
-                    proc = self._open_broadcast_ffmpeg(width, height, fps)
-                if proc is not None and proc.stdin is not None:
-                    try:
-                        proc.stdin.write(np.ascontiguousarray(frame).tobytes())
-                    except (BrokenPipeError, OSError):
-                        proc = None
-            else:
-                if proc is not None:
-                    try:
-                        if proc.stdin:
-                            proc.stdin.close()
-                        proc.wait(timeout=2)
-                    except Exception:
-                        proc.kill()
-                    proc = None
+            if self._ws_push_active.is_set():
+                # Encode as JPEG and send to pipeline via WebSocket binary.
+                # Quality 75 balances upload bandwidth vs. swap quality.
+                _, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                self._client.send_frame(jpeg.tobytes())
 
         cap.release()
-        if proc is not None:
-            try:
-                if proc.stdin:
-                    proc.stdin.close()
-                proc.wait(timeout=2)
-            except Exception:
-                proc.kill()
-
-    def _open_broadcast_ffmpeg(self, width: int, height: int, fps: int) -> Optional[subprocess.Popen]:
-        cmd = [
-            'ffmpeg', '-y',
-            '-f', 'rawvideo', '-vcodec', 'rawvideo',
-            '-s', f'{width}x{height}',
-            '-pix_fmt', 'bgr24',
-            '-r', str(fps),
-            '-i', 'pipe:0',
-            '-c:v', 'libx264',
-            '-preset', 'ultrafast',
-            '-tune', 'zerolatency',
-            '-f', 'mpegts',
-            f'tcp://{self._client.host}:{UDP_INGEST_PORT}',
-        ]
-        try:
-            return subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except Exception as e:
-            print(f'[DESKTOP.BRIDGE] ffmpeg broadcast failed to start: {e}')
-            return None
 
     # ── Virtual camera output ─────────────────────────────────────────
 
