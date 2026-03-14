@@ -70,10 +70,6 @@ class FaceDetector:
         self._analyser: Optional[Any] = None
         self._lock = threading.Lock()
 
-        # Eager loading: start model load in background thread to avoid
-        # first-frame spike. Model will be ready by the time first frame arrives.
-        threading.Thread(target=self._get_analyser, daemon=True, name='FaceDetector.preload').start()
-
     def _get_analyser(self) -> Any:
         """
         Get or create the FaceAnalysis model (lazy initialization).
