@@ -1,4 +1,5 @@
 import gc
+import os
 import queue
 import time
 import threading
@@ -302,37 +303,43 @@ class Bridge(QObject):
         if not valid:
             return
         self._source_thumbnail = valid[0].replace('\\', '/')
-        if len(valid) == 1:
-            self._source_label = self._source_thumbnail.split('/')[-1]
-            self._set_source_set(True)
-            self._set_status(f'face set: {self._source_label}')
-            # Run off the main thread — _send() blocks for a network round-trip
-            threading.Thread(
-                target=self._client.set_source,
-                args=(valid[0],),
-                daemon=True,
-            ).start()
-        else:
-            self._source_label = f'{len(valid)} faces · averaged'
-            self._set_source_set(True)
+        multi = len(valid) > 1
+        self._source_label = (
+            f'{len(valid)} faces · averaged' if multi
+            else self._source_thumbnail.split('/')[-1]
+        )
+        self._set_source_set(True)
+        if multi:
             self._set_embedding_pending(True)
-            self._set_status(f'creating embedding from {len(valid)} images...')
+            self._set_status(f'uploading {len(valid)} images...')
+        else:
+            self._set_status(f'uploading face...')
 
-            def _do_embedding(paths: List[str]) -> None:
-                # Run off the Qt main thread — _send() blocks while waiting
-                # for the server response; blocking here would freeze the UI.
-                result = self._client.create_embedding(paths)
-                # Clear pending state based on the server's direct response —
-                # this is more reliable than watching for a status string match.
-                if result.get('success', False):
+        def _do_upload(file_paths: List[str]) -> None:
+            import base64
+            images = []
+            for fp in file_paths:
+                try:
+                    with open(fp, 'rb') as fh:
+                        data = base64.b64encode(fh.read()).decode('ascii')
+                    images.append({'name': os.path.basename(fp), 'data': data})
+                except Exception as e:
                     self._set_embedding_pending(False)
-                    self._set_status('embedding ready')
-                else:
-                    error = result.get('error', 'embedding failed')
-                    self._set_embedding_pending(False)
-                    self._set_status(f'embedding error: {error}')
+                    self._set_status(f'upload error: {e}')
+                    return
 
-            threading.Thread(target=_do_embedding, args=(valid,), daemon=True).start()
+            result = self._client.upload_source(images)
+            if result.get('success', False):
+                self._set_embedding_pending(False)
+                self._set_status(
+                    'embedding ready' if multi else f'face set: {self._source_label}'
+                )
+            else:
+                error = result.get('error', 'upload failed')
+                self._set_embedding_pending(False)
+                self._set_status(f'upload error: {error}')
+
+        threading.Thread(target=_do_upload, args=(valid,), daemon=True).start()
 
     @Slot()
     def resetSource(self) -> None:

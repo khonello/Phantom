@@ -13,10 +13,14 @@ and separation of concerns.
 HandlerContext provides dependency injection — no module-level globals.
 """
 
+import base64
 import os
 import threading
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
+
+# Temp directory where uploaded source images are saved server-side
+_UPLOAD_DIR = '/tmp/phantom_uploads'
 
 from pipeline.config import FaceSwapConfig
 from pipeline.api.schema import ResponseMessage
@@ -487,6 +491,69 @@ def handle_set_input_url(config: FaceSwapConfig, url: str) -> ResponseMessage:
 # Embedding/Session Handlers
 # ============================================================================
 
+def handle_upload_source(
+    config: FaceSwapConfig,
+    images: List[Dict[str, Any]],
+) -> ResponseMessage:
+    """
+    Receive source image(s) as base64-encoded bytes, save to temp dir, and
+    set source config. Replaces path-based set_source / create_embedding for
+    remote deployments where the client cannot share a filesystem with the server.
+
+    Args:
+        config: FaceSwapConfig
+        images: List of dicts with 'name' (filename) and 'data' (base64 string)
+
+    Returns:
+        ResponseMessage with saved server-side paths on success
+    """
+    if not images:
+        return ResponseMessage(
+            type='upload_source',
+            data={},
+            success=False,
+            error='No images provided',
+        )
+
+    os.makedirs(_UPLOAD_DIR, exist_ok=True)
+    saved: List[str] = []
+
+    for img in images:
+        name = os.path.basename(img.get('name', 'source.jpg'))
+        b64 = img.get('data', '')
+        if not b64:
+            return ResponseMessage(
+                type='upload_source',
+                data={},
+                success=False,
+                error=f'No image data for: {name}',
+            )
+        try:
+            image_bytes = base64.b64decode(b64)
+        except Exception:
+            return ResponseMessage(
+                type='upload_source',
+                data={},
+                success=False,
+                error=f'Invalid base64 data for: {name}',
+            )
+
+        path = os.path.join(_UPLOAD_DIR, name)
+        with open(path, 'wb') as fh:
+            fh.write(image_bytes)
+        saved.append(path)
+
+    config.set('source_paths', saved)
+    config.set('source_path', saved[0])
+    emit_status(f'Source uploaded: {len(saved)} image(s)', scope='API')
+
+    return ResponseMessage(
+        type='upload_source',
+        data={'paths': saved, 'count': len(saved)},
+        success=True,
+    )
+
+
 def handle_create_embedding(config: FaceSwapConfig, paths: List[str]) -> ResponseMessage:
     """
     Set source face paths for averaging (multi-image embedding).
@@ -559,6 +626,11 @@ def handle_cleanup_session(config: FaceSwapConfig) -> ResponseMessage:
     config.set('source_path', None)
     config.set('source_paths', [])
     config.set('embedding_ready', False)
+
+    # Remove any uploaded temp files
+    import shutil
+    if os.path.isdir(_UPLOAD_DIR):
+        shutil.rmtree(_UPLOAD_DIR, ignore_errors=True)
 
     emit_status('Session cleaned up', scope='API')
 
@@ -653,6 +725,8 @@ def dispatch_command(
         elif command_type == 'set_input_url':
             return handle_set_input_url(config, data.get('url', ''))
 
+        elif command_type == 'upload_source':
+            return handle_upload_source(config, data.get('images', []))
         elif command_type == 'create_embedding':
             return handle_create_embedding(config, data.get('paths', []))
 

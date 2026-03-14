@@ -319,6 +319,14 @@ class PipelineClient:
 
     # ── Source embedding ──────────────────────────────────────────────────────
 
+    def upload_source(self, images: List[Dict[str, str]]) -> Dict[str, Any]:
+        """Upload source image(s) as base64 to the pipeline.
+
+        Each entry: {'name': filename, 'data': base64_string}.
+        Works for both single and multi-image (averaged embedding) cases.
+        """
+        return self._send('upload_source', images=images)
+
     def create_embedding(self, paths: List[str]) -> Dict[str, Any]:
         """Create face embedding from source paths."""
         return self._send('create_embedding', paths=paths)
