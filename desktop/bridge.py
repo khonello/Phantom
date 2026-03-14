@@ -144,7 +144,11 @@ class FrameDisplay(QQuickPaintedItem):
         sh = int(ph * scale)
         x = int((iw - sw) / 2)
         y = int((ih - sh) / 2)
+        painter.save()
+        painter.translate(iw, 0)
+        painter.scale(-1, 1)
         painter.drawPixmap(x, y, sw, sh, pm)
+        painter.restore()
 
 
 # ── Bridge ────────────────────────────────────────────────────────
