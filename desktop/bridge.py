@@ -275,11 +275,11 @@ class Bridge(QObject):
             self._stop_vcam()
             self._set_virtual_cam_active(False)
         self._ws_push_active.clear()
-        self._set_pipeline_running(False)
         self._client.stop_stream()
-        self._set_status('stopped')
-        self._live_version += 1
-        self.liveVersionChanged.emit(self._live_version)
+        self._set_status('stopping...')
+        # _pipeline_running stays True until PIPELINE_STOPPED event arrives —
+        # prevents the user from clicking Start before the pipeline thread has
+        # fully exited, which would cause start_stream to be rejected silently.
 
     @Slot()
     def toggleVirtualCam(self) -> None:
@@ -437,6 +437,7 @@ class Bridge(QObject):
             self._set_pipeline_running(True)
         elif event == 'PIPELINE_STOPPED':
             self._set_pipeline_running(False)
+            self._set_status('stopped')
 
     def _on_ws_connected(self, connected: bool) -> None:
         """Called by PipelineClient when connection status changes."""

@@ -252,6 +252,15 @@ class ProcessingPipeline:
     def _stream_loop_push(self) -> None:
         """Stream loop for WebSocket push mode — reads JPEG frames from frame_queue."""
         assert self.frame_queue is not None
+
+        # Drain stale frames queued while the pipeline was stopped — prevents
+        # latency buildup across multiple stop/start cycles.
+        while True:
+            try:
+                self.frame_queue.get_nowait()
+            except queue.Empty:
+                break
+
         seq = 0
         while not self._stop_event.is_set():
             try:
