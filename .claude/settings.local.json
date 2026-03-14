@@ -7,7 +7,8 @@
       "Bash(ls -la /c/Users/Khonello/Documents/Developer/Languages/Multi/Phantom/runpod* 2>/dev/null || echo \"No runpod directory found\")",
       "Bash(ls -la /c/Users/Khonello/Documents/Developer/Languages/Multi/Phantom/.env* 2>/dev/null || echo \"No .env files found\")",
       "Bash(python:*)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(git add:*)"
     ]
   }
 }
