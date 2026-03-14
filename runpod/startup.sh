@@ -9,7 +9,8 @@ set -euo pipefail
 
 WORKSPACE="${WORKSPACE:-/workspace}"
 MODELS_DIR="${WORKSPACE}/models"
-PHANTOM_DIR="${WORKSPACE}/phantom"
+# Derive repo root from the script's own location (runpod/startup.sh → repo root)
+PHANTOM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 echo "=== Phantom RunPod Startup ==="
 echo "Workspace: ${WORKSPACE}"
