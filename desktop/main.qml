@@ -569,6 +569,29 @@ Window {
                 }
             }
 
+            // ── Detection status badge (bottom-center) ────────────────
+            Rectangle {
+                anchors {
+                    bottom: parent.bottom; horizontalCenter: parent.horizontalCenter
+                    bottomMargin: 14
+                }
+                visible: bridge.pipelineRunning && bridge.detectionStatus !== ""
+                color: "#cc200a0a"
+                radius: 6
+                width: detectionLabel.width + 20
+                height: 22
+
+                Text {
+                    id: detectionLabel
+                    anchors.centerIn: parent
+                    text: bridge.detectionStatus
+                    color: "#f87171"
+                    font.pixelSize: 10
+                    font.letterSpacing: 1.5
+                    font.weight: Font.Medium
+                }
+            }
+
             // ── Self-monitor PiP (top-right) ──────────────────────────
             Rectangle {
                 id: miniScreen

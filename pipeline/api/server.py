@@ -22,7 +22,7 @@ import time
 from typing import Any, Dict, Optional, Set
 
 from pipeline.config import FaceSwapConfig, CONFIG
-from pipeline.events import BUS, FRAME_READY, DETECTION, STATUS_CHANGED, PIPELINE_STARTED, PIPELINE_STOPPED
+from pipeline.events import BUS, FRAME_READY, DETECTION, STATUS_CHANGED, PIPELINE_STARTED, PIPELINE_STOPPED, WARNING
 from pipeline.api.schema import ResponseMessage
 from pipeline.api.handlers import dispatch_command, HandlerContext
 from pipeline.processing.pipeline import ProcessingPipeline
@@ -100,6 +100,7 @@ class WebSocketAPIServer:
         BUS.on(DETECTION, self._on_detection)
         BUS.on(PIPELINE_STARTED, self._on_pipeline_started)
         BUS.on(PIPELINE_STOPPED, self._on_pipeline_stopped)
+        BUS.on(WARNING, self._on_warning)
 
     @classmethod
     def create_with_pipeline(
@@ -416,6 +417,22 @@ class WebSocketAPIServer:
         # Also update config status message
         if self.config:
             self.config.status_message = message
+
+    def _on_warning(self, message: str, scope: str = 'PHANTOM') -> None:
+        """
+        Handle WARNING event — push to all clients as STATUS_CHANGED with warning level.
+
+        Args:
+            message: Warning message
+            scope: Source scope
+        """
+        self._broadcast_text({
+            'type': 'event',
+            'event': 'STATUS_CHANGED',
+            'message': message,
+            'scope': scope,
+            'level': 'warning',
+        })
 
     def _on_detection(self, detection: Any, seq: int) -> None:
         """
