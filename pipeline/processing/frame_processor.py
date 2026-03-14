@@ -73,7 +73,11 @@ class DetectionProcessor(FrameProcessor):
         self.detector = detector
         self.latest_detections: List[Detection] = []
         self._frame_count = 0
-        self._face_ever_detected = False
+        # State-change tracking: None = unknown (first frame), True/False = last known state
+        self._face_present: Optional[bool] = None
+        # Consecutive frames with no detection — emit warning after threshold to avoid flicker
+        self._no_face_streak = 0
+        self._NO_FACE_THRESHOLD = 3
 
     def process(self, frame: Frame) -> Frame:
         """
@@ -97,16 +101,17 @@ class DetectionProcessor(FrameProcessor):
             self.latest_detections = []
 
         if self.latest_detections:
-            if not self._face_ever_detected:
-                self._face_ever_detected = True
+            self._no_face_streak = 0
+            if self._face_present is not True:
+                self._face_present = True
                 emit_status('Face detected — swap active', scope='DETECTION')
         else:
-            # Log every 90 frames (~3s at 30fps) — visible but not spammy
-            if self._frame_count % 90 == 0:
+            self._no_face_streak += 1
+            # Emit only when streak crosses the threshold (avoids badge flicker)
+            if self._no_face_streak == self._NO_FACE_THRESHOLD:
+                self._face_present = False
                 emit_warning(
-                    f'No face detected in webcam frame '
-                    f'(frame {self._frame_count}) — ensure face is clearly '
-                    f'visible and well-lit',
+                    'No face detected — ensure face is clearly visible and well-lit',
                     scope='DETECTION',
                 )
 
