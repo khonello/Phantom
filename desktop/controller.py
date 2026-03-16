@@ -141,6 +141,8 @@ class PipelineClient:
                     self._ws_url,
                     open_timeout=30,
                     max_size=64 * 1024 * 1024,
+                    ping_interval=30,
+                    ping_timeout=120,  # generous timeout for high-latency / saturated links
                 ) as ws:
                     with self._ws_lock:
                         self._ws = ws

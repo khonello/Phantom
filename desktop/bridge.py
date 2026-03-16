@@ -447,6 +447,7 @@ class Bridge(QObject):
     @Slot(str)
     def setQuality(self, preset: str) -> None:
         self._quality = preset
+        self._start_webcam(self._webcam_index)
 
     @Slot(str)
     def setPlatform(self, platform: str) -> None:
@@ -801,12 +802,25 @@ class Bridge(QObject):
     # Size of the capture_ts header prepended to binary frames (int64 nanoseconds)
     _TS_HEADER_SIZE = 8
 
+    # Capture settings per quality preset: (width, height, fps, jpeg_quality)
+    _QUALITY_CAPTURE: Dict[str, tuple] = {
+        'fast':       (480, 270,  15, 60),
+        'optimal':    (640, 360,  20, 70),
+        'production': (960, 540,  30, 85),
+    }
+
     def _run_webcam(self, webcam_index: int) -> None:
         cap = cv2.VideoCapture(webcam_index)
         if not cap.isOpened():
             return
 
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+        # Apply capture settings for the current quality preset
+        w, h, fps, _ = self._QUALITY_CAPTURE.get(self._quality, self._QUALITY_CAPTURE['optimal'])
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+        cap.set(cv2.CAP_PROP_FPS, fps)
 
         while not self._webcam_stop.is_set():
             ret, frame = cap.read()
@@ -818,10 +832,8 @@ class Bridge(QObject):
             webcam_buffer.update_from_numpy(frame)
 
             if self._ws_push_active.is_set():
-                # Encode as JPEG and send to pipeline via WebSocket binary.
-                # Quality 75 balances upload bandwidth vs. swap quality.
-                # Prefix with 8-byte int64 capture_ts for A/V sync.
-                _, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                _, _, _, jpeg_quality = self._QUALITY_CAPTURE.get(self._quality, self._QUALITY_CAPTURE['optimal'])
+                _, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
                 header = struct.pack('<q', capture_ts)
                 self._client.send_frame(header + jpeg.tobytes())
 

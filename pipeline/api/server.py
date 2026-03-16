@@ -39,11 +39,11 @@ class WebSocketAPIServer:
     Receives commands as JSON text frames.
 
     Supports:
-    - Frame streaming (FRAME_READY event → binary JPEG push)
+    - Frame streaming (FRAME_READY event → binary JPEG push via dedicated sender thread)
     - Status updates (STATUS_CHANGED event → JSON text push)
     - Command dispatch (JSON text received → handler response)
     - Health check ({"action": "health"} command)
-    - Heartbeat ping/pong every 30 seconds
+    - Built-in WebSocket ping/pong (30s interval, 120s timeout)
 
     Attributes:
         config: FaceSwapConfig
@@ -79,12 +79,17 @@ class WebSocketAPIServer:
         self._running = False
         self._stop_event = threading.Event()
         self._server_thread: Optional[threading.Thread] = None
-        self._heartbeat_thread: Optional[threading.Thread] = None
         self._ws_server: Optional[Any] = None
 
         # Connected WebSocket clients (set of websocket objects)
         self._clients: Set[Any] = set()
         self._clients_lock = threading.Lock()
+
+        # Frame broadcast queue — decouples pipeline thread from network I/O.
+        # Pipeline thread puts encoded frames here; a dedicated sender thread
+        # drains and broadcasts them so slow clients never stall processing.
+        self._frame_queue: queue.Queue[bytes] = queue.Queue(maxsize=2)
+        self._frame_sender_thread: Optional[threading.Thread] = None
 
         # Start time for uptime reporting
         self._start_time = time.time()
@@ -136,8 +141,10 @@ class WebSocketAPIServer:
         self._server_thread = threading.Thread(target=self._server_loop, daemon=True)
         self._server_thread.start()
 
-        self._heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
-        self._heartbeat_thread.start()
+        self._frame_sender_thread = threading.Thread(
+            target=self._frame_sender_loop, daemon=True,
+        )
+        self._frame_sender_thread.start()
 
         emit_status(f'WebSocket API server started on port {self.port}', scope='API_SERVER')
 
@@ -167,9 +174,9 @@ class WebSocketAPIServer:
             self._server_thread.join(timeout=3.0)
             self._server_thread = None
 
-        if self._heartbeat_thread is not None:
-            self._heartbeat_thread.join(timeout=3.0)
-            self._heartbeat_thread = None
+        if self._frame_sender_thread is not None:
+            self._frame_sender_thread.join(timeout=3.0)
+            self._frame_sender_thread = None
 
         emit_status('WebSocket API server stopped', scope='API_SERVER')
 
@@ -215,6 +222,8 @@ class WebSocketAPIServer:
                 '0.0.0.0',
                 self.port,
                 max_size=64 * 1024 * 1024,  # 64 MB max message (for file transfers)
+                ping_interval=30,
+                ping_timeout=120,  # generous timeout for high-latency / saturated links
             ) as server:
                 self._ws_server = server
                 emit_status(
@@ -372,30 +381,32 @@ class WebSocketAPIServer:
         except Exception as e:
             emit_error(f'Failed to send response: {e}', scope='API_SERVER')
 
-    # ── Heartbeat ────────────────────────────────────────────────────────────
+    # ── Frame sender (dedicated thread) ─────────────────────────────────────
 
-    def _heartbeat_loop(self) -> None:
-        """Send WebSocket ping to all clients every 30 seconds."""
-        while self._running and not self._stop_event.is_set():
-            self._stop_event.wait(timeout=30.0)
-            if not self._running:
-                break
-            with self._clients_lock:
-                disconnected = set()
-                for ws in self._clients:
-                    try:
-                        ws.ping()
-                    except Exception as e:
-                        emit_error(f'Heartbeat ping failed ({ws.remote_address}): {type(e).__name__}: {e}', scope='API_SERVER')
-                        disconnected.add(ws)
-                for ws in disconnected:
-                    self._clients.discard(ws)
+    def _frame_sender_loop(self) -> None:
+        """Drain _frame_queue and broadcast frames to clients.
+
+        Runs on a dedicated thread so slow clients never stall the pipeline
+        processing thread. Drops stale frames when a newer one is available.
+        """
+        while not self._stop_event.is_set():
+            try:
+                data = self._frame_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            # Drain to latest — skip intermediate frames to keep latency low
+            while not self._frame_queue.empty():
+                try:
+                    data = self._frame_queue.get_nowait()
+                except queue.Empty:
+                    break
+            self._broadcast_binary(data)
 
     # ── Event handlers ───────────────────────────────────────────────────────
 
     def _on_frame_ready(self, frame: Any, seq: int, capture_ts: int = 0) -> None:
         """
-        Handle FRAME_READY event — encode frame as JPEG and broadcast to clients.
+        Handle FRAME_READY event — encode frame as JPEG and enqueue for broadcast.
 
         Prepends an 8-byte int64 capture_ts header before the JPEG payload so
         the desktop client can compute round-trip latency for A/V sync.
@@ -412,7 +423,19 @@ class WebSocketAPIServer:
             )
             if success:
                 header = struct.pack('<q', capture_ts)
-                self._broadcast_binary(header + jpeg_data.tobytes())
+                payload = header + jpeg_data.tobytes()
+                try:
+                    self._frame_queue.put_nowait(payload)
+                except queue.Full:
+                    # Drop oldest, enqueue latest — keeps display current
+                    try:
+                        self._frame_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        self._frame_queue.put_nowait(payload)
+                    except queue.Full:
+                        pass
         except Exception as e:
             emit_error(f'Frame encoding error: {e}', exception=e, scope='API_SERVER')
 
