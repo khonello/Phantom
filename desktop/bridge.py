@@ -885,6 +885,8 @@ class Bridge(QObject):
         frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
         if frame is None:
             return
+        if frame.shape[0] != 540 or frame.shape[1] != 960:
+            frame = cv2.resize(frame, (960, 540))
         if self._vcam_queue.full():
             try:
                 self._vcam_queue.get_nowait()

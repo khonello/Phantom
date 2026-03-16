@@ -121,7 +121,7 @@ class Detection:
     def to_dict(self) -> dict:
         """Serialize to dictionary for logging/debugging."""
         return {
-            'bbox': {'x': self.bbox.x, 'y': self.bbox.y, 'w': self.bbox.w, 'h': self.bbox.h},
+            'bbox': {'x': int(self.bbox.x), 'y': int(self.bbox.y), 'w': int(self.bbox.w), 'h': int(self.bbox.h)},
             'confidence': float(self.confidence),
             'kps_shape': list(self.kps.shape) if self.kps is not None else None,
         }
