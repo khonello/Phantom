@@ -256,8 +256,13 @@ class ProcessingPipeline:
             seq: Sequence number
             capture_ts: Capture timestamp in nanoseconds (time.perf_counter_ns)
         """
+        # TEMPORARY: per-stage timing to diagnose GPU performance
+        import sys
+        _t0 = time.perf_counter()
+
         frame = self._detection_proc.process(frame)
         detections = self._detection_proc.latest_detections
+        _t1 = time.perf_counter()
 
         if detections:
             for detection in detections:
@@ -266,6 +271,7 @@ class ProcessingPipeline:
 
         frame = self._tracking_proc.process(frame)
         tracked = self._tracking_proc.get_tracked_detection()
+        _t2 = time.perf_counter()
 
         # If the CV2 tracker is unavailable (e.g. opencv-python without contrib),
         # fall back to the raw detection so swapping still works.
@@ -275,14 +281,27 @@ class ProcessingPipeline:
         if tracked and self._swapping_proc.source_face:
             frame = self._swapping_proc.swap_detection(frame, tracked)
             self.bus.emit(DETECTION, detection=tracked.to_dict(), seq=seq)
+        _t3 = time.perf_counter()
 
         self._async_enhancement.submit(seq, frame)
         result = self._async_enhancement.get_latest()
         if result:
             _, enhanced_frame = result
             frame = enhanced_frame
+        _t4 = time.perf_counter()
 
         self.bus.emit(FRAME_READY, frame=frame, seq=seq, capture_ts=capture_ts)
+
+        # TEMPORARY: print per-stage timing every frame
+        print(
+            f'[PERF] seq={seq} '
+            f'detect={(_t1-_t0)*1000:.0f}ms '
+            f'track={(_t2-_t1)*1000:.0f}ms '
+            f'swap={(_t3-_t2)*1000:.0f}ms '
+            f'enhance={(_t4-_t3)*1000:.0f}ms '
+            f'total={(_t4-_t0)*1000:.0f}ms',
+            file=sys.stderr,
+        )
 
     @staticmethod
     def _unpack_timestamped_frame(
