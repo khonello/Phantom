@@ -311,9 +311,9 @@ class RTTTracker:
     WINDOW_SIZE: int = 30         # ~1 second at 30 fps
     UPDATE_INTERVAL: int = 10     # recalculate every N samples
     SMOOTHING_ALPHA: float = 0.1  # exponential smoothing factor
-    FLOOR_NS: int = 80_000_000          # 80 ms
-    CEILING_NS: int = 500_000_000       # 500 ms
-    INITIAL_DELAY_NS: int = 200_000_000  # 200 ms (session warmup)
+    FLOOR_NS: int = 80_000_000            # 80 ms
+    CEILING_NS: int = 2_000_000_000      # 2 s  (accommodates RunPod RTT)
+    INITIAL_DELAY_NS: int = 400_000_000  # 400 ms (session warmup for remote GPU)
     WARMUP_SAMPLES: int = 10            # min samples before adapting
 
     def __init__(self) -> None:
@@ -429,14 +429,14 @@ class JitterBuffer:
         return result
 
     def _drop_overflow(self) -> None:
-        """Discard frames that exceed the ceiling to bound latency."""
+        """Discard frames that are catastrophically stale (older than 2× ceiling)."""
         now = time.perf_counter_ns()
-        ceiling = self._rtt.CEILING_NS
+        discard_threshold = self._rtt.CEILING_NS * 2
         while self._buf:
             capture_ts = self._buf[0][0]
             if capture_ts <= 0:
                 break
-            if now - capture_ts > ceiling:
+            if now - capture_ts > discard_threshold:
                 self._buf.popleft()
             else:
                 break

@@ -339,7 +339,10 @@ class Bridge(QObject):
             self._set_status('cannot reach server — not connected')
             return
         self._client.set_quality(self._quality)
-        self._client.start_stream()
+        result = self._client.start_stream()
+        if not result.get('success', True):
+            self._set_status(f'start failed: {result.get("error", "unknown error")}')
+            return
         self._ws_push_active.set()
         self._jitter_buffer.clear()
         self._audio_capture.start()
