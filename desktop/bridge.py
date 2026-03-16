@@ -1,9 +1,10 @@
 import gc
 import os
 import queue
+import struct
 import time
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -13,6 +14,7 @@ from PySide6.QtQuick import QQuickPaintedItem
 
 from pipeline.io.ffmpeg import is_image
 from desktop.controller import PipelineClient
+from desktop.audio import AudioCapture, AudioPlayback, JitterBuffer
 
 _PANEL_MAX_W = 800
 _PANEL_MAX_H = 500
@@ -167,6 +169,13 @@ class Bridge(QObject):
     sourceLabelChanged = Signal(str)
     detectionStatusChanged = Signal(str)
     loadingMessageChanged = Signal(str)
+    currentModeChanged = Signal(str)
+    targetSetChanged = Signal(bool)
+    targetLabelChanged = Signal(str)
+    targetThumbnailChanged = Signal(str)
+    outputPathChanged = Signal(str)
+    batchRunningChanged = Signal(bool)
+    batchCompleteChanged = Signal(bool)
 
     def __init__(self, client: PipelineClient) -> None:
         super().__init__()
@@ -182,18 +191,41 @@ class Bridge(QObject):
         self._status_message = 'idle'
         self._detection_status = ''
         self._loading_message = ''
+        self._current_mode: str = 'realtime'  # 'realtime' | 'video' | 'image'
+        self._target_set: bool = False
+        self._target_label: str = ''
+        self._target_path: str = ''
+        self._target_thumbnail: str = ''
+        self._output_path: str = ''
+        self._batch_running: bool = False
+        self._batch_complete: bool = False
         self._webcam_version = 0
         self._live_version = 0
         self._quality = 'optimal'
         self._vcam_platform = 'obs'
         self._webcam_index = 0
         self._last_frame_time = 0.0
+        self._last_capture_ts: int = 0  # perf_counter_ns from last received frame
+        self._health_tick: int = 0  # counter for periodic health checks
 
         # Single webcam thread — always running
         self._webcam_thread: Optional[threading.Thread] = None
         self._webcam_stop = threading.Event()
         # Set when pipeline is running — webcam thread sends frames via WebSocket
         self._ws_push_active = threading.Event()
+
+        # Audio capture (local mic, never sent to GPU)
+        self._audio_capture = AudioCapture()
+
+        # Jitter buffer: holds processed frames until their playout time
+        self._jitter_buffer = JitterBuffer()
+
+        # Audio playback: reads from capture ring buffer at the jitter
+        # buffer's target_delay offset so audio stays in sync with video
+        self._audio_playback = AudioPlayback(
+            self._audio_capture.ring_buffer,
+            self._jitter_buffer,
+        )
 
         # Virtual camera output
         self._vcam_thread: Optional[threading.Thread] = None
@@ -266,6 +298,34 @@ class Bridge(QObject):
     def loadingMessage(self) -> str:
         return self._loading_message
 
+    @Property(str, notify=currentModeChanged)
+    def currentMode(self) -> str:
+        return self._current_mode
+
+    @Property(bool, notify=targetSetChanged)
+    def targetSet(self) -> bool:
+        return self._target_set
+
+    @Property(str, notify=targetLabelChanged)
+    def targetLabel(self) -> str:
+        return self._target_label
+
+    @Property(str, notify=targetThumbnailChanged)
+    def targetThumbnail(self) -> str:
+        return self._target_thumbnail
+
+    @Property(str, notify=outputPathChanged)
+    def outputPath(self) -> str:
+        return self._output_path
+
+    @Property(bool, notify=batchRunningChanged)
+    def batchRunning(self) -> bool:
+        return self._batch_running
+
+    @Property(bool, notify=batchCompleteChanged)
+    def batchComplete(self) -> bool:
+        return self._batch_complete
+
     # ── Slots ─────────────────────────────────────────────────────────
 
     @Slot()
@@ -281,6 +341,9 @@ class Bridge(QObject):
         self._client.set_quality(self._quality)
         self._client.start_stream()
         self._ws_push_active.set()
+        self._jitter_buffer.clear()
+        self._audio_capture.start()
+        self._audio_playback.start()
         self._last_frame_time = time.time()
         self._set_loading_message('Initializing...')
         self._set_pipeline_running(True)
@@ -292,6 +355,9 @@ class Bridge(QObject):
             self._stop_vcam()
             self._set_virtual_cam_active(False)
         self._ws_push_active.clear()
+        self._audio_playback.stop()
+        self._audio_capture.stop()
+        self._jitter_buffer.clear()
         self._client.stop_stream()
         self._set_status('stopping...')
         # _pipeline_running stays True until PIPELINE_STOPPED event arrives —
@@ -383,10 +449,148 @@ class Bridge(QObject):
     def setPlatform(self, platform: str) -> None:
         self._vcam_platform = platform
 
+    @Slot(str)
+    def setMode(self, mode: str) -> None:
+        """Switch between realtime, video, and image modes."""
+        if mode not in ('realtime', 'video', 'image') or mode == self._current_mode:
+            return
+        if self._pipeline_running:
+            self.stopPipeline()
+        if self._batch_running:
+            self._stop_batch_internal()
+        self._current_mode = mode
+        self.currentModeChanged.emit(mode)
+        self._reset_batch_state()
+
+    @Slot()
+    def selectTargetFile(self) -> None:
+        """Open a file dialog to select the target video or image."""
+        from PySide6.QtWidgets import QFileDialog
+        if self._current_mode == 'video':
+            path, _ = QFileDialog.getOpenFileName(
+                None, 'Select target video', '',
+                'Videos (*.mp4 *.avi *.mov *.mkv *.webm)',
+            )
+        else:
+            path, _ = QFileDialog.getOpenFileName(
+                None, 'Select target image', '',
+                'Images (*.jpg *.jpeg *.png *.webp *.bmp)',
+            )
+        if not path:
+            return
+        self._target_path = path.replace('\\', '/')
+        self._target_label = self._target_path.split('/')[-1]
+        self._target_thumbnail = (
+            self._target_path if self._current_mode == 'image' else ''
+        )
+        self._target_set = True
+        self._batch_complete = False
+        self._output_path = ''
+        self.targetSetChanged.emit(True)
+        self.targetLabelChanged.emit(self._target_label)
+        self.targetThumbnailChanged.emit(self._target_thumbnail)
+        self.outputPathChanged.emit('')
+        self.batchCompleteChanged.emit(False)
+
+    @Slot()
+    def selectOutputPath(self) -> None:
+        """Open a save dialog to choose the output file path."""
+        from PySide6.QtWidgets import QFileDialog
+        if self._current_mode == 'video':
+            path, _ = QFileDialog.getSaveFileName(
+                None, 'Save output video', '', 'Videos (*.mp4)',
+            )
+        else:
+            path, _ = QFileDialog.getSaveFileName(
+                None, 'Save output image', '', 'Images (*.png *.jpg)',
+            )
+        if not path:
+            return
+        self._output_path = path.replace('\\', '/')
+        self.outputPathChanged.emit(self._output_path)
+
+    @Slot()
+    def startBatch(self) -> None:
+        """Start batch face swap processing on the selected target file."""
+        if self._batch_running or not self._source_set or not self._target_set:
+            return
+        if not self._connected:
+            self._set_status('cannot reach server — not connected')
+            return
+
+        # Auto-generate output path if none selected
+        if not self._output_path:
+            import os
+            base, ext = os.path.splitext(self._target_path)
+            self._output_path = base + '_swapped' + ext
+            self.outputPathChanged.emit(self._output_path)
+
+        self._batch_complete = False
+        self.batchCompleteChanged.emit(False)
+        self._set_status('processing...')
+        self._client.set_target(self._target_path)
+        self._client.set_output(self._output_path)
+        result = self._client.start()
+        if result.get('success', False) is False and 'error' in result:
+            self._set_status(f'error: {result["error"]}')
+            return
+        self._batch_running = True
+        self.batchRunningChanged.emit(True)
+
+    @Slot()
+    def stopBatch(self) -> None:
+        """Cancel in-progress batch processing."""
+        self._stop_batch_internal()
+
+    @Slot()
+    def openOutputFolder(self) -> None:
+        """Open the folder containing the output file in the system file manager."""
+        import os
+        import sys as _sys
+        import subprocess
+        if not self._output_path:
+            return
+        folder = os.path.dirname(self._output_path)
+        try:
+            if _sys.platform == 'win32':
+                os.startfile(folder)
+            elif _sys.platform == 'darwin':
+                subprocess.Popen(['open', folder])
+            else:
+                subprocess.Popen(['xdg-open', folder])
+        except Exception as e:
+            self._set_status(f'could not open folder: {e}')
+
+    def _stop_batch_internal(self) -> None:
+        """Internal: stop batch and reset running flag."""
+        self._client.stop()
+        self._batch_running = False
+        self.batchRunningChanged.emit(False)
+        self._set_status('stopped')
+
+    def _reset_batch_state(self) -> None:
+        """Clear all batch-related state."""
+        self._target_set = False
+        self._target_label = ''
+        self._target_path = ''
+        self._target_thumbnail = ''
+        self._output_path = ''
+        self._batch_running = False
+        self._batch_complete = False
+        self.targetSetChanged.emit(False)
+        self.targetLabelChanged.emit('')
+        self.targetThumbnailChanged.emit('')
+        self.outputPathChanged.emit('')
+        self.batchRunningChanged.emit(False)
+        self.batchCompleteChanged.emit(False)
+
     @Slot()
     def cleanup(self) -> None:
         self._frame_timer.stop()
         self._stop_vcam()
+        self._audio_playback.stop()
+        self._audio_capture.stop()
+        self._jitter_buffer.clear()
         self._ws_push_active.clear()
         self._webcam_stop.set()
         if self._webcam_thread is not None:
@@ -437,19 +641,92 @@ class Bridge(QObject):
             webcam_buffer.promote()
             self._webcam_version += 1
             self.webcamVersionChanged.emit(self._webcam_version)
+
+        # Pop the most recent eligible frame from the jitter buffer.
+        # If multiple frames are eligible the intermediate ones are dropped
+        # so the display stays current.
+        eligible = self._jitter_buffer.pop_eligible()
+        if eligible is not None:
+            _capture_ts, jpeg_bytes = eligible
+            live_buffer.update_from_bytes(jpeg_bytes)
+            if self._virtual_cam_active:
+                self._push_to_vcam(jpeg_bytes)
+
         if live_buffer.is_dirty():
             live_buffer.promote()
             self._live_version += 1
             self.liveVersionChanged.emit(self._live_version)
 
+        # Periodic health check (~every 2 seconds)
+        if self._pipeline_running:
+            self._health_tick += 1
+            if self._health_tick >= 60:
+                self._health_tick = 0
+                self._check_av_health()
+
+    def _check_av_health(self) -> None:
+        """Periodic health check for audio streams and clock drift.
+
+        Called every ~2 seconds from _poll_frames while the pipeline is running.
+        Attempts automatic recovery of failed audio streams and logs sync stats.
+        """
+        import sys
+
+        # 1. Audio capture health + clock drift
+        if self._audio_capture.is_running:
+            health = self._audio_capture.check_health()
+            if not health['active']:
+                print('[SYNC] Audio capture stream died — recovering', file=sys.stderr)
+                self._audio_capture.try_recover()
+            elif health['drift_warning']:
+                print(
+                    f'[SYNC] Clock drift warning: audio drifted '
+                    f'{health["drift_ms"]:.1f}ms from wall clock',
+                    file=sys.stderr,
+                )
+
+        # 2. Audio playback health
+        if self._audio_playback.is_running:
+            try:
+                stream = self._audio_playback._stream
+                if stream is not None and not stream.active:  # type: ignore[union-attr]
+                    print('[SYNC] Audio playback stream died — recovering', file=sys.stderr)
+                    self._audio_playback.try_recover()
+            except Exception:
+                pass
+
+        # 3. Log sync stats
+        stats = self._jitter_buffer.sync_stats()
+        if stats['rtt_samples'] > 0:
+            print(
+                f'[SYNC] delay={stats["target_delay_ms"]}ms '
+                f'rtt={stats["rtt_mean_ms"]}±{stats["rtt_stddev_ms"]}ms '
+                f'buf={stats["buffer_depth"]}',
+                file=sys.stderr,
+            )
+
     # ── WebSocket push callbacks (called from background thread) ──────────────
 
-    def _on_ws_frame(self, jpeg_bytes: bytes) -> None:
-        """Called by PipelineClient when a JPEG frame arrives."""
-        live_buffer.update_from_bytes(jpeg_bytes)
+    def _on_ws_frame(self, data: bytes) -> None:
+        """Called by PipelineClient when a binary frame arrives.
+
+        Expected format: [8 bytes int64 capture_ts_ns] [N bytes JPEG].
+        Falls back gracefully if the header is missing (legacy server).
+
+        Frames are pushed into the jitter buffer rather than displayed
+        immediately — the Qt render timer (_poll_frames) pops them at the
+        correct playout time.
+        """
+        if len(data) > self._TS_HEADER_SIZE:
+            capture_ts = struct.unpack('<q', data[:self._TS_HEADER_SIZE])[0]
+            jpeg_bytes = data[self._TS_HEADER_SIZE:]
+        else:
+            capture_ts = 0
+            jpeg_bytes = data
+
+        self._last_capture_ts = capture_ts
         self._last_frame_time = time.time()
-        if self._virtual_cam_active:
-            self._push_to_vcam(jpeg_bytes)
+        self._jitter_buffer.push(capture_ts, jpeg_bytes)
 
     def _on_ws_event(self, data: Dict) -> None:
         """Called by PipelineClient when a JSON event arrives."""
@@ -471,12 +748,21 @@ class Bridge(QObject):
                 self._set_status(message)
         elif event == 'PIPELINE_STARTED':
             self._set_loading_message('')
-            self._set_pipeline_running(True)
+            if self._current_mode == 'realtime':
+                self._set_pipeline_running(True)
         elif event == 'PIPELINE_STOPPED':
             self._set_loading_message('')
-            self._set_pipeline_running(False)
             self._set_detection_status('')
-            self._set_status('stopped')
+            if self._current_mode == 'realtime':
+                self._set_pipeline_running(False)
+                self._set_status('stopped')
+            else:
+                # Batch job finished — mark complete
+                self._batch_running = False
+                self.batchRunningChanged.emit(False)
+                self._batch_complete = True
+                self.batchCompleteChanged.emit(True)
+                self._set_status('done')
 
     def _on_ws_connected(self, connected: bool) -> None:
         """Called by PipelineClient when connection status changes."""
@@ -489,6 +775,10 @@ class Bridge(QObject):
                 self.connectionLabelChanged.emit(label)
             if not connected:
                 self._set_status('disconnected — reconnecting...')
+            else:
+                # GPU reconnected — reset jitter buffer so RTT stats
+                # recalibrate from the new connection's latency profile.
+                self._jitter_buffer.clear()
 
     # ── Webcam thread (preview + optional broadcast) ───────────────────
 
@@ -505,6 +795,9 @@ class Bridge(QObject):
         )
         self._webcam_thread.start()
 
+    # Size of the capture_ts header prepended to binary frames (int64 nanoseconds)
+    _TS_HEADER_SIZE = 8
+
     def _run_webcam(self, webcam_index: int) -> None:
         cap = cv2.VideoCapture(webcam_index)
         if not cap.isOpened():
@@ -518,13 +811,16 @@ class Bridge(QObject):
                 time.sleep(0.05)
                 continue
 
+            capture_ts = time.perf_counter_ns()
             webcam_buffer.update_from_numpy(frame)
 
             if self._ws_push_active.is_set():
                 # Encode as JPEG and send to pipeline via WebSocket binary.
                 # Quality 75 balances upload bandwidth vs. swap quality.
+                # Prefix with 8-byte int64 capture_ts for A/V sync.
                 _, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-                self._client.send_frame(jpeg.tobytes())
+                header = struct.pack('<q', capture_ts)
+                self._client.send_frame(header + jpeg.tobytes())
 
         cap.release()
 

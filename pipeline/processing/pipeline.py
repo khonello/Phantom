@@ -13,9 +13,10 @@ Responsibilities:
 """
 
 import queue
+import struct
 import threading
 import time
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List, Optional, Tuple, Union
 
 import cv2
 import numpy as np
@@ -247,8 +248,14 @@ class ProcessingPipeline:
             self._async_enhancement.stop()
             self._async_enhancement.join()
 
-    def _process_and_emit(self, frame: Frame, seq: int) -> None:
-        """Run detection → tracking → swap → enhance → emit for one frame."""
+    def _process_and_emit(self, frame: Frame, seq: int, capture_ts: int = 0) -> None:
+        """Run detection → tracking → swap → enhance → emit for one frame.
+
+        Args:
+            frame: Input video frame
+            seq: Sequence number
+            capture_ts: Capture timestamp in nanoseconds (time.perf_counter_ns)
+        """
         frame = self._detection_proc.process(frame)
         detections = self._detection_proc.latest_detections
 
@@ -275,7 +282,24 @@ class ProcessingPipeline:
             _, enhanced_frame = result
             frame = enhanced_frame
 
-        self.bus.emit(FRAME_READY, frame=frame, seq=seq)
+        self.bus.emit(FRAME_READY, frame=frame, seq=seq, capture_ts=capture_ts)
+
+    @staticmethod
+    def _unpack_timestamped_frame(
+        data: Union[bytes, 'Tuple[int, bytes]'],
+    ) -> Tuple[int, bytes]:
+        """Extract capture_ts and JPEG bytes from a frame queue item.
+
+        Supports two formats:
+        - Tuple (capture_ts, jpeg_bytes): set by server when 8-byte header present
+        - Raw bytes: legacy/fallback, capture_ts = 0
+
+        Returns:
+            (capture_ts_ns, jpeg_bytes)
+        """
+        if isinstance(data, tuple):
+            return data
+        return (0, data)
 
     def _stream_loop_push(self) -> None:
         """Stream loop for WebSocket push mode — reads JPEG frames from frame_queue."""
@@ -292,9 +316,11 @@ class ProcessingPipeline:
         seq = 0
         while not self._stop_event.is_set():
             try:
-                jpeg_bytes = self.frame_queue.get(timeout=0.1)
+                raw = self.frame_queue.get(timeout=0.1)
             except queue.Empty:
                 continue
+
+            capture_ts, jpeg_bytes = self._unpack_timestamped_frame(raw)
 
             buf = np.frombuffer(jpeg_bytes, dtype=np.uint8)
             frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
@@ -302,7 +328,7 @@ class ProcessingPipeline:
                 continue
 
             seq += 1
-            self._process_and_emit(frame, seq)
+            self._process_and_emit(frame, seq, capture_ts)
 
     def _stream_loop_capture(self) -> None:
         """Stream loop for VideoCapture mode — local webcam or network URL."""
@@ -333,6 +359,8 @@ class ProcessingPipeline:
                 if frame_count <= warmup_frames:
                     continue
 
+                capture_ts = time.perf_counter_ns()
+
                 if skip_count > 0:
                     skip_count -= 1
                     drop_count += 1
@@ -341,7 +369,7 @@ class ProcessingPipeline:
                     skip_count = 1
                     self._async_enhancement.drop_count = 0
 
-                self._process_and_emit(frame, seq)
+                self._process_and_emit(frame, seq, capture_ts)
 
                 if frame_count % 30 == 0:
                     now = time.time()

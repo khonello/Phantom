@@ -17,9 +17,10 @@ Health check: send {"action": "health"}, receive {"status": "healthy", "uptime":
 
 import json
 import queue
+import struct
 import threading
 import time
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, Optional, Set, Tuple
 
 from pipeline.config import FaceSwapConfig, CONFIG
 from pipeline.events import BUS, FRAME_READY, DETECTION, STATUS_CHANGED, PIPELINE_STARTED, PIPELINE_STOPPED, WARNING
@@ -287,21 +288,35 @@ class WebSocketAPIServer:
                 'error': str(e),
             })
 
+    # Size of the capture_ts header prepended to binary frames (int64 nanoseconds)
+    _TS_HEADER_SIZE = 8
+
     def _handle_binary_frame(self, data: bytes) -> None:
         """
         Handle an inbound binary WebSocket message (JPEG frame from desktop).
 
-        Puts the raw JPEG bytes into the pipeline's frame_queue so the stream
-        loop can decode and process them. Drops the frame if the queue is full
-        (pipeline is falling behind) to avoid unbounded buffering.
+        Expected format: [8 bytes int64 capture_ts_ns] [N bytes JPEG data].
+        If the message is shorter than the header (legacy client), treats the
+        entire payload as JPEG with capture_ts = 0.
+
+        Puts (capture_ts, jpeg_bytes) into the pipeline's frame_queue so the
+        stream loop can decode and process them. Drops the frame if the queue
+        is full (pipeline is falling behind) to avoid unbounded buffering.
 
         Args:
-            data: Raw JPEG bytes sent by the desktop webcam thread
+            data: Binary message from the desktop webcam thread
         """
+        if len(data) > self._TS_HEADER_SIZE:
+            capture_ts = struct.unpack('<q', data[:self._TS_HEADER_SIZE])[0]
+            jpeg_bytes = data[self._TS_HEADER_SIZE:]
+        else:
+            capture_ts = 0
+            jpeg_bytes = data
+
         fq = getattr(self.pipeline, 'frame_queue', None)
         if fq is not None:
             try:
-                fq.put_nowait(data)
+                fq.put_nowait((capture_ts, jpeg_bytes))
             except queue.Full:
                 pass  # drop — pipeline is behind, keep latency low
 
@@ -378,13 +393,17 @@ class WebSocketAPIServer:
 
     # ── Event handlers ───────────────────────────────────────────────────────
 
-    def _on_frame_ready(self, frame: Any, seq: int) -> None:
+    def _on_frame_ready(self, frame: Any, seq: int, capture_ts: int = 0) -> None:
         """
         Handle FRAME_READY event — encode frame as JPEG and broadcast to clients.
+
+        Prepends an 8-byte int64 capture_ts header before the JPEG payload so
+        the desktop client can compute round-trip latency for A/V sync.
 
         Args:
             frame: numpy frame array
             seq: Sequence number
+            capture_ts: Capture timestamp in nanoseconds (time.perf_counter_ns)
         """
         import cv2
         try:
@@ -392,7 +411,8 @@ class WebSocketAPIServer:
                 '.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85]
             )
             if success:
-                self._broadcast_binary(jpeg_data.tobytes())
+                header = struct.pack('<q', capture_ts)
+                self._broadcast_binary(header + jpeg_data.tobytes())
         except Exception as e:
             emit_error(f'Frame encoding error: {e}', exception=e, scope='API_SERVER')
 
