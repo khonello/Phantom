@@ -130,7 +130,7 @@ Before trusting the orchestrator, confirm everything works by hand. This is exac
 # Deploy a pod from the dashboard:
 #   Dashboard → GPU Cloud → Deploy
 #   Pick any GPU in your volume's datacenter
-#   Image: runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
+#   Image: runpod/pytorch:2.4.0-py3.11-cuda12.4.1-runtime-ubuntu22.04
 #   Attach your network volume
 #   Enable SSH
 #   Deploy
@@ -178,7 +178,7 @@ RUNPOD_GPU_TYPES=NVIDIA GeForce RTX 3090,NVIDIA RTX A4000,NVIDIA GeForce RTX 409
 RUNPOD_NETWORK_VOLUME_ID=vol_xxx   # from step 4
 
 # ssh mode: generic base image
-RUNPOD_IMAGE=runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
+RUNPOD_IMAGE=runpod/pytorch:2.4.0-py3.11-cuda12.4.1-runtime-ubuntu22.04
 # docker mode: your custom image
 # RUNPOD_IMAGE=<your-registry>/phantom-pipeline:latest
 
@@ -287,7 +287,7 @@ Change one line in `.env`:
 ```env
 # Development — iterate fast, ssh in to debug
 RUNPOD_DEPLOY_MODE=ssh
-RUNPOD_IMAGE=runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
+RUNPOD_IMAGE=runpod/pytorch:2.4.0-py3.11-cuda12.4.1-runtime-ubuntu22.04
 
 # Production — fast boot, reproducible
 RUNPOD_DEPLOY_MODE=docker
