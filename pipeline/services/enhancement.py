@@ -47,13 +47,22 @@ class Enhancer:
 
     def _resolve_model_path(self) -> str:
         """
-        Resolve the GFPGAN model path (relative to pipeline/).
+        Resolve the GFPGAN model path.
+
+        Checks RunPod Network Volume first (/workspace/models/), then falls
+        back to the local models/ directory relative to the repo root.
 
         Returns:
             Full path to GFPGANv1.4.pth
         """
-        pipeline_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        return os.path.join(pipeline_dir, 'models', 'GFPGANv1.4.pth')
+        _MODEL_NAME = 'GFPGANv1.4.pth'
+        # RunPod Network Volume — persists across pod restarts
+        runpod_path = os.path.join('/workspace', 'models', _MODEL_NAME)
+        if os.path.isfile(runpod_path):
+            return runpod_path
+        # Local repo models/ directory
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return os.path.join(repo_root, 'models', _MODEL_NAME)
 
     def _try_load_gfpgan(self) -> Optional[Any]:
         """

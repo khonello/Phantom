@@ -225,6 +225,7 @@ class Bridge(QObject):
         self._audio_playback = AudioPlayback(
             self._audio_capture.ring_buffer,
             self._jitter_buffer,
+            audio_capture=self._audio_capture,
         )
 
         # Virtual camera output
@@ -684,10 +685,14 @@ class Bridge(QObject):
                 self._audio_capture.try_recover()
             elif health['drift_warning']:
                 print(
-                    f'[SYNC] Clock drift warning: audio drifted '
-                    f'{health["drift_ms"]:.1f}ms from wall clock',
+                    f'[SYNC] Clock drift: {health["drift_ms"]:.1f}ms '
+                    f'(compensated in playback)',
                     file=sys.stderr,
                 )
+                # Reset drift counters periodically to prevent unbounded
+                # accumulation — the playback callback reads drift_ns live
+                if health['drift_ms'] > 200.0:
+                    self._audio_capture.reset_drift()
 
         # 2. Audio playback health
         if self._audio_playback.is_running:

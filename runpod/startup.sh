@@ -1,94 +1,147 @@
 #!/usr/bin/env bash
 # Phantom — RunPod Pod Startup Script
-# Run once after pod creation to prepare the environment.
 #
-# Usage:
+# Run once after the very first pod creation to prepare the environment.
+# On pod resume or new pod deployment (same network volume), most steps
+# are skipped because the venv and models already live on /workspace.
+#
+# Usage (from repo root):
 #   bash runpod/startup.sh
 
 set -euo pipefail
 
 WORKSPACE="${WORKSPACE:-/workspace}"
 MODELS_DIR="${WORKSPACE}/models"
+VENV_DIR="${WORKSPACE}/venv"
 # Derive repo root from the script's own location (runpod/startup.sh → repo root)
 PHANTOM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PYTHON="${VENV_DIR}/bin/python"
+PIP="${VENV_DIR}/bin/pip"
 
 echo "=== Phantom RunPod Startup ==="
-echo "Workspace: ${WORKSPACE}"
+echo "Workspace:  ${WORKSPACE}"
+echo "Venv:       ${VENV_DIR}"
 echo "Models dir: ${MODELS_DIR}"
+echo "Phantom:    ${PHANTOM_DIR}"
 
-# ── 1. Install FFmpeg ──────────────────────────────────────────────────────────
+# ── 1. Install FFmpeg (system package — re-installs on each new container) ─────
 echo ""
-echo "--- Installing FFmpeg ---"
+echo "--- FFmpeg ---"
 if command -v ffmpeg &>/dev/null; then
-    echo "FFmpeg already installed: $(ffmpeg -version 2>&1 | head -1)"
+    echo "Already installed: $(ffmpeg -version 2>&1 | head -1)"
 else
+    echo "Installing..."
     apt-get update -qq && apt-get install -y -qq ffmpeg
-    echo "FFmpeg installed: $(ffmpeg -version 2>&1 | head -1)"
+    echo "Installed: $(ffmpeg -version 2>&1 | head -1)"
 fi
 
 # ── 2. Check CUDA ──────────────────────────────────────────────────────────────
 echo ""
-echo "--- CUDA Check ---"
+echo "--- CUDA ---"
 if command -v nvidia-smi &>/dev/null; then
     GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "unknown")
-    CUDA_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 || echo "unknown")
-    echo "GPU detected: ${GPU_NAME}"
-    echo "Driver version: ${CUDA_VERSION}"
+    DRIVER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 || echo "unknown")
+    echo "GPU:    ${GPU_NAME}"
+    echo "Driver: ${DRIVER}"
 else
     echo "WARNING: nvidia-smi not found. No GPU acceleration available."
 fi
 
-# ── 3. Create /workspace/models if not present ─────────────────────────────────
+# ── 3. Create model cache directory ───────────────────────────────────────────
 echo ""
-echo "--- Model Cache Setup ---"
+echo "--- Model Cache ---"
 if [ -d "${MODELS_DIR}" ]; then
-    echo "Model cache directory exists: ${MODELS_DIR}"
-    echo "Contents:"
+    echo "Exists: ${MODELS_DIR}"
     ls -lh "${MODELS_DIR}/" 2>/dev/null || echo "  (empty)"
 else
-    echo "Creating model cache directory: ${MODELS_DIR}"
     mkdir -p "${MODELS_DIR}/insightface"
-    echo "Directory created."
+    echo "Created: ${MODELS_DIR}"
 fi
 
-# ── 4. Python dependency check ─────────────────────────────────────────────────
+# ── 4. Create or reuse /workspace/venv ────────────────────────────────────────
+# The venv lives on the network volume so it survives pod restarts and
+# new pod deployments. Packages are only installed on first run.
 echo ""
-echo "--- Python Environment ---"
-python3 --version || echo "WARNING: python3 not found"
-pip3 --version || echo "WARNING: pip3 not found"
+echo "--- Python Venv ---"
+if [ -d "${VENV_DIR}" ]; then
+    echo "Venv already exists at ${VENV_DIR} — skipping package install."
+    echo "Python: $(${PYTHON} --version 2>&1)"
+else
+    echo "Creating venv at ${VENV_DIR}..."
+    python3 -m venv "${VENV_DIR}"
+    echo "Created. Python: $(${PYTHON} --version 2>&1)"
 
-# ── 5. Optional model pre-warming ─────────────────────────────────────────────
+    echo ""
+    echo "--- Installing Python Dependencies ---"
+    echo "This only runs once. Subsequent pod starts reuse this venv."
+    echo ""
+
+    ${PIP} install --upgrade pip --quiet
+
+    if [ -f "${PHANTOM_DIR}/requirements-pipeline-gpu.txt" ]; then
+        ${PIP} install -r "${PHANTOM_DIR}/requirements-pipeline-gpu.txt"
+        echo "Dependencies installed."
+    else
+        echo "WARNING: requirements-pipeline-gpu.txt not found at ${PHANTOM_DIR}."
+        echo "Run manually: ${PIP} install -r requirements-pipeline-gpu.txt"
+    fi
+fi
+
+# ── 5. GFPGAN model download ──────────────────────────────────────────────────
 echo ""
-echo "--- Model Pre-Warm (optional) ---"
+echo "--- GFPGAN Model ---"
+GFPGAN_PATH="${MODELS_DIR}/GFPGANv1.4.pth"
+GFPGAN_URL="https://github.com/TencentARC/GFPGAN/releases/download/v1.3.4/GFPGANv1.4.pth"
+if [ -f "${GFPGAN_PATH}" ]; then
+    echo "Already downloaded: ${GFPGAN_PATH} ($(du -h "${GFPGAN_PATH}" | cut -f1))"
+else
+    echo "Downloading GFPGANv1.4.pth..."
+    wget -q --show-progress -O "${GFPGAN_PATH}" "${GFPGAN_URL}"
+    echo "Downloaded: ${GFPGAN_PATH} ($(du -h "${GFPGAN_PATH}" | cut -f1))"
+fi
+
+# ── 6. Model pre-warm ─────────────────────────────────────────────────────────
+echo ""
+echo "--- Model Pre-Warm ---"
 if [ -f "${PHANTOM_DIR}/pipeline/__init__.py" ]; then
-    echo "Phantom found at ${PHANTOM_DIR}. Running model warmup..."
+    echo "Loading models into cache..."
     cd "${PHANTOM_DIR}"
-    python3 -c "
+    ${PYTHON} -c "
 import sys
 sys.path.insert(0, '.')
 try:
     from pipeline.config import CONFIG
     from pipeline.services.face_detection import FaceDetector
-    print('Loading InsightFace model...')
     det = FaceDetector(CONFIG)
     det._get_analyser()
     print('InsightFace model ready.')
 except Exception as e:
-    print(f'Model warmup skipped: {e}')
+    print(f'InsightFace warmup skipped: {e}')
+
+try:
+    from pipeline.services.enhancement import Enhancer
+    enh = Enhancer()
+    if enh.available:
+        print('GFPGAN enhancement ready.')
+    else:
+        print('GFPGAN not available (model missing or gfpgan not installed).')
+except Exception as e:
+    print(f'GFPGAN warmup skipped: {e}')
 " 2>&1 || echo "Warmup failed (models will load on first request)."
 else
-    echo "Phantom not found at ${PHANTOM_DIR}. Skipping warmup."
-    echo "Run: cd ${WORKSPACE} && git clone <repo> phantom && cd phantom && pip install -r requirements-pipeline-gpu.txt"
+    echo "Phantom not found at ${PHANTOM_DIR} — skipping warmup."
 fi
 
-# ── 6. Summary ─────────────────────────────────────────────────────────────────
+# ── 7. Summary ─────────────────────────────────────────────────────────────────
 echo ""
 echo "=== Startup Complete ==="
 echo ""
-echo "To start the pipeline:"
+echo "To start the pipeline (always use the workspace venv):"
 echo "  cd ${PHANTOM_DIR}"
-echo "  python pipeline.py --stream --execution-provider cuda"
+echo "  ${PYTHON} pipeline.py --execution-provider cuda"
 echo ""
-echo "Connect desktop GUI:"
-echo "  PHANTOM_API_URL=wss://<pod-id>-9000.proxy.runpod.net/ws python desktop.py"
+echo "Or with tmux (recommended — survives SSH disconnects):"
+echo "  tmux new -s phantom"
+echo "  ${PYTHON} pipeline.py --execution-provider cuda"
+echo "  # Detach: Ctrl+B, D"
 echo ""

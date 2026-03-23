@@ -1,0 +1,11 @@
+# Orchestrator dependencies — local machine only, not needed on the pod
+# Install only if using runpod/orchestrator.py to manage pods via Python API
+# Usage: pip install -r requirements-orchestrator.txt
+
+runpod>=1.6.0
+python-dotenv>=1.0.0
+requests>=2.28.0
+
+# Only needed for RUNPOD_DEPLOY_MODE=ssh (development mode)
+# Docker mode does not require paramiko
+paramiko>=3.0.0

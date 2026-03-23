@@ -237,6 +237,25 @@ class AudioCapture:
     def is_running(self) -> bool:
         return self._running
 
+    @property
+    def drift_ns(self) -> int:
+        """Signed clock drift in nanoseconds (positive = audio ahead of wall clock).
+
+        Used by AudioPlayback to compensate the playback point so audio stays
+        aligned with the video playout offset despite hardware clock skew.
+        """
+        elapsed_ns = time.perf_counter_ns() - self._drift_start_ns
+        if elapsed_ns <= 0 or self._drift_samples <= 0:
+            return 0
+        expected_samples = elapsed_ns / 1_000_000_000 * self.sample_rate
+        drift_samples = self._drift_samples - expected_samples
+        return int(drift_samples / self.sample_rate * 1_000_000_000)
+
+    def reset_drift(self) -> None:
+        """Reset drift counters to prevent unbounded accumulation."""
+        self._drift_start_ns = time.perf_counter_ns()
+        self._drift_samples = 0
+
     def check_health(self) -> Dict[str, Any]:
         """Check capture stream health and clock drift.
 
@@ -302,15 +321,16 @@ class RTTTracker:
     Tracks round-trip latency of video frames (desktop → GPU → desktop) and
     computes a smoothed target delay:
 
-        target_delay = mean(rtt) + 2 * stddev(rtt)
+        target_delay = median(rtt) + 1 * stddev(rtt)
 
+    Uses median instead of mean for robustness against outlier spikes.
     Clamped to [FLOOR_NS, CEILING_NS] and updated via exponential smoothing
     every UPDATE_INTERVAL frames to prevent oscillation.
     """
 
-    WINDOW_SIZE: int = 30         # ~1 second at 30 fps
+    WINDOW_SIZE: int = 60         # ~2 seconds at 30 fps (larger window for stability)
     UPDATE_INTERVAL: int = 10     # recalculate every N samples
-    SMOOTHING_ALPHA: float = 0.1  # exponential smoothing factor
+    SMOOTHING_ALPHA: float = 0.2  # exponential smoothing factor (faster convergence)
     FLOOR_NS: int = 80_000_000            # 80 ms
     CEILING_NS: int = 2_000_000_000      # 2 s  (accommodates RunPod RTT)
     INITIAL_DELAY_NS: int = 400_000_000  # 400 ms (session warmup for remote GPU)
@@ -343,7 +363,7 @@ class RTTTracker:
     def _recompute(self) -> None:
         """Recompute target delay from the current sample window."""
         arr = np.array(self._samples, dtype=np.float64)
-        raw = int(float(np.mean(arr)) + 2.0 * float(np.std(arr)))
+        raw = int(float(np.median(arr)) + 1.0 * float(np.std(arr)))
         clamped = max(self.FLOOR_NS, min(self.CEILING_NS, raw))
         # Exponential smoothing prevents sudden jumps
         self._target_delay_ns = int(
@@ -517,6 +537,7 @@ class AudioPlayback:
         sample_rate: int = DEFAULT_SAMPLE_RATE,
         channels: int = DEFAULT_CHANNELS,
         block_size: int = DEFAULT_BLOCK_SIZE,
+        audio_capture: Optional['AudioCapture'] = None,
     ) -> None:
         """
         Args:
@@ -525,12 +546,14 @@ class AudioPlayback:
             sample_rate: Must match the capture sample rate
             channels: Must match the capture channel count
             block_size: OutputStream block size (frames per callback)
+            audio_capture: Optional AudioCapture for clock drift compensation
         """
         self._ring = ring_buffer
         self._jitter = jitter_buffer
         self.sample_rate = sample_rate
         self.channels = channels
         self.block_size = block_size
+        self._audio_capture = audio_capture
 
         self._stream: Optional[object] = None
         self._running = False
@@ -556,7 +579,12 @@ class AudioPlayback:
 
         now = time.perf_counter_ns()
         target = self._jitter.target_delay_ns
-        playback_point = now - target
+        # Compensate for audio clock drift: if audio hardware runs fast,
+        # shift the playback point forward so we read newer chunks.
+        drift_ns = 0
+        if self._audio_capture is not None:
+            drift_ns = self._audio_capture.drift_ns
+        playback_point = now - target + drift_ns
 
         written = 0
 
