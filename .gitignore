@@ -6,6 +6,8 @@ temp
 __pycache__
 
 environ
+*environ*
+
 models
 Python_3_12_0venv
 

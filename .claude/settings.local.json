@@ -8,7 +8,9 @@
       "Bash(ls -la /c/Users/Khonello/Documents/Developer/Languages/Multi/Phantom/.env* 2>/dev/null || echo \"No .env files found\")",
       "Bash(python:*)",
       "Bash(python3:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git push:*)",
+      "Bash(curl -s \"https://hub.docker.com/v2/repositories/runpod/pytorch/tags/?page_size=100&ordering=last_updated&page=2\")"
     ]
   }
 }
