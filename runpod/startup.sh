@@ -5,6 +5,10 @@
 # On pod resume or new pod deployment (same network volume), most steps
 # are skipped because the venv and models already live on /workspace.
 #
+# Dependency sync: on every run, compares requirements-pipeline-gpu.txt
+# against a snapshot stored on the volume. If requirements changed since
+# the last install, pip install runs again to pick up new/removed packages.
+#
 # Usage (from repo root):
 #   bash runpod/startup.sh
 
@@ -17,6 +21,8 @@ VENV_DIR="${WORKSPACE}/venv"
 PHANTOM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON="${VENV_DIR}/bin/python"
 PIP="${VENV_DIR}/bin/pip"
+REQUIREMENTS="${PHANTOM_DIR}/requirements-pipeline-gpu.txt"
+REQUIREMENTS_SNAPSHOT="${VENV_DIR}/.requirements-snapshot"
 
 echo "=== Phantom RunPod Startup ==="
 echo "Workspace:  ${WORKSPACE}"
@@ -24,15 +30,15 @@ echo "Venv:       ${VENV_DIR}"
 echo "Models dir: ${MODELS_DIR}"
 echo "Phantom:    ${PHANTOM_DIR}"
 
-# ── 1. Install FFmpeg (system package — re-installs on each new container) ─────
+# ── 1. Install system packages (re-installs on each new container) ────────────
 echo ""
-echo "--- FFmpeg ---"
-if command -v ffmpeg &>/dev/null; then
-    echo "Already installed: $(ffmpeg -version 2>&1 | head -1)"
-else
-    echo "Installing..."
+echo "--- System Packages ---"
+NEED_INSTALL=false
+if ! command -v ffmpeg &>/dev/null; then
+    echo "Installing ffmpeg..."
     apt-get update -qq && apt-get install -y -qq ffmpeg
-    echo "Installed: $(ffmpeg -version 2>&1 | head -1)"
+else
+    echo "Already installed: ffmpeg"
 fi
 
 # ── 2. Check CUDA ──────────────────────────────────────────────────────────────
@@ -60,34 +66,45 @@ fi
 
 # ── 4. Create or reuse /workspace/venv ────────────────────────────────────────
 # The venv lives on the network volume so it survives pod restarts and
-# new pod deployments. Packages are only installed on first run.
+# new pod deployments. Packages are installed on first run, and re-synced
+# whenever requirements-pipeline-gpu.txt changes.
 echo ""
 echo "--- Python Venv ---"
 if [ -d "${VENV_DIR}" ]; then
-    echo "Venv already exists at ${VENV_DIR} — skipping package install."
+    echo "Venv already exists at ${VENV_DIR}."
     echo "Python: $(${PYTHON} --version 2>&1)"
 else
     echo "Creating venv at ${VENV_DIR}..."
     python3 -m venv "${VENV_DIR}"
     echo "Created. Python: $(${PYTHON} --version 2>&1)"
 
-    echo ""
-    echo "--- Installing Python Dependencies ---"
-    echo "This only runs once. Subsequent pod starts reuse this venv."
-    echo ""
-
     ${PIP} install --upgrade pip --quiet
-
-    if [ -f "${PHANTOM_DIR}/requirements-pipeline-gpu.txt" ]; then
-        ${PIP} install -r "${PHANTOM_DIR}/requirements-pipeline-gpu.txt"
-        echo "Dependencies installed."
-    else
-        echo "WARNING: requirements-pipeline-gpu.txt not found at ${PHANTOM_DIR}."
-        echo "Run manually: ${PIP} install -r requirements-pipeline-gpu.txt"
-    fi
 fi
 
-# ── 5. GFPGAN model download ──────────────────────────────────────────────────
+# ── 5. Sync dependencies ─────────────────────────────────────────────────────
+# Compare current requirements against the snapshot from last install.
+# If they differ (or no snapshot exists), run pip install to sync.
+echo ""
+echo "--- Dependencies ---"
+if [ -f "${REQUIREMENTS}" ]; then
+    if [ -f "${REQUIREMENTS_SNAPSHOT}" ] && diff -q "${REQUIREMENTS}" "${REQUIREMENTS_SNAPSHOT}" &>/dev/null; then
+        echo "Requirements unchanged — skipping pip install."
+    else
+        if [ -f "${REQUIREMENTS_SNAPSHOT}" ]; then
+            echo "Requirements changed since last install — syncing..."
+        else
+            echo "First install — installing all dependencies..."
+        fi
+        ${PIP} install -r "${REQUIREMENTS}"
+        cp "${REQUIREMENTS}" "${REQUIREMENTS_SNAPSHOT}"
+        echo "Dependencies synced."
+    fi
+else
+    echo "WARNING: requirements-pipeline-gpu.txt not found at ${PHANTOM_DIR}."
+    echo "Run manually: ${PIP} install -r requirements-pipeline-gpu.txt"
+fi
+
+# ── 6. GFPGAN model download ──────────────────────────────────────────────────
 echo ""
 echo "--- GFPGAN Model ---"
 GFPGAN_PATH="${MODELS_DIR}/GFPGANv1.4.pth"
@@ -100,7 +117,7 @@ else
     echo "Downloaded: ${GFPGAN_PATH} ($(du -h "${GFPGAN_PATH}" | cut -f1))"
 fi
 
-# ── 6. Model pre-warm ─────────────────────────────────────────────────────────
+# ── 7. Model pre-warm ─────────────────────────────────────────────────────────
 echo ""
 echo "--- Model Pre-Warm ---"
 if [ -f "${PHANTOM_DIR}/pipeline/__init__.py" ]; then
@@ -132,7 +149,7 @@ else
     echo "Phantom not found at ${PHANTOM_DIR} — skipping warmup."
 fi
 
-# ── 7. Summary ─────────────────────────────────────────────────────────────────
+# ── 8. Summary ─────────────────────────────────────────────────────────────────
 echo ""
 echo "=== Startup Complete ==="
 echo ""
@@ -140,8 +157,7 @@ echo "To start the pipeline (always use the workspace venv):"
 echo "  cd ${PHANTOM_DIR}"
 echo "  ${PYTHON} pipeline.py --execution-provider cuda"
 echo ""
-echo "Or with tmux (recommended — survives SSH disconnects):"
-echo "  tmux new -s phantom"
-echo "  ${PYTHON} pipeline.py --execution-provider cuda"
-echo "  # Detach: Ctrl+B, D"
+echo "Or in background (survives SSH disconnects):"
+echo "  nohup ${PYTHON} pipeline.py --execution-provider cuda > /workspace/phantom-pipeline.log 2>&1 &"
+echo "  tail -f /workspace/phantom-pipeline.log"
 echo ""
