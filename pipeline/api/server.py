@@ -224,12 +224,17 @@ class WebSocketAPIServer:
                 get a 200 OK so the RunPod proxy considers the port alive.
                 """
                 from http import HTTPStatus
+                from websockets.datastructures import Headers
                 from websockets.http11 import Response
                 upgrade = (request.headers.get('Upgrade') or '').lower()
                 if upgrade == 'websocket':
                     return None  # proceed with WebSocket handshake
                 # Plain HTTP — return 200 OK for proxy health checks
-                return Response(HTTPStatus.OK, 'OK', headers={}, body=b'OK\n')
+                return Response(
+                    HTTPStatus.OK, 'OK',
+                    headers=Headers([('Content-Type', 'text/plain')]),
+                    body=b'OK\n',
+                )
 
             with ws_serve(
                 handler,
