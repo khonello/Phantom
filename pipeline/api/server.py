@@ -217,6 +217,20 @@ class WebSocketAPIServer:
                         scope='API_SERVER',
                     )
 
+            def process_request(connection: Any, request: Any) -> Any:
+                """Respond to plain HTTP requests (RunPod proxy health probes).
+
+                WebSocket upgrades pass through unchanged. Plain HTTP GETs
+                get a 200 OK so the RunPod proxy considers the port alive.
+                """
+                from http import HTTPStatus
+                from websockets.http11 import Response
+                upgrade = (request.headers.get('Upgrade') or '').lower()
+                if upgrade == 'websocket':
+                    return None  # proceed with WebSocket handshake
+                # Plain HTTP — return 200 OK for proxy health checks
+                return Response(HTTPStatus.OK, 'OK', headers={}, body=b'OK\n')
+
             with ws_serve(
                 handler,
                 '0.0.0.0',
@@ -224,6 +238,7 @@ class WebSocketAPIServer:
                 max_size=64 * 1024 * 1024,  # 64 MB max message (for file transfers)
                 ping_interval=30,
                 ping_timeout=120,  # generous timeout for high-latency / saturated links
+                process_request=process_request,
             ) as server:
                 self._ws_server = server
                 emit_status(
