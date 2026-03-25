@@ -657,12 +657,31 @@ def _ssh_setup_and_start(ssh_address: str, key_path: str) -> None:
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
-    print("  Connecting via SSH as {}@{}...".format(username, host))
-    client.connect(hostname=host, port=port, username=username, pkey=key, timeout=30)
+    # Retry SSH connection — RunPod proxy accepts TCP immediately but the
+    # container may still be starting, causing "container is not running" errors.
+    _SSH_CONNECT_RETRIES = 12  # 12 * 10s = 2 minutes
+    for attempt in range(1, _SSH_CONNECT_RETRIES + 1):
+        try:
+            print("  Connecting via SSH as {}@{}... (attempt {}/{})".format(
+                username, host, attempt, _SSH_CONNECT_RETRIES))
+            client.connect(hostname=host, port=port, username=username, pkey=key, timeout=30)
+            shell = _open_shell(client)
+            # Quick smoke test — if the container isn't ready, this will fail
+            _shell_run(shell, "echo ready", "container-check")
+            break
+        except Exception as exc:
+            client.close()
+            if attempt == _SSH_CONNECT_RETRIES:
+                print("ERROR: Container not ready after {} attempts: {}".format(
+                    _SSH_CONNECT_RETRIES, exc))
+                sys.exit(1)
+            print("  Container not ready: {} — retrying in 10s...".format(exc))
+            time.sleep(10)
+            # Re-create client for next attempt
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
     try:
-        shell = _open_shell(client)
-
         # Clone repo if not present — only runs on first-ever deploy
         repo_url = os.getenv("RUNPOD_REPO_URL")
         if repo_url:
