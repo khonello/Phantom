@@ -79,7 +79,16 @@ class Enhancer:
             return None
 
         try:
-            # Lazy import to avoid requiring gfpgan for other features
+            # Shim for torchvision >= 0.18 which removed functional_tensor.
+            # basicsr (gfpgan dependency) imports the removed module at load time.
+            import sys
+            if 'torchvision.transforms.functional_tensor' not in sys.modules:
+                import types
+                import torchvision.transforms.functional as _F
+                _shim = types.ModuleType('torchvision.transforms.functional_tensor')
+                _shim.rgb_to_grayscale = _F.rgb_to_grayscale
+                sys.modules['torchvision.transforms.functional_tensor'] = _shim
+
             from gfpgan import GFPGANer
 
             enhancer = GFPGANer(
