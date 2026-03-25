@@ -71,11 +71,19 @@ fi
 echo ""
 echo "--- Python Venv ---"
 if [ -d "${VENV_DIR}" ]; then
+    # Ensure venv has system-site-packages enabled (needed for image's PyTorch/CUDA)
+    CFG="${VENV_DIR}/pyvenv.cfg"
+    if grep -q "include-system-site-packages = false" "${CFG}" 2>/dev/null; then
+        echo "Upgrading venv to use system-site-packages (for CUDA-compatible PyTorch)..."
+        sed -i 's/include-system-site-packages = false/include-system-site-packages = true/' "${CFG}"
+    fi
     echo "Venv already exists at ${VENV_DIR}."
     echo "Python: $(${PYTHON} --version 2>&1)"
 else
     echo "Creating venv at ${VENV_DIR}..."
-    python3 -m venv "${VENV_DIR}"
+    # --system-site-packages inherits the image's pre-installed PyTorch/torchvision
+    # which are compiled for the correct CUDA version on this host.
+    python3 -m venv --system-site-packages "${VENV_DIR}"
     echo "Created. Python: $(${PYTHON} --version 2>&1)"
 
     ${PIP} install --upgrade pip --quiet
