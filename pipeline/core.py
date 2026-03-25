@@ -22,7 +22,6 @@ import signal
 import argparse
 import torch
 import onnxruntime
-import tensorflow
 
 import pipeline.metadata
 from pipeline.config import CONFIG
@@ -174,12 +173,16 @@ def suggest_execution_threads() -> int:
 
 
 def limit_resources() -> None:
-    # prevent tensorflow memory leak
-    gpus = tensorflow.config.experimental.list_physical_devices('GPU')
-    for gpu in gpus:
-        tensorflow.config.experimental.set_virtual_device_configuration(gpu, [
-            tensorflow.config.experimental.VirtualDeviceConfiguration(memory_limit=1024)
-        ])
+    # prevent tensorflow memory leak (lazy import — TF init can hang on some pods)
+    try:
+        import tensorflow
+        gpus = tensorflow.config.experimental.list_physical_devices('GPU')
+        for gpu in gpus:
+            tensorflow.config.experimental.set_virtual_device_configuration(gpu, [
+                tensorflow.config.experimental.VirtualDeviceConfiguration(memory_limit=1024)
+            ])
+    except Exception as e:
+        print(f"[CORE] WARNING: TensorFlow GPU memory limit skipped: {e}")
     # limit memory usage
     if CONFIG.max_memory:
         memory = CONFIG.max_memory * 1024 ** 3
