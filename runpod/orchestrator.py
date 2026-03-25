@@ -927,6 +927,14 @@ Set RUNPOD_DEPLOY_MODE=ssh (development) or docker (production) in .env.
     pod_id = os.getenv("RUNPOD_POD_ID") or None
 
     if args.command == "start":
+        if pod_id:
+            print("WARNING: RUNPOD_POD_ID is set ({}).".format(pod_id))
+            print("  'start' will deploy a NEW pod (the existing one is not affected).")
+            print("  Did you mean 'resume'?")
+            answer = input("\nProceed with new pod? [y/N] ").strip().lower()
+            if answer != "y":
+                print("Aborted. To resume the existing pod: python runpod/orchestrator.py resume")
+                sys.exit(0)
         cmd_start()
     elif args.command == "datacenters":
         cmd_datacenters()
