@@ -107,11 +107,16 @@ class VoiceTransformer:
         try:
             snd = parselmouth.Sound(mono, sampling_frequency=self._sample_rate)
 
+            # Praat needs >= 3 periods of the lowest pitch to analyse.
+            # For short chunks, raise min_pitch so 3 periods fit the duration.
+            duration = len(mono) / self._sample_rate
+            min_pitch = max(75.0, 3.0 / duration) if duration > 0 else 75.0
+
             # 1. Shift formants by resampling the spectral envelope
             if self._formant_ratio != 1.0:
                 snd = call(
                     snd, "Change gender",
-                    75.0,   # min pitch (Hz) for pitch detection
+                    min_pitch,   # min pitch (Hz) for pitch detection
                     600.0,  # max pitch (Hz) for pitch detection
                     self._formant_ratio,  # formant shift ratio
                     0.0,    # new pitch median (0 = use factor instead)
@@ -122,7 +127,7 @@ class VoiceTransformer:
                 # Pure pitch shift without formant change
                 snd = call(
                     snd, "Change gender",
-                    75.0, 600.0,
+                    min_pitch, 600.0,
                     1.0,
                     0.0,
                     2 ** (self._pitch_semitones / 12.0),
