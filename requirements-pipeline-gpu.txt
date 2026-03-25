@@ -1,22 +1,26 @@
-# GPU requirements — torch/torchvision not pinned, use pre-installed versions (e.g. RunPod images)
-# For macOS, torch/torchvision are included without CUDA builds
+# GPU pipeline requirements
+# torch/torchvision are not pinned — use pre-installed versions on RunPod,
+# or pip will pull the latest CUDA build automatically.
+# For macOS, torch/torchvision are included without CUDA builds.
 
 torch; sys_platform == 'darwin'
 torchvision; sys_platform == 'darwin'
 
+# Core
 numpy>=1.24.2,<2.0
 opencv-contrib-python>=4.8.0
-onnx>=1.14.0
 insightface>=0.7.3
-psutil>=5.9.5
-pillow>=9.5.0
+onnxruntime-gpu>=1.15.0; sys_platform != 'darwin'
 onnxruntime==1.15.0; sys_platform == 'darwin' and platform_machine != 'arm64'
 onnxruntime-silicon==1.13.1; sys_platform == 'darwin' and platform_machine == 'arm64'
-onnxruntime-gpu>=1.15.0; sys_platform != 'darwin'
+
+# GPU memory management
 tensorflow>=2.12.0
-opennsfw2==0.10.2
-protobuf>=3.20.0
-tqdm>=4.65.0
+
+# Enhancement (optional but recommended — pipeline runs without it)
 gfpgan==1.3.8
+
+# API and utilities
 websockets>=12.0
 python-dotenv>=1.0.0
+tqdm>=4.65.0

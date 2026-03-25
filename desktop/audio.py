@@ -20,9 +20,12 @@ import collections
 import sys
 import threading
 import time
-from typing import Any, Deque, Dict, Optional, Tuple
+from typing import Any, Deque, Dict, Optional, Tuple, TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from desktop.voice import VoiceTransformer
 
 # PCM chunk: (capture_ts_ns, pcm_data as float32 numpy array)
 AudioChunk = Tuple[int, np.ndarray]
@@ -153,6 +156,9 @@ class AudioCapture:
         self._stream: Optional[object] = None
         self._running = False
 
+        # Voice transformer (set externally via set_voice_transformer)
+        self._voice_transformer: Optional['VoiceTransformer'] = None
+
         # Clock drift monitoring — tracks expected vs actual sample count
         self._drift_start_ns: int = 0
         self._drift_samples: int = 0
@@ -180,7 +186,16 @@ class AudioCapture:
         capture_ts = time.perf_counter_ns()
         self._drift_samples += frames
         # Copy the data — sounddevice reuses the buffer after callback returns
-        self.ring_buffer.append(capture_ts, indata.copy())
+        pcm = indata.copy()
+        if self._voice_transformer is not None:
+            pcm = self._voice_transformer.process(pcm)
+        self.ring_buffer.append(capture_ts, pcm)
+
+    def set_voice_transformer(
+        self, transformer: Optional['VoiceTransformer']
+    ) -> None:
+        """Attach or detach a VoiceTransformer for real-time pitch shifting."""
+        self._voice_transformer = transformer
 
     def start(self) -> None:
         """Open the audio input stream and begin capturing."""

@@ -214,3 +214,37 @@ QML display
 - `.flake8`: Linting configuration (E3, E4, F only)
 - `mypy.ini`: Type checking (strict mode)
 - `.github/workflows/ci.yml`: CI pipeline (mypy → flake8 → test)
+
+### RunPod Deployment
+- `runpod/orchestrator.py`: CLI tool for managing GPU pods (start, resume, stop, terminate, status, gpus, datacenters)
+- `runpod/startup.sh`: Pod setup script (ffmpeg, venv, pip install)
+- `runpod/TROUBLESHOOTING.md`: Detailed log of every RunPod API gotcha and fix
+
+## RunPod Orchestrator
+
+### Commands
+```bash
+python runpod/orchestrator.py start        # deploy fresh pod → setup → pipeline → update .env
+python runpod/orchestrator.py resume       # resume stopped pod (RUNPOD_POD_ID)
+python runpod/orchestrator.py stop         # pause pod (volume preserved)
+python runpod/orchestrator.py terminate    # delete pod (network volume survives)
+python runpod/orchestrator.py status       # show pod state + URL
+python runpod/orchestrator.py gpus         # list GPU display names and API IDs
+python runpod/orchestrator.py datacenters  # list all datacenters
+```
+
+### How It Works
+- `start` always creates a new pod; `resume` resumes an existing one
+- GPU names in `.env` are display names (e.g. `RTX 4090`); orchestrator resolves to API IDs via GraphQL
+- SSH uses RunPod's proxy: `{podHostId}@ssh.runpod.io` (podHostId from GraphQL `machine.podHostId`, NOT from SDK `get_pod()`)
+- WebSocket uses RunPod's proxy: `wss://{pod_id}-9000.proxy.runpod.net/ws`
+- Only port `9000/tcp` is exposed (no 8888 — that triggers slow JupyterLab init)
+- Image must be `devel` tag — `runtime` tag doesn't exist for `runpod/pytorch`
+
+### Critical API Notes
+- `runpod.create_pod(gpu_type_id=...)` needs the GPU **ID** (e.g. `NVIDIA GeForce RTX 4090`), not display name
+- `runpod.get_pod()` does NOT return `machine.podHostId` — must query GraphQL directly for SSH username
+- RunPod SSH proxy silently drops commands sent via `exec_command` — must use `invoke_shell()` for interactive sessions
+- RunPod GraphQL does NOT support schema introspection or per-datacenter GPU filtering
+- `support_public_ip=True` severely constrains pod scheduling — only enable for SSH mode
+- Never pass both `volume_in_gb` and `network_volume_id` to `create_pod()`

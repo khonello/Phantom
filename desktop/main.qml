@@ -416,6 +416,86 @@ Window {
                             }
                         }
 
+                        // ── Voice ─────────────────────────────────────────────
+                        Text {
+                            text: "VOICE"
+                            color: "#252545"; font.pixelSize: 8; font.letterSpacing: 1.5
+                            Layout.topMargin: 16; Layout.bottomMargin: 8
+                        }
+
+                        Rectangle {
+                            id: voiceBox
+                            Layout.fillWidth: true; height: 38; radius: 8
+                            color: voiceHover.containsMouse ? "#1a1a2e" : "#12121e"
+                            border.color: voiceBox.open ? "#3a3a60" : "#1e1e35"
+                            border.width: 1
+                            z: open ? 10 : 0
+                            Behavior on color { ColorAnimation { duration: 130 } }
+
+                            property var opts: ["none", "female", "male", "child", "deep"]
+                            property var labels: ["None", "Female", "Male", "Child", "Deep"]
+                            property int sel: 0
+                            property bool open: false
+
+                            Row {
+                                anchors { fill: parent; leftMargin: 14; rightMargin: 10 }
+                                Text {
+                                    text: voiceBox.labels[voiceBox.sel]
+                                    color: "#cbd5e1"; font.pixelSize: 12
+                                    width: parent.width - 20
+                                    anchors.verticalCenter: parent.verticalCenter
+                                }
+                                Text { text: "⌄"; color: "#334155"; font.pixelSize: 10; anchors.verticalCenter: parent.verticalCenter }
+                            }
+
+                            HoverHandler { id: voiceHover }
+                            MouseArea {
+                                anchors.fill: parent
+                                onClicked: voiceBox.open = !voiceBox.open
+                                cursorShape: Qt.PointingHandCursor
+                            }
+
+                            Rectangle {
+                                visible: voiceBox.open
+                                anchors.top: parent.bottom; anchors.topMargin: 4
+                                anchors.left: parent.left
+                                width: parent.width
+                                height: voiceBox.opts.length * 32 + 10
+                                radius: 8; color: "#12121e"
+                                border.color: "#252545"; border.width: 1
+
+                                Column {
+                                    anchors { fill: parent; margins: 5 }
+                                    spacing: 2
+
+                                    Repeater {
+                                        model: voiceBox.labels
+                                        Rectangle {
+                                            width: parent.width; height: 30; radius: 5
+                                            color: voiceBox.sel === index ? "#1e1e38"
+                                                 : (vh.containsMouse ? "#171730" : "transparent")
+                                            HoverHandler { id: vh }
+                                            Text {
+                                                anchors { left: parent.left; leftMargin: 10; verticalCenter: parent.verticalCenter }
+                                                text: modelData
+                                                color: voiceBox.sel === index ? "#c4b5fd" : "#475569"
+                                                font.pixelSize: 12
+                                            }
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                onClicked: {
+                                                    voiceBox.sel = index
+                                                    bridge.setVoiceTemplate(voiceBox.opts[index])
+                                                    voiceBox.open = false
+                                                }
+                                                cursorShape: Qt.PointingHandCursor
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         // ── Platform ──────────────────────────────────────────
                         Text {
                             text: "PLATFORM"

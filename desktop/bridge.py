@@ -15,6 +15,7 @@ from PySide6.QtQuick import QQuickPaintedItem
 from pipeline.io.ffmpeg import is_image
 from desktop.controller import PipelineClient
 from desktop.audio import AudioCapture, AudioPlayback, JitterBuffer
+from desktop.voice import VoiceTransformer
 
 _PANEL_MAX_W = 800
 _PANEL_MAX_H = 500
@@ -214,8 +215,12 @@ class Bridge(QObject):
         # Set when pipeline is running — webcam thread sends frames via WebSocket
         self._ws_push_active = threading.Event()
 
+        # Voice transformer (CPU-based pitch/formant shifting)
+        self._voice_transformer = VoiceTransformer()
+
         # Audio capture (local mic, never sent to GPU)
         self._audio_capture = AudioCapture()
+        self._audio_capture.set_voice_transformer(self._voice_transformer)
 
         # Jitter buffer: holds processed frames until their playout time
         self._jitter_buffer = JitterBuffer()
@@ -453,6 +458,11 @@ class Bridge(QObject):
     @Slot(str)
     def setPlatform(self, platform: str) -> None:
         self._vcam_platform = platform
+
+    @Slot(str)
+    def setVoiceTemplate(self, template: str) -> None:
+        """Set the voice transformation preset (none/female/male/child/deep)."""
+        self._voice_transformer.set_preset(template if template != 'none' else None)
 
     @Slot(str)
     def setMode(self, mode: str) -> None:
