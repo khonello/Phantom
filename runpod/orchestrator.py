@@ -427,11 +427,18 @@ def _wait_for_pipeline(ws_address: str) -> None:
             from websockets.sync.client import connect
             with connect(ws_url, open_timeout=5, close_timeout=2) as ws:
                 ws.send(json.dumps({"action": "health"}))
-                reply = json.loads(ws.recv(timeout=5))
-                if reply.get("status") == "healthy":
-                    print("  Pipeline is ready (healthy).")
-                    return
-                print("  Unexpected health response: {}".format(reply))
+                # Read messages until we get the health response.
+                # The server broadcasts events to all clients, so we
+                # may receive STATUS_CHANGED etc. before our reply.
+                for _ in range(20):  # safety limit
+                    reply = json.loads(ws.recv(timeout=5))
+                    if reply.get("status") == "healthy":
+                        print("  Pipeline is ready (healthy).")
+                        return
+                    if reply.get("action") == "health":
+                        # Health response but unexpected status
+                        print("  Unexpected health response: {}".format(reply))
+                        break
         except ImportError:
             # websockets not installed locally — fall back to TCP check
             print("  WARNING: websockets not installed, falling back to TCP check.")
