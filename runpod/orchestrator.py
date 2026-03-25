@@ -220,18 +220,31 @@ def _wait_for_ports_ssh(pod_id: str) -> Tuple[str, str]:
     """
     _wait_for_running(pod_id)
 
-    ws_address = _get_proxy_ws_url(pod_id)
-    print("  WS: {} (proxy)".format(ws_address))
-
     # SSH via RunPod proxy — needs machine ID from pod info
     print("Waiting for SSH proxy assignment...")
+    ssh_cmd: Optional[str] = None
+    ws_address: Optional[str] = None
     deadline = time.time() + _PORT_TIMEOUT
     while time.time() < deadline:
-        ssh_cmd = _get_ssh_command(pod_id)
-        if ssh_cmd:
+        if ssh_cmd is None:
+            ssh_cmd = _get_ssh_command(pod_id)
+        if ws_address is None:
+            # Prefer public IP (direct) over proxy URL
+            public = _get_port_address(pod_id, 9000)
+            if public:
+                ws_address = public
+                print("  WS: {} (public IP)".format(ws_address))
+        if ssh_cmd and ws_address:
             print("  SSH: {}".format(ssh_cmd))
             return ssh_cmd, ws_address
         time.sleep(_POLL_INTERVAL)
+
+    # If we have SSH but no public IP, fall back to proxy
+    if ssh_cmd and ws_address is None:
+        ws_address = _get_proxy_ws_url(pod_id)
+        print("  WS: {} (proxy fallback)".format(ws_address))
+        print("  SSH: {}".format(ssh_cmd))
+        return ssh_cmd, ws_address
 
     print("ERROR: SSH proxy not assigned after {}s.".format(_PORT_TIMEOUT))
     sys.exit(1)
@@ -889,8 +902,12 @@ def cmd_status(pod_id: str) -> None:
         print("Uptime: {}h {}m".format(uptime // 3600, (uptime % 3600) // 60))
 
     if status == "RUNNING":
-        proxy_url = _get_proxy_ws_url(pod_id)
-        print("URL:    wss://{}/ws".format(proxy_url))
+        public = _get_port_address(pod_id, 9000)
+        if public:
+            print("URL:    ws://{}/ws (public IP)".format(public))
+        else:
+            proxy_url = _get_proxy_ws_url(pod_id)
+            print("URL:    wss://{}/ws (proxy)".format(proxy_url))
     else:
         print("URL:    not available (pod status: {})".format(status))
 
