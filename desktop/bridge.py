@@ -706,7 +706,6 @@ class Bridge(QObject):
         if self._webcam_thread is not None:
             self._webcam_thread.join(timeout=3)
         self._client.stop_stream()
-        self._client.shutdown()
         self._client.close()
 
     # ── Internal ──────────────────────────────────────────────────────

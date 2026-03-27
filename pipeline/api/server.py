@@ -214,10 +214,16 @@ class WebSocketAPIServer:
 
             def handler(websocket: Any) -> None:
                 """Handle a new WebSocket connection."""
+                # Capture address before the socket can close
+                try:
+                    client_addr = websocket.remote_address
+                except Exception:
+                    client_addr = 'unknown'
+
                 with self._clients_lock:
                     self._clients.add(websocket)
 
-                emit_status(f'Client connected: {websocket.remote_address}', scope='API_SERVER')
+                emit_status(f'Client connected: {client_addr}', scope='API_SERVER')
 
                 try:
                     for message in websocket:
@@ -238,7 +244,7 @@ class WebSocketAPIServer:
                     with self._clients_lock:
                         self._clients.discard(websocket)
                     emit_status(
-                        f'Client disconnected: {websocket.remote_address}',
+                        f'Client disconnected: {client_addr}',
                         scope='API_SERVER',
                     )
 

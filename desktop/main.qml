@@ -161,9 +161,8 @@ Window {
                 HoverHandler { id: enhHh }
                 MouseArea {
                     anchors.fill: parent
-                    enabled: bridge.pipelineRunning
                     onClicked: bridge.toggleEnhance()
-                    cursorShape: bridge.pipelineRunning ? Qt.PointingHandCursor : Qt.ArrowCursor
+                    cursorShape: Qt.PointingHandCursor
                 }
 
             }
@@ -216,9 +215,8 @@ Window {
                 HoverHandler { id: ccHh }
                 MouseArea {
                     anchors.fill: parent
-                    enabled: bridge.pipelineRunning
                     onClicked: bridge.toggleColorCorrection()
-                    cursorShape: bridge.pipelineRunning ? Qt.PointingHandCursor : Qt.ArrowCursor
+                    cursorShape: Qt.PointingHandCursor
                 }
 
             }
@@ -264,9 +262,8 @@ Window {
                 HoverHandler { id: ppHh }
                 MouseArea {
                     anchors.fill: parent
-                    enabled: bridge.pipelineRunning
                     onClicked: bridge.togglePreprocessing()
-                    cursorShape: bridge.pipelineRunning ? Qt.PointingHandCursor : Qt.ArrowCursor
+                    cursorShape: Qt.PointingHandCursor
                 }
 
             }
