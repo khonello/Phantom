@@ -41,7 +41,17 @@ else
     echo "Already installed: ffmpeg"
 fi
 
-# ── 2. Check CUDA ──────────────────────────────────────────────────────────────
+# ── 2. Pull latest code ───────────────────────────────────────────────────────
+echo ""
+echo "--- Code Sync ---"
+if [ -d "${PHANTOM_DIR}/.git" ]; then
+    echo "Pulling latest changes..."
+    git -C "${PHANTOM_DIR}" pull --ff-only 2>&1 || echo "WARNING: git pull failed — using existing code."
+else
+    echo "Not a git repo — skipping pull."
+fi
+
+# ── 3. Check CUDA ──────────────────────────────────────────────────────────────
 echo ""
 echo "--- CUDA ---"
 if command -v nvidia-smi &>/dev/null; then
@@ -53,7 +63,7 @@ else
     echo "WARNING: nvidia-smi not found. No GPU acceleration available."
 fi
 
-# ── 3. Create model cache directory ───────────────────────────────────────────
+# ── 4. Create model cache directory ───────────────────────────────────────────
 echo ""
 echo "--- Model Cache ---"
 if [ -d "${MODELS_DIR}" ]; then
@@ -64,7 +74,7 @@ else
     echo "Created: ${MODELS_DIR}"
 fi
 
-# ── 4. Create or reuse /workspace/venv ────────────────────────────────────────
+# ── 5. Create or reuse /workspace/venv ────────────────────────────────────────
 # The venv lives on the network volume so it survives pod restarts and
 # new pod deployments. Packages are installed on first run, and re-synced
 # whenever requirements-pipeline-gpu.txt changes.
@@ -89,7 +99,7 @@ else
     ${PIP} install --upgrade pip --quiet
 fi
 
-# ── 5. Sync dependencies ─────────────────────────────────────────────────────
+# ── 6. Sync dependencies ─────────────────────────────────────────────────────
 # Compare current requirements against the snapshot from last install.
 # If they differ (or no snapshot exists), run pip install to sync.
 echo ""
@@ -112,7 +122,7 @@ else
     echo "Run manually: ${PIP} install -r requirements-pipeline-gpu.txt"
 fi
 
-# ── 6. GFPGAN model download ──────────────────────────────────────────────────
+# ── 7. GFPGAN model download ──────────────────────────────────────────────────
 echo ""
 echo "--- GFPGAN Model ---"
 GFPGAN_PATH="${MODELS_DIR}/GFPGANv1.4.pth"
@@ -125,7 +135,7 @@ else
     echo "Downloaded: ${GFPGAN_PATH} ($(du -h "${GFPGAN_PATH}" | cut -f1))"
 fi
 
-# ── 7. Model pre-warm ─────────────────────────────────────────────────────────
+# ── 8. Model pre-warm ─────────────────────────────────────────────────────────
 echo ""
 echo "--- Model Pre-Warm ---"
 if [ -f "${PHANTOM_DIR}/pipeline/__init__.py" ]; then
@@ -157,7 +167,7 @@ else
     echo "Phantom not found at ${PHANTOM_DIR} — skipping warmup."
 fi
 
-# ── 8. Summary ─────────────────────────────────────────────────────────────────
+# ── 9. Summary ─────────────────────────────────────────────────────────────────
 echo ""
 echo "=== Startup Complete ==="
 echo ""
