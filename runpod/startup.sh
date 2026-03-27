@@ -122,13 +122,29 @@ else
     echo "Run manually: ${PIP} install -r requirements-pipeline-gpu.txt"
 fi
 
-# ── 6b. cuDNN library path ───────────────────────────────────────────────────
-# onnxruntime-gpu requires libcudnn.so.9 which pip installs into the venv
-# via nvidia-cudnn-cu12, but the .so isn't on the default search path.
-# Export LD_LIBRARY_PATH so this session (and the nohup pipeline) can find it,
-# and persist to /etc/profile.d/ for manual SSH sessions.
+# ── 6b. cuDNN 9 for ONNX Runtime ─────────────────────────────────────────────
+# onnxruntime-gpu requires libcudnn.so.9 which most RunPod base images don't
+# ship. Install nvidia-cudnn-cu12 with --no-deps to get just the .so files
+# without letting pip's dependency resolver upgrade torch or other packages.
 echo ""
-echo "--- cuDNN Path ---"
+echo "--- cuDNN 9 ---"
+CUDNN_OK=$(${PYTHON} -c "
+import ctypes
+try: ctypes.CDLL('libcudnn.so.9'); print('yes')
+except: print('no')
+" 2>/dev/null || echo "no")
+
+if [ "${CUDNN_OK}" = "yes" ]; then
+    echo "libcudnn.so.9 already available."
+else
+    echo "Installing nvidia-cudnn-cu12 (--no-deps to avoid torch upgrade)..."
+    ${PIP} install --no-deps 'nvidia-cudnn-cu12>=9.0'
+    echo "Installed."
+fi
+
+# Ensure the cuDNN .so is on LD_LIBRARY_PATH for onnxruntime.
+# Export for this session (inherited by nohup pipeline) and persist
+# to /etc/profile.d/ for manual SSH sessions.
 CUDNN_LIB_DIR=$(${PYTHON} -c "
 import os, nvidia.cudnn
 print(os.path.join(os.path.dirname(nvidia.cudnn.__file__), 'lib'))
@@ -137,9 +153,9 @@ if [ -n "${CUDNN_LIB_DIR}" ] && [ -d "${CUDNN_LIB_DIR}" ]; then
     export LD_LIBRARY_PATH="${CUDNN_LIB_DIR}:${LD_LIBRARY_PATH:-}"
     echo "export LD_LIBRARY_PATH=\"${CUDNN_LIB_DIR}:\${LD_LIBRARY_PATH:-}\"" \
         > /etc/profile.d/cudnn.sh
-    echo "Set: ${CUDNN_LIB_DIR}"
+    echo "LD_LIBRARY_PATH: ${CUDNN_LIB_DIR}"
 else
-    echo "nvidia-cudnn-cu12 not installed or lib dir not found — skipping."
+    echo "WARNING: cuDNN lib dir not found — ONNX may fall back to CPU."
 fi
 
 # ── 7. GFPGAN model download ──────────────────────────────────────────────────
