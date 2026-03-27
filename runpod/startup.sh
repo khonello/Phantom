@@ -122,6 +122,26 @@ else
     echo "Run manually: ${PIP} install -r requirements-pipeline-gpu.txt"
 fi
 
+# ── 6b. cuDNN library path ───────────────────────────────────────────────────
+# onnxruntime-gpu requires libcudnn.so.9 which pip installs into the venv
+# via nvidia-cudnn-cu12, but the .so isn't on the default search path.
+# Export LD_LIBRARY_PATH so this session (and the nohup pipeline) can find it,
+# and persist to /etc/profile.d/ for manual SSH sessions.
+echo ""
+echo "--- cuDNN Path ---"
+CUDNN_LIB_DIR=$(${PYTHON} -c "
+import os, nvidia.cudnn
+print(os.path.join(os.path.dirname(nvidia.cudnn.__file__), 'lib'))
+" 2>/dev/null || echo "")
+if [ -n "${CUDNN_LIB_DIR}" ] && [ -d "${CUDNN_LIB_DIR}" ]; then
+    export LD_LIBRARY_PATH="${CUDNN_LIB_DIR}:${LD_LIBRARY_PATH:-}"
+    echo "export LD_LIBRARY_PATH=\"${CUDNN_LIB_DIR}:\${LD_LIBRARY_PATH:-}\"" \
+        > /etc/profile.d/cudnn.sh
+    echo "Set: ${CUDNN_LIB_DIR}"
+else
+    echo "nvidia-cudnn-cu12 not installed or lib dir not found — skipping."
+fi
+
 # ── 7. GFPGAN model download ──────────────────────────────────────────────────
 echo ""
 echo "--- GFPGAN Model ---"
