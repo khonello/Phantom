@@ -291,6 +291,10 @@ class PipelineClient:
         """Get pipeline status (health check via WebSocket)."""
         return self._send('health')
 
+    def get_state(self) -> Dict[str, Any]:
+        """Get full pipeline state for UI sync on reconnect."""
+        return self._send('get_state')
+
     def get_frame(self) -> Optional[bytes]:
         """Frame delivery is push-based; this is a no-op."""
         return None
@@ -364,6 +368,22 @@ class PipelineClient:
     def set_alpha(self, value: float) -> Dict[str, Any]:
         """Set alpha smoothing factor."""
         return self._send('set_alpha', value=value)
+
+    def set_enhance(self, value: bool) -> Dict[str, Any]:
+        """Enable or disable GFPGAN face enhancement."""
+        return self._send('set_enhance', value=value)
+
+    def set_color_correction(self, value: bool) -> Dict[str, Any]:
+        """Enable or disable color correction for cross-skin-tone swaps."""
+        return self._send('set_color_correction', value=value)
+
+    def set_preprocessing(self, value: bool) -> Dict[str, Any]:
+        """Enable or disable frame preprocessing (CLAHE, white balance, denoise)."""
+        return self._send('set_preprocessing', value=value)
+
+    def keep_alive(self) -> Dict[str, Any]:
+        """Reset the auto-stop timer, extending pod uptime."""
+        return self._send('keep_alive')
 
     # ── Pipeline control ──────────────────────────────────────────────────────
 

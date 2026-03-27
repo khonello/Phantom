@@ -8,7 +8,7 @@ Usage:
     python runpod/orchestrator.py stop         # pause pod (models + venv persist on volume)
     python runpod/orchestrator.py terminate    # delete pod (network volume survives)
     python runpod/orchestrator.py status       # show state + address
-    python runpod/orchestrator.py gpus         # list GPUs with display names and API IDs
+    python runpod/orchestrator.py gpus         # list GPUs with VRAM, pricing, eligibility
     python runpod/orchestrator.py datacenters  # list all RunPod datacenters
 
 Two deploy modes (set RUNPOD_DEPLOY_MODE in .env):
@@ -30,12 +30,30 @@ Networking:
   - SSH: via RunPod proxy ({podHostId}@ssh.runpod.io, port 22)
   - Only port 9000/tcp is exposed on the pod (no 8888 — avoids JupyterLab init)
 
+GPU selection:
+  - Auto-discovery (default): filters RunPod GPUs by RUNPOD_MIN_VRAM and RUNPOD_MAX_PRICE, cheapest first
+  - Manual override: set RUNPOD_GPU_TYPES to try specific GPUs in order
+
 Key gotchas (see runpod/TROUBLESHOOTING.md for full details):
-  - GPU names in .env are DISPLAY names; orchestrator resolves to API IDs via GraphQL
+  - GPU display names are resolved to API IDs via GraphQL (create_pod needs the ID)
   - SSH username comes from GraphQL machine.podHostId (not machineId, not SDK get_pod())
   - runpod/pytorch runtime tag doesn't exist; devel is the only option (7.1 GB)
   - support_public_ip=True slows scheduling; only used in SSH mode
   - Never request both volume_in_gb and network_volume_id
+
+Multi-datacenter fallback:
+  - RUNPOD_DATACENTERS=DC1:vol1,DC2:vol2 pairs each datacenter with its network volume
+  - Tries all GPUs in DC1 first; if none available, tries DC2 with vol2, etc.
+  - Network volumes are datacenter-local — each datacenter needs its own volume
+  - Legacy single-datacenter config (RUNPOD_DATACENTER_ID + RUNPOD_NETWORK_VOLUME_ID) still works
+
+Auto-stop (billing protection):
+  - RUNPOD_MAX_UPTIME=120 stops the pod after 120 minutes (0 = disabled)
+  - RUNPOD_STOP_WARNING=5 warns 5 minutes before stopping
+  - Orchestrator passes RUNPOD_API_KEY and timeout env vars to the pod at creation
+  - Pipeline server runs a background timer; calls runpod.stop_pod() on expiry
+  - Desktop shows a dialog; user can extend (keep_alive) or let it stop
+  - Works even with no desktop connected
 
 Reads from .env in the repo root.
 """
@@ -290,14 +308,21 @@ def _get_datacenters(api_key: str) -> List[dict]:
 
 def _get_gpu_types(api_key: str) -> List[dict]:
     """
-    Query RunPod GraphQL for all GPU types with id and displayName.
-    Returns list of dicts: [{"id": "...", "displayName": "..."}, ...].
+    Query RunPod GraphQL for all GPU types with specs and pricing.
+
+    Returns list of dicts with keys:
+        id, displayName, memoryInGb, securePrice, communityPrice,
+        secureSpotPrice, communitySpotPrice
+    Prices are per-hour floats (None if unavailable).
     """
     query = """
     query {
       gpuTypes {
         id
         displayName
+        memoryInGb
+        securePrice
+        communityPrice
       }
     }
     """
@@ -321,89 +346,232 @@ def _get_gpu_types(api_key: str) -> List[dict]:
         return []
 
 
+# Minimum VRAM (GB) for the Phantom pipeline — InsightFace + ONNX swap + GFPGAN
+_DEFAULT_MIN_VRAM = 16
+# Maximum per-hour price (USD)
+_DEFAULT_MAX_PRICE = 1.00
+
+
+def _get_cheapest_price(gpu: dict) -> Optional[float]:
+    """Return the cheapest available on-demand price for a GPU, or None."""
+    prices = [
+        gpu.get("communityPrice"),
+        gpu.get("securePrice"),
+    ]
+    valid = [p for p in prices if p is not None and p > 0]
+    return min(valid) if valid else None
+
+
+def _discover_gpus(api_key: str, min_vram: int, max_price: float) -> List[Tuple[str, str, int, float]]:
+    """
+    Auto-discover GPUs matching VRAM and price criteria.
+
+    Queries all RunPod GPU types, filters by minimum VRAM and maximum
+    per-hour price, then sorts cheapest first.
+
+    Returns:
+        List of (display_name, gpu_id, vram_gb, price) tuples, sorted by price.
+    """
+    all_gpus = _get_gpu_types(api_key)
+
+    candidates = []
+    for gpu in all_gpus:
+        gpu_id = gpu.get("id")
+        name = gpu.get("displayName")
+        vram = gpu.get("memoryInGb")
+        if not gpu_id or not name or not vram:
+            continue
+
+        # Filter by VRAM
+        if vram < min_vram:
+            continue
+
+        # Filter by price
+        price = _get_cheapest_price(gpu)
+        if price is None or price > max_price:
+            continue
+
+        candidates.append((name, gpu_id, vram, price))
+
+    # Sort by price ascending (cheapest first), then by VRAM descending as tiebreaker
+    candidates.sort(key=lambda c: (c[3], -c[2]))
+    return candidates
+
+
+def _parse_datacenters() -> List[Tuple[str, Optional[str]]]:
+    """
+    Parse datacenter configuration from env vars.
+
+    Supports two formats:
+    1. New: RUNPOD_DATACENTERS=DC1:vol1,DC2:vol2  (multi-datacenter with paired volumes)
+    2. Legacy: RUNPOD_DATACENTER_ID + RUNPOD_NETWORK_VOLUME_ID (single datacenter)
+
+    Returns list of (datacenter_id, network_volume_id_or_None) tuples.
+    """
+    datacenters_raw = os.getenv("RUNPOD_DATACENTERS", "")
+    if datacenters_raw.strip():
+        pairs = []
+        for entry in datacenters_raw.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            if ":" in entry:
+                dc_id, vol_id = entry.split(":", 1)
+                pairs.append((dc_id.strip(), vol_id.strip() or None))
+            else:
+                pairs.append((entry, None))
+        return pairs
+
+    # Legacy fallback: single datacenter
+    datacenter_id = os.getenv("RUNPOD_DATACENTER_ID") or None
+    if not datacenter_id:
+        print("ERROR: neither RUNPOD_DATACENTERS nor RUNPOD_DATACENTER_ID set in .env")
+        sys.exit(1)
+    network_volume_id = os.getenv("RUNPOD_NETWORK_VOLUME_ID") or None
+    return [(datacenter_id, network_volume_id)]
+
+
+def _resolve_gpu_candidates(api_key: str) -> List[Tuple[str, str, int, float]]:
+    """
+    Build the GPU candidate list — either from manual override or auto-discovery.
+
+    If RUNPOD_GPU_TYPES is set, resolves those display names to API IDs (manual mode).
+    Otherwise, auto-discovers GPUs by querying the RunPod API and filtering by
+    RUNPOD_MIN_VRAM (default 16 GB) and RUNPOD_MAX_PRICE (default $1.00/hr).
+
+    Returns:
+        List of (display_name, gpu_id, vram_gb, price) tuples.
+    """
+    gpu_types_raw = os.getenv("RUNPOD_GPU_TYPES", "").strip()
+
+    if gpu_types_raw:
+        # Manual override — resolve display names to IDs
+        print("  GPU selection: manual (RUNPOD_GPU_TYPES)")
+        all_gpus = _get_gpu_types(api_key)
+        gpu_lookup = {}
+        for gpu in all_gpus:
+            if gpu.get("displayName") and gpu.get("id"):
+                gpu_lookup[gpu["displayName"]] = gpu
+
+        candidates = []
+        for name in (g.strip() for g in gpu_types_raw.split(",") if g.strip()):
+            gpu = gpu_lookup.get(name)
+            if gpu:
+                vram = gpu.get("memoryInGb") or 0
+                price = _get_cheapest_price(gpu) or 0.0
+                candidates.append((name, gpu["id"], vram, price))
+            else:
+                print("  WARNING: '{}' not found in RunPod GPU list — skipping".format(name))
+
+        if not candidates:
+            print("ERROR: none of your preferred GPUs matched RunPod's GPU list.")
+            print("  Available: {}".format(", ".join(sorted(gpu_lookup.keys()))))
+            sys.exit(1)
+
+        return candidates
+
+    # Auto-discovery — filter by VRAM and price
+    min_vram = int(os.getenv("RUNPOD_MIN_VRAM", str(_DEFAULT_MIN_VRAM)))
+    max_price = float(os.getenv("RUNPOD_MAX_PRICE", str(_DEFAULT_MAX_PRICE)))
+    print("  GPU selection: auto (>= {}GB VRAM, <= ${:.2f}/hr)".format(min_vram, max_price))
+
+    candidates = _discover_gpus(api_key, min_vram, max_price)
+
+    if not candidates:
+        print("ERROR: no GPUs found matching criteria (>= {}GB VRAM, <= ${:.2f}/hr).".format(
+            min_vram, max_price))
+        print("  Try increasing RUNPOD_MAX_PRICE or decreasing RUNPOD_MIN_VRAM in .env")
+        sys.exit(1)
+
+    return candidates
+
+
 def _deploy_new_pod(mode: str) -> str:
     """
-    Deploy a fresh pod, trying each GPU in RUNPOD_GPU_TYPES in priority order.
-    Pre-filters to GPUs present in RUNPOD_DATACENTER_ID before attempting creation.
+    Deploy a fresh pod, trying GPUs across multiple datacenters.
+
+    GPU selection:
+    - If RUNPOD_GPU_TYPES is set: uses those exact GPUs in order (manual override)
+    - Otherwise: auto-discovers GPUs by VRAM (>= RUNPOD_MIN_VRAM, default 16GB)
+      and price (<= RUNPOD_MAX_PRICE, default $1.00/hr), sorted cheapest first
+
+    Iterates datacenters in priority order (from RUNPOD_DATACENTERS). Within each
+    datacenter, tries each GPU candidate. Each datacenter is paired with its own
+    network volume (since RunPod volumes are datacenter-local).
+
     Updates RUNPOD_POD_ID in .env. Returns the new pod ID.
     """
-    gpu_types_raw = os.getenv("RUNPOD_GPU_TYPES", "")
     image = os.getenv("RUNPOD_IMAGE")
-    datacenter_id = os.getenv("RUNPOD_DATACENTER_ID") or None
     container_disk = int(os.getenv("RUNPOD_CONTAINER_DISK", "20"))
     volume_disk = int(os.getenv("RUNPOD_VOLUME_DISK", "20"))
-    network_volume_id = os.getenv("RUNPOD_NETWORK_VOLUME_ID") or None
     api_key = os.getenv("RUNPOD_API_KEY", "")
+    datacenters = _parse_datacenters()
 
-    gpu_types = [g.strip() for g in gpu_types_raw.split(",") if g.strip()]
-
-    if not gpu_types:
-        print("ERROR: RUNPOD_GPU_TYPES not set in .env")
-        sys.exit(1)
     if not image:
         print("ERROR: RUNPOD_IMAGE not set in .env")
-        sys.exit(1)
-    if not datacenter_id:
-        print("ERROR: RUNPOD_DATACENTER_ID not set in .env — must match network volume location")
         sys.exit(1)
 
     exposed_ports = _get_exposed_ports(mode)
 
-    print("Deploying new pod in datacenter {} [{}]...".format(datacenter_id, mode))
-    print("  Image:  {}".format(image))
-    if network_volume_id:
-        print("  Volume: {} → {}".format(network_volume_id, _VOLUME_MOUNT))
+    dc_labels = ", ".join("{}{}".format(dc, " (vol:{})".format(vol) if vol else "") for dc, vol in datacenters)
+    print("Deploying new pod [{}]...".format(mode))
+    print("  Image:       {}".format(image))
+    print("  Datacenters: {}".format(dc_labels))
 
-    # Resolve display names to GPU IDs (create_pod needs the ID, not display name)
-    print("  Fetching GPU type IDs...")
-    all_gpus = _get_gpu_types(api_key)
-    name_to_id = {gpu["displayName"]: gpu["id"] for gpu in all_gpus if gpu.get("displayName") and gpu.get("id")}
+    # Build GPU candidate list (manual or auto-discovered)
+    candidates = _resolve_gpu_candidates(api_key)
 
-    candidates = []
-    for name in gpu_types:
-        gpu_id = name_to_id.get(name)
-        if gpu_id:
-            candidates.append((name, gpu_id))
-        else:
-            print("  WARNING: '{}' not found in RunPod GPU list — skipping".format(name))
+    print("  Candidates:  {}".format(
+        ", ".join("{} ({}GB, ${:.2f}/hr)".format(n, v, p) for n, _, v, p in candidates)
+    ))
 
-    if not candidates:
-        print("ERROR: none of your preferred GPUs matched RunPod's GPU list.")
-        print("  Your list:  {}".format(", ".join(gpu_types)))
-        print("  Available:  {}".format(", ".join(sorted(name_to_id.keys()))))
-        sys.exit(1)
+    # Try each datacenter in priority order, all GPUs per datacenter
+    for datacenter_id, network_volume_id in datacenters:
+        print("\n  Datacenter: {}{}".format(
+            datacenter_id,
+            " (volume: {})".format(network_volume_id) if network_volume_id else "",
+        ))
 
-    print("  Trying in order: {}".format(", ".join("{} ({})".format(n, i) for n, i in candidates)))
+        for gpu_name, gpu_id, vram, price in candidates:
+            print("    Trying {} [{}GB, ${:.2f}/hr]...".format(
+                gpu_name, vram, price), end=" ", flush=True)
+            try:
+                # Pass API key and pod-level env vars so the pipeline can
+                # auto-stop the pod when the uptime limit is reached.
+                pod_env = {
+                    "RUNPOD_API_KEY": api_key,
+                    "RUNPOD_MAX_UPTIME": os.getenv("RUNPOD_MAX_UPTIME", "120"),
+                    "RUNPOD_STOP_WARNING": os.getenv("RUNPOD_STOP_WARNING", "5"),
+                }
+                create_kwargs = dict(
+                    name=_POD_NAME,
+                    image_name=image,
+                    gpu_type_id=gpu_id,
+                    gpu_count=1,
+                    container_disk_in_gb=container_disk,
+                    volume_mount_path=_VOLUME_MOUNT,
+                    ports=exposed_ports,
+                    data_center_id=datacenter_id,
+                    support_public_ip=(mode == "ssh"),
+                    start_ssh=(mode == "ssh"),
+                    env=pod_env,
+                )
+                if network_volume_id:
+                    create_kwargs["network_volume_id"] = network_volume_id
+                else:
+                    create_kwargs["volume_in_gb"] = volume_disk
+                pod = runpod.create_pod(**create_kwargs)
+                new_pod_id = pod["id"]
+                print("ok")
+                print("  Created pod: {} ({} {}GB in {}, ${:.2f}/hr)".format(
+                    new_pod_id, gpu_name, vram, datacenter_id, price))
+                _update_env_key("RUNPOD_POD_ID", new_pod_id)
+                return new_pod_id
+            except Exception as exc:
+                print("unavailable ({})".format(exc))
 
-    for gpu_name, gpu_id in candidates:
-        print("  Trying {} [{}]...".format(gpu_name, gpu_id), end=" ", flush=True)
-        try:
-            create_kwargs = dict(
-                name=_POD_NAME,
-                image_name=image,
-                gpu_type_id=gpu_id,
-                gpu_count=1,
-                container_disk_in_gb=container_disk,
-                volume_mount_path=_VOLUME_MOUNT,
-                ports=exposed_ports,
-                data_center_id=datacenter_id,
-                support_public_ip=(mode == "ssh"),
-                start_ssh=(mode == "ssh"),
-            )
-            if network_volume_id:
-                create_kwargs["network_volume_id"] = network_volume_id
-            else:
-                create_kwargs["volume_in_gb"] = volume_disk
-            pod = runpod.create_pod(**create_kwargs)
-            new_pod_id = pod["id"]
-            print("ok")
-            print("  Created pod: {} ({})".format(new_pod_id, gpu_name))
-            _update_env_key("RUNPOD_POD_ID", new_pod_id)
-            return new_pod_id
-        except Exception as exc:
-            print("unavailable ({})".format(exc))
-
-    print("ERROR: none of the GPUs in RUNPOD_GPU_TYPES have capacity in {} right now.".format(datacenter_id))
+    tried_dcs = ", ".join(dc for dc, _ in datacenters)
+    print("ERROR: no GPUs available across datacenters: {}".format(tried_dcs))
     sys.exit(1)
 
 
@@ -820,10 +988,11 @@ def cmd_terminate(pod_id: str) -> None:
 
 
 def cmd_gpus() -> None:
-    """List all RunPod GPUs with their IDs, highlighting preferred ones."""
+    """List all RunPod GPUs with specs and pricing, highlighting eligible ones."""
     api_key = os.getenv("RUNPOD_API_KEY", "")
-    gpu_types_raw = os.getenv("RUNPOD_GPU_TYPES", "")
-    preferred = {g.strip() for g in gpu_types_raw.split(",") if g.strip()}
+    min_vram = int(os.getenv("RUNPOD_MIN_VRAM", str(_DEFAULT_MIN_VRAM)))
+    max_price = float(os.getenv("RUNPOD_MAX_PRICE", str(_DEFAULT_MAX_PRICE)))
+    gpu_types_raw = os.getenv("RUNPOD_GPU_TYPES", "").strip()
 
     print("Querying RunPod GPUs...\n")
     all_gpus = _get_gpu_types(api_key)
@@ -832,29 +1001,39 @@ def cmd_gpus() -> None:
         print("No GPUs found (query may have failed).")
         return
 
-    all_gpus.sort(key=lambda g: g.get("displayName", ""))
+    # Auto-discovered candidates (matching criteria)
+    auto_candidates = _discover_gpus(api_key, min_vram, max_price)
+    auto_ids = {gpu_id for _, gpu_id, _, _ in auto_candidates}
 
-    matched = [g for g in all_gpus if g.get("displayName") in preferred]
-    others = [g for g in all_gpus if g.get("displayName") not in preferred]
+    # Manual override list (if set)
+    manual_names = {g.strip() for g in gpu_types_raw.split(",") if g.strip()} if gpu_types_raw else set()
 
-    if matched:
-        print("Preferred (in RUNPOD_GPU_TYPES):")
-        for gpu in matched:
-            print("  * {}  [id: {}]".format(gpu.get("displayName"), gpu.get("id")))
+    # Print eligible GPUs first
+    if auto_candidates:
+        print("Eligible GPUs (>= {}GB VRAM, <= ${:.2f}/hr) — sorted by price:".format(min_vram, max_price))
+        for name, gpu_id, vram, price in auto_candidates:
+            marker = " *" if name in manual_names else "  "
+            print("{}  {:.<30s} {:>3}GB  ${:.2f}/hr  [{}]".format(
+                marker, name + " ", vram, price, gpu_id))
+    else:
+        print("No GPUs match criteria (>= {}GB VRAM, <= ${:.2f}/hr)".format(min_vram, max_price))
 
+    # Print all others
+    others = [g for g in all_gpus if g.get("id") not in auto_ids]
+    others.sort(key=lambda g: g.get("displayName", ""))
     if others:
-        if matched:
-            print()
-        print("Other available GPUs:")
+        print("\nOther GPUs (outside criteria):")
         for gpu in others:
-            print("    {}  [id: {}]".format(gpu.get("displayName"), gpu.get("id")))
+            name = gpu.get("displayName", "?")
+            vram = gpu.get("memoryInGb") or 0
+            price = _get_cheapest_price(gpu)
+            price_str = "${:.2f}/hr".format(price) if price else "no price"
+            print("    {:.<30s} {:>3}GB  {:>10s}  [{}]".format(
+                name + " ", vram, price_str, gpu.get("id", "?")))
 
-    print("\nTotal: {} GPUs".format(len(all_gpus)))
-
-    available_names = {g.get("displayName") for g in all_gpus}
-    missing = preferred - available_names
-    if missing:
-        print("\nNot found in RunPod: {}".format(", ".join(sorted(missing))))
+    print("\nTotal: {} GPUs ({} eligible)".format(len(all_gpus), len(auto_candidates)))
+    if manual_names:
+        print("Manual override active: {}".format(", ".join(sorted(manual_names))))
 
 
 def cmd_datacenters() -> None:

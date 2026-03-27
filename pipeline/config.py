@@ -44,7 +44,9 @@ class FaceSwapConfig:
     alpha: float = 0.6
     blend: float = 0.65
     luminance_blend: bool = True
-    enhance_interval: int = 5
+    enhance: bool = True
+    color_correction: bool = True
+    preprocessing: bool = False
     buffer_size: int = 4
     redetect_interval: int = 30
     warmup_frames: int = 5
@@ -151,7 +153,7 @@ class FaceSwapConfig:
             'alpha': self.alpha,
             'blend': self.blend,
             'luminance_blend': self.luminance_blend,
-            'enhance_interval': self.enhance_interval,
+            'enhance': self.enhance,
             'buffer_size': self.buffer_size,
             'redetect_interval': self.redetect_interval,
             'warmup_frames': self.warmup_frames,

@@ -16,8 +16,10 @@ Health check: send {"action": "health"}, receive {"status": "healthy", "uptime":
 """
 
 import json
+import os
 import queue
 import struct
+import sys
 import threading
 import time
 from typing import Any, Dict, Optional, Set, Tuple
@@ -94,10 +96,19 @@ class WebSocketAPIServer:
         # Start time for uptime reporting
         self._start_time = time.time()
 
+        # Auto-stop timer — stops the RunPod pod after RUNPOD_MAX_UPTIME minutes
+        # to prevent billing overruns. Configurable via env vars; disabled if
+        # RUNPOD_MAX_UPTIME is 0 or unset.
+        self._auto_stop_max = int(os.getenv('RUNPOD_MAX_UPTIME', '0')) * 60  # seconds
+        self._auto_stop_warning = int(os.getenv('RUNPOD_STOP_WARNING', '5')) * 60  # seconds
+        self._auto_stop_deadline = 0.0  # set on start()
+        self._auto_stop_thread: Optional[threading.Thread] = None
+
         # Handler context (dependency injection — no globals)
         self._ctx = HandlerContext(
             pipeline=self.pipeline,
             shutdown_event=self.config.shutdown_event,
+            reset_auto_stop=self._reset_auto_stop if self._auto_stop_max > 0 else None,
         )
 
         # Register event handlers
@@ -145,6 +156,20 @@ class WebSocketAPIServer:
             target=self._frame_sender_loop, daemon=True,
         )
         self._frame_sender_thread.start()
+
+        # Start auto-stop timer if configured
+        if self._auto_stop_max > 0:
+            self._auto_stop_deadline = time.time() + self._auto_stop_max
+            self._auto_stop_thread = threading.Thread(
+                target=self._auto_stop_loop, daemon=True,
+            )
+            self._auto_stop_thread.start()
+            emit_status(
+                f'Auto-stop enabled: pod will stop after '
+                f'{self._auto_stop_max // 60}m (warning at '
+                f'{self._auto_stop_warning // 60}m before)',
+                scope='API_SERVER',
+            )
 
         emit_status(f'WebSocket API server started on port {self.port}', scope='API_SERVER')
 
@@ -400,6 +425,92 @@ class WebSocketAPIServer:
             websocket.send(json.dumps(payload))
         except Exception as e:
             emit_error(f'Failed to send response: {e}', scope='API_SERVER')
+
+    # ── Auto-stop timer ─────────────────────────────────────────────────────
+
+    def _reset_auto_stop(self) -> None:
+        """Reset the auto-stop deadline, extending uptime by the full duration."""
+        self._auto_stop_deadline = time.time() + self._auto_stop_max
+        remaining = self._auto_stop_max // 60
+        emit_status(f'Auto-stop reset — {remaining}m remaining', scope='AUTO_STOP')
+
+    def _auto_stop_loop(self) -> None:
+        """Background thread that enforces the pod uptime limit.
+
+        Runs a check every 10 seconds. When the warning threshold is reached,
+        broadcasts an auto_stop_warning event to all clients. If no keep_alive
+        command resets the deadline before it expires, stops the pod.
+        """
+        warning_sent = False
+
+        while not self._stop_event.is_set():
+            time.sleep(10)
+            now = time.time()
+            remaining = self._auto_stop_deadline - now
+
+            # Warning threshold reached
+            if not warning_sent and remaining <= self._auto_stop_warning:
+                warning_sent = True
+                mins_left = max(1, int(remaining / 60))
+                emit_status(
+                    f'Pod will auto-stop in {mins_left} minute(s). '
+                    f'Send keep_alive to extend.',
+                    scope='AUTO_STOP',
+                )
+                self._broadcast_text({
+                    'type': 'event',
+                    'event': 'auto_stop_warning',
+                    'data': {
+                        'minutes_remaining': mins_left,
+                        'deadline': self._auto_stop_deadline,
+                    },
+                })
+
+            # Reset warning flag if deadline was extended past warning threshold
+            if warning_sent and remaining > self._auto_stop_warning:
+                warning_sent = False
+
+            # Deadline reached — stop the pod
+            if remaining <= 0:
+                self._stop_pod()
+                return
+
+    def _stop_pod(self) -> None:
+        """Stop the RunPod pod to halt billing. Falls back to sys.exit if API fails."""
+        pod_id = os.getenv('RUNPOD_POD_ID', '')
+        api_key = os.getenv('RUNPOD_API_KEY', '')
+
+        emit_status('Auto-stop deadline reached — stopping pod...', scope='AUTO_STOP')
+        self._broadcast_text({
+            'type': 'event',
+            'event': 'auto_stop',
+            'data': {'reason': 'uptime limit reached'},
+        })
+
+        # Give clients a moment to receive the final event
+        time.sleep(1)
+
+        if pod_id and api_key:
+            try:
+                import runpod
+                runpod.api_key = api_key
+                runpod.stop_pod(pod_id)
+                print(
+                    f'[AUTO_STOP] Pod {pod_id} stopped via RunPod API.',
+                    file=sys.stderr,
+                )
+            except Exception as e:
+                print(
+                    f'[AUTO_STOP] RunPod API stop failed: {e} — exiting process.',
+                    file=sys.stderr,
+                )
+                sys.exit(0)
+        else:
+            print(
+                '[AUTO_STOP] RUNPOD_POD_ID or RUNPOD_API_KEY not set — exiting process.',
+                file=sys.stderr,
+            )
+            sys.exit(0)
 
     # ── Frame sender (dedicated thread) ─────────────────────────────────────
 

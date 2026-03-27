@@ -6,9 +6,9 @@ import Phantom 1.0
 Window {
     id: root
     visible: true
-    width: 1440
+    width: 1600
     height: 600
-    minimumWidth: 900
+    minimumWidth: 1080
     minimumHeight: 600
     title: "Phantom"
     color: "#09090e"
@@ -44,6 +44,28 @@ Window {
                 font.letterSpacing: 4; font.weight: Font.Medium
                 anchors.verticalCenter: parent.verticalCenter
             }
+
+            // Separator dot
+            Rectangle {
+                width: 3; height: 3; radius: 1.5; color: "#1e1e38"
+                anchors.verticalCenter: parent.verticalCenter
+                visible: headerHint.text !== ""
+            }
+
+            // Hover hint label — shows tooltip text when any header button is hovered
+            Text {
+                id: headerHint
+                property string hint: vcamHh.hovered  ? "Output swapped face to a virtual webcam for use in video calls"
+                                    : enhHh.hovered   ? "GFPGAN face enhancement \u2014 sharpens and restores facial detail"
+                                    : ccHh.hovered    ? "Match swapped face skin tone to target \u2014 fixes cross-complexion swaps"
+                                    : ppHh.hovered    ? "Normalize lighting, white balance and reduce camera noise"
+                                    : ""
+                text: hint
+                color: "#475569"; font.pixelSize: 11
+                anchors.verticalCenter: parent.verticalCenter
+                opacity: hint !== "" ? 1.0 : 0.0
+                Behavior on opacity { NumberAnimation { duration: 150 } }
+            }
         }
 
         Row {
@@ -53,11 +75,11 @@ Window {
             // VCAM toggle (realtime mode only)
             Rectangle {
                 visible: bridge.currentMode === "realtime"
-                width: vcamRow.width + 18; height: 26; radius: 6
+                width: vcamRow.width + 20; height: 28; radius: 6
                 anchors.verticalCenter: parent.verticalCenter
                 color: bridge.virtualCamActive ? "#0a2218"
-                     : (vcamHh.containsMouse && bridge.pipelineRunning ? "#1a1a2e" : "transparent")
-                border.color: bridge.virtualCamActive ? "#10b981" : "transparent"
+                     : vcamHh.containsMouse    ? "#151525" : "#0f0f1e"
+                border.color: bridge.virtualCamActive ? "#10b981" : "#1e1e38"
                 border.width: 1
                 Behavior on color       { ColorAnimation { duration: 200 } }
                 Behavior on border.color { ColorAnimation { duration: 200 } }
@@ -67,8 +89,8 @@ Window {
                     anchors.centerIn: parent; spacing: 6
 
                     Rectangle {
-                        width: 5; height: 5; radius: 2.5
-                        color: bridge.virtualCamActive ? "#10b981" : "#2a2a45"
+                        width: 6; height: 6; radius: 3
+                        color: bridge.virtualCamActive ? "#10b981" : "#333355"
                         anchors.verticalCenter: parent.verticalCenter
                         Behavior on color { ColorAnimation { duration: 200 } }
 
@@ -79,10 +101,10 @@ Window {
                         }
                     }
                     Text {
-                        text: bridge.virtualCamActive ? "VCAM ON" : "VCAM"
+                        text: "VCAM"
                         color: bridge.virtualCamActive ? "#10b981"
-                             : bridge.pipelineRunning  ? "#475569" : "#252545"
-                        font.pixelSize: 10; font.letterSpacing: 1.5
+                             : vcamHh.containsMouse    ? "#64748b" : "#475569"
+                        font.pixelSize: 10; font.letterSpacing: 1.5; font.weight: Font.Medium
                         anchors.verticalCenter: parent.verticalCenter
                         Behavior on color { ColorAnimation { duration: 200 } }
                     }
@@ -95,6 +117,158 @@ Window {
                     onClicked: bridge.toggleVirtualCam()
                     cursorShape: (bridge.pipelineRunning || bridge.virtualCamActive) ? Qt.PointingHandCursor : Qt.ArrowCursor
                 }
+
+            }
+
+            // Enhance toggle (realtime mode only)
+            Rectangle {
+                visible: bridge.currentMode === "realtime"
+                width: enhRow.width + 20; height: 28; radius: 6
+                anchors.verticalCenter: parent.verticalCenter
+                color: bridge.enhanceActive ? "#160a22"
+                     : enhHh.containsMouse   ? "#151525" : "#0f0f1e"
+                border.color: bridge.enhanceActive ? "#8b5cf6" : "#1e1e38"
+                border.width: 1
+                Behavior on color       { ColorAnimation { duration: 200 } }
+                Behavior on border.color { ColorAnimation { duration: 200 } }
+
+                Row {
+                    id: enhRow
+                    anchors.centerIn: parent; spacing: 6
+
+                    Rectangle {
+                        width: 6; height: 6; radius: 3
+                        color: bridge.enhanceActive ? "#8b5cf6" : "#333355"
+                        anchors.verticalCenter: parent.verticalCenter
+                        Behavior on color { ColorAnimation { duration: 200 } }
+
+                        SequentialAnimation on opacity {
+                            running: bridge.enhanceActive; loops: Animation.Infinite
+                            NumberAnimation { to: 0.25; duration: 700; easing.type: Easing.InOutSine }
+                            NumberAnimation { to: 1.0;  duration: 700; easing.type: Easing.InOutSine }
+                        }
+                    }
+                    Text {
+                        text: "ENHANCE"
+                        color: bridge.enhanceActive ? "#8b5cf6"
+                             : enhHh.containsMouse  ? "#64748b" : "#475569"
+                        font.pixelSize: 10; font.letterSpacing: 1.5; font.weight: Font.Medium
+                        anchors.verticalCenter: parent.verticalCenter
+                        Behavior on color { ColorAnimation { duration: 200 } }
+                    }
+                }
+
+                HoverHandler { id: enhHh }
+                MouseArea {
+                    anchors.fill: parent
+                    enabled: bridge.pipelineRunning
+                    onClicked: bridge.toggleEnhance()
+                    cursorShape: bridge.pipelineRunning ? Qt.PointingHandCursor : Qt.ArrowCursor
+                }
+
+            }
+
+            // ── separator: pipeline toggles │ quality toggles ──
+            Rectangle {
+                visible: bridge.currentMode === "realtime"
+                width: 1; height: 18; color: "#14142a"
+                anchors.verticalCenter: parent.verticalCenter
+            }
+
+            // Color correction toggle (realtime mode only)
+            Rectangle {
+                visible: bridge.currentMode === "realtime"
+                width: ccRow.width + 20; height: 28; radius: 6
+                anchors.verticalCenter: parent.verticalCenter
+                color: bridge.colorCorrectionActive ? "#0a1628"
+                     : ccHh.containsMouse            ? "#151525" : "#0f0f1e"
+                border.color: bridge.colorCorrectionActive ? "#3b82f6" : "#1e1e38"
+                border.width: 1
+                Behavior on color       { ColorAnimation { duration: 200 } }
+                Behavior on border.color { ColorAnimation { duration: 200 } }
+
+                Row {
+                    id: ccRow
+                    anchors.centerIn: parent; spacing: 6
+
+                    Rectangle {
+                        width: 6; height: 6; radius: 3
+                        color: bridge.colorCorrectionActive ? "#3b82f6" : "#333355"
+                        anchors.verticalCenter: parent.verticalCenter
+                        Behavior on color { ColorAnimation { duration: 200 } }
+
+                        SequentialAnimation on opacity {
+                            running: bridge.colorCorrectionActive; loops: Animation.Infinite
+                            NumberAnimation { to: 0.25; duration: 700; easing.type: Easing.InOutSine }
+                            NumberAnimation { to: 1.0;  duration: 700; easing.type: Easing.InOutSine }
+                        }
+                    }
+                    Text {
+                        text: "COLOR"
+                        color: bridge.colorCorrectionActive ? "#3b82f6"
+                             : ccHh.containsMouse           ? "#64748b" : "#475569"
+                        font.pixelSize: 10; font.letterSpacing: 1.5; font.weight: Font.Medium
+                        anchors.verticalCenter: parent.verticalCenter
+                        Behavior on color { ColorAnimation { duration: 200 } }
+                    }
+                }
+
+                HoverHandler { id: ccHh }
+                MouseArea {
+                    anchors.fill: parent
+                    enabled: bridge.pipelineRunning
+                    onClicked: bridge.toggleColorCorrection()
+                    cursorShape: bridge.pipelineRunning ? Qt.PointingHandCursor : Qt.ArrowCursor
+                }
+
+            }
+
+            // Preprocessing toggle (realtime mode only)
+            Rectangle {
+                visible: bridge.currentMode === "realtime"
+                width: ppRow.width + 20; height: 28; radius: 6
+                anchors.verticalCenter: parent.verticalCenter
+                color: bridge.preprocessingActive ? "#0a1628"
+                     : ppHh.containsMouse          ? "#151525" : "#0f0f1e"
+                border.color: bridge.preprocessingActive ? "#3b82f6" : "#1e1e38"
+                border.width: 1
+                Behavior on color       { ColorAnimation { duration: 200 } }
+                Behavior on border.color { ColorAnimation { duration: 200 } }
+
+                Row {
+                    id: ppRow
+                    anchors.centerIn: parent; spacing: 6
+
+                    Rectangle {
+                        width: 6; height: 6; radius: 3
+                        color: bridge.preprocessingActive ? "#3b82f6" : "#333355"
+                        anchors.verticalCenter: parent.verticalCenter
+                        Behavior on color { ColorAnimation { duration: 200 } }
+
+                        SequentialAnimation on opacity {
+                            running: bridge.preprocessingActive; loops: Animation.Infinite
+                            NumberAnimation { to: 0.25; duration: 700; easing.type: Easing.InOutSine }
+                            NumberAnimation { to: 1.0;  duration: 700; easing.type: Easing.InOutSine }
+                        }
+                    }
+                    Text {
+                        text: "PREPROC"
+                        color: bridge.preprocessingActive ? "#3b82f6"
+                             : ppHh.containsMouse          ? "#64748b" : "#475569"
+                        font.pixelSize: 10; font.letterSpacing: 1.5; font.weight: Font.Medium
+                        anchors.verticalCenter: parent.verticalCenter
+                        Behavior on color { ColorAnimation { duration: 200 } }
+                    }
+                }
+
+                HoverHandler { id: ppHh }
+                MouseArea {
+                    anchors.fill: parent
+                    enabled: bridge.pipelineRunning
+                    onClicked: bridge.togglePreprocessing()
+                    cursorShape: bridge.pipelineRunning ? Qt.PointingHandCursor : Qt.ArrowCursor
+                }
+
             }
 
             Text {
@@ -1272,6 +1446,106 @@ Window {
                                 color: bridge.batchComplete ? "#10b981" : "#334155"
                                 font.pixelSize: 8; font.letterSpacing: 2
                                 Behavior on color { ColorAnimation { duration: 400 } }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Auto-stop warning dialog ─────────────────────────────────────
+    Rectangle {
+        id: autoStopDialog
+        visible: false
+        anchors.fill: parent
+        color: "#cc000000"
+        z: 1000
+
+        property int minutesLeft: 5
+
+        Connections {
+            target: bridge
+            function onAutoStopWarning(minutes) {
+                autoStopDialog.minutesLeft = minutes
+                autoStopDialog.visible = true
+                autoStopCountdown.restart()
+            }
+        }
+
+        Timer {
+            id: autoStopCountdown
+            interval: 60000; repeat: true
+            onTriggered: {
+                autoStopDialog.minutesLeft -= 1
+                if (autoStopDialog.minutesLeft <= 0) {
+                    autoStopCountdown.stop()
+                    autoStopDialog.visible = false
+                }
+            }
+        }
+
+        Rectangle {
+            anchors.centerIn: parent
+            width: 400; height: 180; radius: 12
+            color: "#1a1a2e"
+            border.color: "#ef4444"; border.width: 1
+
+            Column {
+                anchors.centerIn: parent; spacing: 16
+
+                Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: "AUTO-STOP WARNING"
+                    color: "#ef4444"; font.pixelSize: 13
+                    font.letterSpacing: 2; font.weight: Font.Medium
+                }
+                Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: "Pod will stop in " + autoStopDialog.minutesLeft + " minute(s)"
+                    color: "#e2e8f0"; font.pixelSize: 15
+                }
+                Row {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    spacing: 16
+
+                    Rectangle {
+                        width: extendText.width + 28; height: 34; radius: 6
+                        color: extendMa.containsMouse ? "#1e3a5f" : "#172554"
+                        border.color: "#3b82f6"; border.width: 1
+
+                        Text {
+                            id: extendText; anchors.centerIn: parent
+                            text: "EXTEND"; color: "#3b82f6"
+                            font.pixelSize: 11; font.letterSpacing: 1.5
+                        }
+                        MouseArea {
+                            id: extendMa; anchors.fill: parent
+                            hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                bridge.keepAlive()
+                                autoStopCountdown.stop()
+                                autoStopDialog.visible = false
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        width: dismissText.width + 28; height: 34; radius: 6
+                        color: dismissMa.containsMouse ? "#1e1e30" : "#14142a"
+                        border.color: "#334155"; border.width: 1
+
+                        Text {
+                            id: dismissText; anchors.centerIn: parent
+                            text: "DISMISS"; color: "#64748b"
+                            font.pixelSize: 11; font.letterSpacing: 1.5
+                        }
+                        MouseArea {
+                            id: dismissMa; anchors.fill: parent
+                            hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                autoStopCountdown.stop()
+                                autoStopDialog.visible = false
                             }
                         }
                     }

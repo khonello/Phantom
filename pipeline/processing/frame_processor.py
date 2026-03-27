@@ -20,6 +20,7 @@ from abc import ABC, abstractmethod
 from typing import Any, List, Optional
 
 import cv2
+import numpy as np
 
 from pipeline.config import FaceSwapConfig
 from pipeline.types import Frame, Detection
@@ -325,29 +326,17 @@ class EnhancementProcessor(FrameProcessor):
         """
         self.config = config
         self.enhancer = enhancer
-        self.frame_count = 0
 
     def process(self, frame: Frame) -> Frame:
         """
-        Enhance frame (every N frames based on config).
+        Enhance frame using GFPGAN.
 
         Args:
             frame: Input frame
 
         Returns:
-            Enhanced frame (or original if enhancement disabled/unavailable)
+            Enhanced frame (or original if enhancement unavailable)
         """
-        self.frame_count += 1
-
-        # Skip enhancement if disabled
-        if self.config.enhance_interval <= 0:
-            return frame
-
-        # Skip based on interval
-        if self.frame_count % self.config.enhance_interval != 0:
-            return frame
-
-        # Enhance
         if self.enhancer.available:
             try:
                 return self.enhancer.enhance(frame)
@@ -356,10 +345,6 @@ class EnhancementProcessor(FrameProcessor):
                 return frame
 
         return frame
-
-    def reset(self) -> None:
-        """Reset frame counter."""
-        self.frame_count = 0
 
 
 class BlendingProcessor(FrameProcessor):
@@ -463,6 +448,246 @@ class BlendingProcessor(FrameProcessor):
         except Exception as e:
             emit_warning(f'Luminance blend error: {type(e).__name__}: {e}', scope='BLENDER')
             return cv2.addWeighted(swapped, 0.65, original, 0.35, 0)
+
+
+class PreprocessingProcessor(FrameProcessor):
+    """
+    Preprocess frames to handle poor lighting and low camera quality.
+
+    Applies lightweight corrections before detection/swapping:
+    - CLAHE: Adaptive histogram equalization to normalize uneven lighting
+    - White balance: Gray-world algorithm to remove color casts
+    - Denoise: Bilateral filter for edge-preserving noise reduction
+
+    All operations run on the full frame and are fast enough for realtime.
+    Controlled by config.preprocessing (bool toggle).
+    """
+
+    # CLAHE parameters
+    _CLAHE_CLIP = 2.0
+    _CLAHE_GRID = (8, 8)
+
+    # Bilateral filter parameters (edge-preserving denoise)
+    _BILATERAL_D = 5
+    _BILATERAL_SIGMA_COLOR = 50
+    _BILATERAL_SIGMA_SPACE = 50
+
+    def __init__(self, config: FaceSwapConfig) -> None:
+        """
+        Initialize preprocessing processor.
+
+        Args:
+            config: Configuration object (preprocessing toggle)
+        """
+        self.config = config
+        self._clahe = cv2.createCLAHE(
+            clipLimit=self._CLAHE_CLIP,
+            tileGridSize=self._CLAHE_GRID,
+        )
+
+    def process(self, frame: Frame) -> Frame:
+        """
+        Apply preprocessing corrections to input frame.
+
+        Args:
+            frame: Raw camera frame
+
+        Returns:
+            Corrected frame with normalized lighting, white balance, and reduced noise
+        """
+        if not self.config.preprocessing:
+            return frame
+
+        try:
+            frame = self._apply_clahe(frame)
+            frame = self._apply_white_balance(frame)
+            frame = self._apply_denoise(frame)
+            return frame
+        except Exception as e:
+            emit_warning(f'Preprocessing error: {type(e).__name__}: {e}', scope='PREPROCESS')
+            return frame
+
+    def _apply_clahe(self, frame: Frame) -> Frame:
+        """
+        Apply CLAHE to the L channel in LAB space.
+
+        Normalizes brightness adaptively across the frame — handles
+        shadows on one side of the face, overexposed highlights, etc.
+        """
+        lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+        lab[:, :, 0] = self._clahe.apply(lab[:, :, 0])
+        return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
+    @staticmethod
+    def _apply_white_balance(frame: Frame) -> Frame:
+        """
+        Gray-world white balance correction.
+
+        Assumes the average color of a scene should be neutral gray.
+        Removes color casts from artificial lighting (fluorescent green,
+        tungsten orange, LED blue, etc.).
+        """
+        avg_b = frame[:, :, 0].mean()
+        avg_g = frame[:, :, 1].mean()
+        avg_r = frame[:, :, 2].mean()
+        avg_all = (avg_b + avg_g + avg_r) / 3.0
+
+        if avg_b < 1 or avg_g < 1 or avg_r < 1:
+            return frame
+
+        result = frame.astype(np.float32)
+        result[:, :, 0] *= avg_all / avg_b
+        result[:, :, 1] *= avg_all / avg_g
+        result[:, :, 2] *= avg_all / avg_r
+        return np.clip(result, 0, 255).astype(np.uint8)
+
+    def _apply_denoise(self, frame: Frame) -> Frame:
+        """
+        Bilateral filter for edge-preserving noise reduction.
+
+        Smooths noise/grain while keeping face edges sharp — important
+        for detection accuracy and swap quality on cheap webcams.
+        """
+        return cv2.bilateralFilter(
+            frame,
+            self._BILATERAL_D,
+            self._BILATERAL_SIGMA_COLOR,
+            self._BILATERAL_SIGMA_SPACE,
+        )
+
+
+class ColorCorrectionProcessor(FrameProcessor):
+    """
+    Correct color mismatch between swapped face and target skin tone.
+
+    Uses LAB color transfer to match the swapped face's color distribution
+    to the original target face, then applies seamless cloning for
+    boundary-free compositing. Essential for cross-skin-tone swaps
+    (e.g. fair source onto dark target) that would otherwise look cartoonish.
+    """
+
+    def __init__(self, config: FaceSwapConfig) -> None:
+        """
+        Initialize color correction processor.
+
+        Args:
+            config: Configuration object (color_correction toggle)
+        """
+        self.config = config
+
+    def process(self, frame: Frame) -> Frame:
+        """No-op; actual correction done via correct()."""
+        return frame
+
+    def correct(
+        self,
+        swapped: Frame,
+        original: Frame,
+        face_bbox: tuple,
+    ) -> Frame:
+        """
+        Apply color correction to the swapped face region.
+
+        Pipeline:
+        1. Extract face ROI from both frames
+        2. LAB color transfer: match mean+std of each channel to original
+        3. Feathered mask to avoid hard edges
+        4. Seamless clone for final compositing
+
+        Args:
+            swapped: Frame with swapped face (from inswapper)
+            original: Original unmodified frame
+            face_bbox: Tuple (x, y, w, h) of face location
+
+        Returns:
+            Color-corrected frame
+        """
+        x, y, w, h = face_bbox
+        fh, fw = original.shape[:2]
+
+        # Clamp ROI to frame bounds
+        x1, y1 = max(0, x), max(0, y)
+        x2, y2 = min(fw, x + w), min(fh, y + h)
+
+        if x2 - x1 < 10 or y2 - y1 < 10:
+            return swapped
+
+        try:
+            # --- Step 0: Fast bail-out when skin tones already match ---
+            orig_roi = original[y1:y2, x1:x2].astype(np.float32)
+            swap_roi = swapped[y1:y2, x1:x2].astype(np.float32)
+
+            orig_lab = cv2.cvtColor(orig_roi, cv2.COLOR_BGR2LAB)
+            swap_lab = cv2.cvtColor(swap_roi, cv2.COLOR_BGR2LAB)
+
+            # Euclidean distance between LAB means — below threshold means
+            # skin tones are close enough that correction is unnecessary.
+            lab_delta = float(np.sqrt(sum(
+                (orig_lab[:, :, ch].mean() - swap_lab[:, :, ch].mean()) ** 2
+                for ch in range(3)
+            )))
+            if lab_delta < 12.0:
+                return swapped
+
+            # --- Step 1: LAB color transfer on face region ---
+            # Per-channel mean/std transfer
+            for ch in range(3):
+                o_mean, o_std = orig_lab[:, :, ch].mean(), orig_lab[:, :, ch].std()
+                s_mean, s_std = swap_lab[:, :, ch].mean(), swap_lab[:, :, ch].std()
+
+                if s_std < 1e-6:
+                    continue
+
+                # Shift and scale to match original distribution
+                swap_lab[:, :, ch] = (swap_lab[:, :, ch] - s_mean) * (o_std / s_std) + o_mean
+
+            swap_lab = np.clip(swap_lab, 0, 255)
+            corrected_roi = cv2.cvtColor(swap_lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+
+            # --- Step 2: Build elliptical feathered mask ---
+            roi_h, roi_w = corrected_roi.shape[:2]
+            mask = np.zeros((roi_h, roi_w), dtype=np.uint8)
+            center = (roi_w // 2, roi_h // 2)
+            axes = (int(roi_w * 0.4), int(roi_h * 0.4))
+            cv2.ellipse(mask, center, axes, 0, 0, 360, 255, -1)
+            # Feather the edges with Gaussian blur
+            ksize = max(roi_w, roi_h) // 4
+            ksize = ksize + 1 if ksize % 2 == 0 else ksize
+            ksize = max(ksize, 3)
+            mask = cv2.GaussianBlur(mask, (ksize, ksize), 0)
+
+            # --- Step 3: Alpha-blend corrected ROI using feathered mask ---
+            mask_f = mask.astype(np.float32) / 255.0
+            mask_3ch = np.stack([mask_f] * 3, axis=-1)
+
+            blended_roi = (
+                corrected_roi.astype(np.float32) * mask_3ch
+                + swap_roi * (1.0 - mask_3ch)
+            ).astype(np.uint8)
+
+            # --- Step 4: Seamless clone into the frame ---
+            # Build a full-frame mask for seamlessClone
+            result = swapped.copy()
+            full_mask = np.zeros((fh, fw), dtype=np.uint8)
+            full_mask[y1:y2, x1:x2] = mask
+
+            # seamlessClone center point
+            cx = (x1 + x2) // 2
+            cy = (y1 + y2) // 2
+
+            # Place the corrected ROI into a full-frame src image
+            src_frame = swapped.copy()
+            src_frame[y1:y2, x1:x2] = blended_roi
+
+            result = cv2.seamlessClone(
+                src_frame, original, full_mask, (cx, cy), cv2.NORMAL_CLONE
+            )
+
+            return result
+
+        except Exception as e:
+            emit_warning(f'Color correction error: {type(e).__name__}: {e}', scope='COLOR')
+            return swapped
 
 
 class OutputProcessor(FrameProcessor):

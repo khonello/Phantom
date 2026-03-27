@@ -183,17 +183,21 @@ When you need a field not in the SDK response, query GraphQL directly at `https:
 ## Quick Reference: Working .env Configuration
 
 ```env
-# GPU names use RunPod DISPLAY names (not API IDs)
-RUNPOD_GPU_TYPES=RTX A4500,RTX 4090
+# Datacenters with paired network volumes (tried in order)
+RUNPOD_DATACENTERS=EU-RO-1:z8now7p5ts
+
+# GPU auto-discovery: min VRAM and max hourly price
+RUNPOD_MIN_VRAM=16
+RUNPOD_MAX_PRICE=1.00
+# Or manual override (optional):
+# RUNPOD_GPU_TYPES=RTX 4090,RTX 3090
 
 # Image must be devel — runtime tag doesn't exist
 RUNPOD_IMAGE=runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
 
-# Datacenter must match network volume location
-RUNPOD_DATACENTER_ID=EU-RO-1
-
-# Network volume — do NOT also set RUNPOD_VOLUME_DISK when this is set
-RUNPOD_NETWORK_VOLUME_ID=z8now7p5ts
+# Auto-stop: stop pod after N minutes (0 = disabled), warning M minutes before
+RUNPOD_MAX_UPTIME=120
+RUNPOD_STOP_WARNING=5
 
 # SSH key must be uploaded to RunPod dashboard → Settings → SSH Public Keys
 RUNPOD_SSH_KEY_PATH=~/.ssh/id_ed25519
@@ -207,6 +211,6 @@ python runpod/orchestrator.py resume       # resume stopped pod
 python runpod/orchestrator.py stop         # pause pod
 python runpod/orchestrator.py terminate    # delete pod
 python runpod/orchestrator.py status       # show pod info
-python runpod/orchestrator.py gpus         # list GPUs with IDs
+python runpod/orchestrator.py gpus         # list GPUs with VRAM, pricing, eligibility
 python runpod/orchestrator.py datacenters  # list datacenters
 ```

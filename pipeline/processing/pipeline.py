@@ -6,7 +6,7 @@ Replaces monolithic stream.py:_pipeline_loop() and core.py:start().
 
 Responsibilities:
 - Build processor chains (batch vs stream)
-- Coordinate async enhancement
+- Coordinate enhancement (synchronous on GPU)
 - Emit events (FRAME_READY, DETECTION, etc.)
 - Listen to config changes and rebuild
 - Manage I/O sources and sinks
@@ -38,8 +38,9 @@ from pipeline.processing.frame_processor import (
     SwappingProcessor,
     EnhancementProcessor,
     BlendingProcessor,
+    ColorCorrectionProcessor,
+    PreprocessingProcessor,
 )
-from pipeline.processing.async_processor import AsyncProcessor
 
 
 class ProcessingPipeline:
@@ -83,7 +84,8 @@ class ProcessingPipeline:
         self._swapping_proc: Optional[SwappingProcessor] = None
         self._enhancement_proc: Optional[EnhancementProcessor] = None
         self._blending_proc: Optional[BlendingProcessor] = None
-        self._async_enhancement: Optional[AsyncProcessor] = None
+        self._color_correction_proc: Optional[ColorCorrectionProcessor] = None
+        self._preprocessing_proc: Optional[PreprocessingProcessor] = None
 
         # State
         self._running = False
@@ -133,13 +135,8 @@ class ProcessingPipeline:
         self._swapping_proc = SwappingProcessor(self.config, swapper, database)
         self._enhancement_proc = EnhancementProcessor(self.config, enhancer)
         self._blending_proc = BlendingProcessor(self.config)
-
-        # Async enhancement wrapper
-        if self._async_enhancement is not None:
-            self._async_enhancement.stop()
-            self._async_enhancement.join()
-
-        self._async_enhancement = AsyncProcessor(self._enhancement_proc, self._stop_event)
+        self._color_correction_proc = ColorCorrectionProcessor(self.config)
+        self._preprocessing_proc = PreprocessingProcessor(self.config)
 
     def _on_config_changed(self, field: str, value: Any) -> None:
         """
@@ -162,7 +159,7 @@ class ProcessingPipeline:
                 self._swapping_proc.set_source(sources)
 
         # Tracker type or alpha changed → rebuild processors
-        elif field in ('tracker', 'alpha', 'enhance_interval', 'blend', 'luminance_blend'):
+        elif field in ('tracker', 'alpha', 'blend', 'luminance_blend'):
             self._build_processors()
 
     def run_stream(self) -> None:
@@ -233,20 +230,13 @@ class ProcessingPipeline:
                     scope='PIPELINE',
                 )
 
-        # Start async enhancement
-        self._async_enhancement.start()
-
-        try:
-            # Push mode: desktop sends JPEG frames via WebSocket binary messages.
-            # Used when no local VideoCapture source is available (e.g. RunPod).
-            if self.frame_queue is not None and not self.config.input_url:
-                emit_status('Stream mode: WebSocket push (receiving frames from desktop)', scope='PIPELINE')
-                self._stream_loop_push()
-            else:
-                self._stream_loop_capture()
-        finally:
-            self._async_enhancement.stop()
-            self._async_enhancement.join()
+        # Push mode: desktop sends JPEG frames via WebSocket binary messages.
+        # Used when no local VideoCapture source is available (e.g. RunPod).
+        if self.frame_queue is not None and not self.config.input_url:
+            emit_status('Stream mode: WebSocket push (receiving frames from desktop)', scope='PIPELINE')
+            self._stream_loop_push()
+        else:
+            self._stream_loop_capture()
 
     def _process_and_emit(self, frame: Frame, seq: int, capture_ts: int = 0) -> None:
         """Run detection → tracking → swap → enhance → emit for one frame.
@@ -259,6 +249,9 @@ class ProcessingPipeline:
         # TEMPORARY: per-stage timing to diagnose GPU performance
         import sys
         _t0 = time.perf_counter()
+
+        # Preprocessing: normalize lighting, white balance, denoise
+        frame = self._preprocessing_proc.process(frame)
 
         frame = self._detection_proc.process(frame)
         detections = self._detection_proc.latest_detections
@@ -279,15 +272,24 @@ class ProcessingPipeline:
             tracked = detections[0]
 
         if tracked and self._swapping_proc.source_face:
+            # Save original before swap — needed for color correction reference.
+            # Only copy when color correction is enabled to avoid allocation overhead.
+            original_frame = frame.copy() if self.config.color_correction else None
             frame = self._swapping_proc.swap_detection(frame, tracked)
+
+            # Color correction: match swapped face color to original target skin
+            if original_frame is not None:
+                bbox = tracked.bbox
+                frame = self._color_correction_proc.correct(
+                    frame, original_frame,
+                    (bbox.x, bbox.y, bbox.w, bbox.h),
+                )
+
             self.bus.emit(DETECTION, detection=tracked.to_dict(), seq=seq)
         _t3 = time.perf_counter()
 
-        self._async_enhancement.submit(seq, frame)
-        result = self._async_enhancement.get_latest()
-        if result:
-            _, enhanced_frame = result
-            frame = enhanced_frame
+        if self.config.enhance:
+            frame = self._enhancement_proc.process(frame)
         _t4 = time.perf_counter()
 
         self.bus.emit(FRAME_READY, frame=frame, seq=seq, capture_ts=capture_ts)
@@ -364,7 +366,6 @@ class ProcessingPipeline:
         drop_count = 0
         drop_window_start = time.time()
         warmup_frames = getattr(self.config, 'warmup_frames', 0)
-        skip_count = 0
 
         try:
             while not self._stop_event.is_set():
@@ -379,14 +380,6 @@ class ProcessingPipeline:
                     continue
 
                 capture_ts = time.perf_counter_ns()
-
-                if skip_count > 0:
-                    skip_count -= 1
-                    drop_count += 1
-                    continue
-                if self._async_enhancement and self._async_enhancement.drop_count > 0:
-                    skip_count = 1
-                    self._async_enhancement.drop_count = 0
 
                 self._process_and_emit(frame, seq, capture_ts)
 
@@ -463,13 +456,23 @@ class ProcessingPipeline:
                 return
 
             # Process
+            frame = self._preprocessing_proc.process(frame)
             frame = self._detection_proc.process(frame)
             detections = self._detection_proc.latest_detections
 
+            original_frame = frame.copy() if self.config.color_correction else None
             for detection in detections:
                 frame = self._swapping_proc.swap_detection(frame, detection)
 
-            frame = self._enhancement_proc.process(frame)
+                if original_frame is not None:
+                    bbox = detection.bbox
+                    frame = self._color_correction_proc.correct(
+                        frame, original_frame,
+                        (bbox.x, bbox.y, bbox.w, bbox.h),
+                    )
+
+            if self.config.enhance:
+                frame = self._enhancement_proc.process(frame)
 
             # Save
             if output_path:

@@ -49,7 +49,6 @@ Phantom is a modern, composable face-swapping application for videos and images.
 **Processing Pipeline:**
 - **pipeline/processing/frame_processor.py**: `FrameProcessor` ABC + implementations
   - `DetectionProcessor`, `TrackingProcessor`, `SwappingProcessor`, `EnhancementProcessor`, `BlendingProcessor`
-- **pipeline/processing/async_processor.py**: `AsyncProcessor` (background thread wrapper)
 - **pipeline/processing/pipeline.py**: `ProcessingPipeline` (orchestrator, replaces monolithic stream.py)
 
 **I/O Layer:**
@@ -63,8 +62,9 @@ Phantom is a modern, composable face-swapping application for videos and images.
   - Binary frames: JPEG-encoded video frames pushed to all clients
   - Health check: `{"action": "health"}` → `{"status": "healthy", "uptime": <seconds>}`
   - Heartbeat ping/pong every 30s
+  - Auto-stop timer: background thread stops pod after `RUNPOD_MAX_UPTIME` minutes
 - **pipeline/api/handlers.py**: Type-safe command handlers; `HandlerContext` dataclass (no globals)
-- **pipeline/api/schema.py**: Message types, command/event constants
+- **pipeline/api/schema.py**: Message types, command/event constants, quality presets
 
 **Simplified Entry Points:**
 - **pipeline/core.py**: Argument parsing, headless orchestration; supports `--stream`, `--log-level`
@@ -87,8 +87,8 @@ The following files were deleted in the Phase 2 cleanup:
 ### Data Flow (Event-Driven)
 1. `pipeline.py` → `core.run_headless()` parses args → loads `.env` → updates `CONFIG`
 2. `WebSocketAPIServer` starts on port 9000 (`ws://host:9000/ws`), single port
-3. **Batch mode**: `ProcessingPipeline.run_batch()` → detects faces → swaps → enhances → outputs
-4. **Stream mode**: `ProcessingPipeline.run_stream()` → captures frames → detects/tracks → swaps → async enhancement → emits `FRAME_READY` event
+3. **Batch mode**: `ProcessingPipeline.run_batch()` → detects faces → swaps → enhances (if enabled) → outputs
+4. **Stream mode**: `ProcessingPipeline.run_stream()` → captures frames → detects/tracks → swaps → enhances (if enabled, synchronous) → emits `FRAME_READY` event
 5. `FRAME_READY` → server encodes JPEG → pushes binary to all WebSocket clients (no polling)
 6. `STATUS_CHANGED`, `DETECTION` events → server pushes JSON text to all clients
 7. `desktop/bridge.py` receives push callbacks, updates frame buffers and UI state
@@ -105,6 +105,24 @@ desktop/bridge.py (UI updater)
   ↓ updates
 QML display
 ```
+
+### Quality Presets
+Desktop quality dropdown controls capture resolution, frame rate, and processing parameters. Defined in `pipeline/api/schema.py::PRESETS` and `desktop/bridge.py::_QUALITY_CAPTURE`.
+
+|                        | Fast              | Optimal (default) | Production        |
+|------------------------|-------------------|--------------------|-------------------|
+| **Capture resolution** | 480x270           | 640x360            | 960x540           |
+| **Frame rate**         | 15 fps            | 20 fps             | 30 fps            |
+| **JPEG quality**       | 60                | 70                 | 85                |
+| **Tracker**            | KCF (fast)        | CSRT (accurate)    | CSRT (accurate)   |
+| **Alpha smoothing**    | 0.7               | 0.6                | 0.5               |
+| **Luminance blend**    | Off               | On                 | On                |
+| **Redetect interval**  | Every 30 frames   | Every 30 frames    | Every 20 frames   |
+
+Changing quality restarts the webcam capture device to apply new resolution/fps.
+
+### Enhancement Toggle
+GFPGAN face enhancement is controlled by `config.enhance` (bool, default `True`) — independent of quality presets. Toggled from the desktop header via the ENHANCE button or `set_enhance` API command. Enhancement runs **synchronously** in the frame processing loop on GPU; no frames are dropped or skipped.
 
 ### Entry Points
 - **pipeline.py**: Headless engine; starts WebSocket API server + ProcessingPipeline (batch or stream)
@@ -200,13 +218,12 @@ QML display
 ### Processing Pipeline
 - `pipeline/processing/pipeline.py`: `ProcessingPipeline` orchestrator (batch & stream modes)
 - `pipeline/processing/frame_processor.py`: `FrameProcessor` ABC + 5 implementations
-- `pipeline/processing/async_processor.py`: Background processing wrapper
 
 ### I/O & API
 - `pipeline/io/capture.py`: Input sources (webcam, file, network)
 - `pipeline/io/output.py`: Output sinks (file, HTTP, WebSocket)
-- `pipeline/api/server.py`: WebSocket API server (replaces HTTP control)
-- `pipeline/api/handlers.py`: Command dispatching & business logic
+- `pipeline/api/server.py`: WebSocket API server, auto-stop timer
+- `pipeline/api/handlers.py`: Command dispatching & business logic (`keep_alive`, `set_enhance`, etc.)
 
 ### Entry Points & Config
 - `pipeline/core.py`: CLI argument parsing, headless orchestration
@@ -229,13 +246,16 @@ python runpod/orchestrator.py resume       # resume stopped pod (RUNPOD_POD_ID)
 python runpod/orchestrator.py stop         # pause pod (volume preserved)
 python runpod/orchestrator.py terminate    # delete pod (network volume survives)
 python runpod/orchestrator.py status       # show pod state + URL
-python runpod/orchestrator.py gpus         # list GPU display names and API IDs
+python runpod/orchestrator.py gpus         # list GPUs with VRAM, pricing, eligibility
 python runpod/orchestrator.py datacenters  # list all datacenters
 ```
 
 ### How It Works
 - `start` always creates a new pod; `resume` resumes an existing one
-- GPU names in `.env` are display names (e.g. `RTX 4090`); orchestrator resolves to API IDs via GraphQL
+- **Multi-datacenter fallback**: `RUNPOD_DATACENTERS=DC1:vol1,DC2:vol2` — tries all GPUs in DC1 first, falls back to DC2 with its paired volume. Network volumes are datacenter-local, so each datacenter needs its own volume.
+- Legacy single-datacenter config (`RUNPOD_DATACENTER_ID` + `RUNPOD_NETWORK_VOLUME_ID`) still works as fallback
+- **GPU auto-discovery**: By default, queries RunPod API for GPUs matching `RUNPOD_MIN_VRAM` (default 16GB) and `RUNPOD_MAX_PRICE` (default $1.00/hr), tries cheapest first. Set `RUNPOD_GPU_TYPES` to override with specific GPUs.
+- GPU display names (e.g. `RTX 4090`) are resolved to API IDs via GraphQL
 - SSH uses RunPod's proxy: `{podHostId}@ssh.runpod.io` (podHostId from GraphQL `machine.podHostId`, NOT from SDK `get_pod()`)
 - WebSocket uses RunPod's proxy: `wss://{pod_id}-9000.proxy.runpod.net/ws`
 - Only port `9000/tcp` is exposed (no 8888 — that triggers slow JupyterLab init)
@@ -248,3 +268,4 @@ python runpod/orchestrator.py datacenters  # list all datacenters
 - RunPod GraphQL does NOT support schema introspection or per-datacenter GPU filtering
 - `support_public_ip=True` severely constrains pod scheduling — only enable for SSH mode
 - Never pass both `volume_in_gb` and `network_volume_id` to `create_pod()`
+- **Auto-stop**: Pipeline stops the pod after `RUNPOD_MAX_UPTIME` minutes (default 120) to prevent billing overruns. Sends `auto_stop_warning` event 5 minutes before. Desktop shows a dialog; user can click "Extend" (sends `keep_alive` command) or let it stop. Works even with no desktop connected — the pipeline calls `runpod.stop_pod()` directly.

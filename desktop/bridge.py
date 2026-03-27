@@ -165,6 +165,9 @@ class Bridge(QObject):
     embeddingPendingChanged = Signal(bool)
     pipelineRunningChanged = Signal(bool)
     virtualCamActiveChanged = Signal(bool)
+    enhanceActiveChanged = Signal(bool)
+    colorCorrectionActiveChanged = Signal(bool)
+    preprocessingActiveChanged = Signal(bool)
     sourceSetChanged = Signal(bool)
     sourceThumbnailChanged = Signal(str)
     sourceLabelChanged = Signal(str)
@@ -177,6 +180,7 @@ class Bridge(QObject):
     outputPathChanged = Signal(str)
     batchRunningChanged = Signal(bool)
     batchCompleteChanged = Signal(bool)
+    autoStopWarning = Signal(int)  # minutes remaining
 
     def __init__(self, client: PipelineClient) -> None:
         super().__init__()
@@ -185,7 +189,11 @@ class Bridge(QObject):
         self._source_thumbnail: str = ''
         self._source_label: str = ''
         self._pipeline_running = False
+        self._awaiting_first_frame = False
         self._virtual_cam_active = False
+        self._enhance_active = True
+        self._color_correction_active = True
+        self._preprocessing_active = False
         self._embedding_pending = False
         self._connected = False
         self._connection_label = 'connecting...'
@@ -284,6 +292,18 @@ class Bridge(QObject):
     def virtualCamActive(self) -> bool:
         return self._virtual_cam_active
 
+    @Property(bool, notify=enhanceActiveChanged)
+    def enhanceActive(self) -> bool:
+        return self._enhance_active
+
+    @Property(bool, notify=colorCorrectionActiveChanged)
+    def colorCorrectionActive(self) -> bool:
+        return self._color_correction_active
+
+    @Property(bool, notify=preprocessingActiveChanged)
+    def preprocessingActive(self) -> bool:
+        return self._preprocessing_active
+
     @Property(bool, notify=sourceSetChanged)
     def sourceSet(self) -> bool:
         return self._source_set
@@ -344,17 +364,32 @@ class Bridge(QObject):
         if not self._connected:
             self._set_status('cannot reach server — not connected')
             return
+        # Show overlay immediately so the user sees feedback before the
+        # round-trip WebSocket commands below (set_quality, set_enhance,
+        # start_stream) which each block waiting for a server response.
+        self._set_loading_message('Initializing...')
+        self._awaiting_first_frame = True
         self._client.set_quality(self._quality)
+        self._client.set_enhance(self._enhance_active)
+        self._client.set_color_correction(self._color_correction_active)
+        self._client.set_preprocessing(self._preprocessing_active)
         result = self._client.start_stream()
         if not result.get('success', True):
+            self._set_loading_message('')
+            self._awaiting_first_frame = False
             self._set_status(f'start failed: {result.get("error", "unknown error")}')
             return
+        # If we rejoined an existing pipeline, sync UI state from the server
+        # so source thumbnail, quality, enhance, etc. reflect reality.
+        rejoined = result.get('data', {}).get('rejoined', False)
+        if rejoined:
+            self._restore_state_from_server()
+
         self._ws_push_active.set()
         self._jitter_buffer.clear()
         self._audio_capture.start()
         self._audio_playback.start()
         self._last_frame_time = time.time()
-        self._set_loading_message('Initializing...')
         self._set_pipeline_running(True)
         self._set_status('pipeline connected · processing')
 
@@ -363,6 +398,7 @@ class Bridge(QObject):
         if self._virtual_cam_active:
             self._stop_vcam()
             self._set_virtual_cam_active(False)
+        self._awaiting_first_frame = False
         self._ws_push_active.clear()
         self._audio_playback.stop()
         self._audio_capture.stop()
@@ -373,6 +409,38 @@ class Bridge(QObject):
         # prevents the user from clicking Start before the pipeline thread has
         # fully exited, which would cause start_stream to be rejected silently.
 
+    def _restore_state_from_server(self) -> None:
+        """Sync desktop UI with pipeline state after rejoining a running session."""
+        state = self._client.get_state()
+        if not state.get('success', False):
+            return
+        data = state.get('data', {})
+
+        # Restore quality & enhance to match server
+        self._quality = data.get('quality', self._quality)
+
+        enhance = data.get('enhance', self._enhance_active)
+        if enhance != self._enhance_active:
+            self._enhance_active = enhance
+            self.enhanceActiveChanged.emit(enhance)
+
+        # Restore source indicator — we can't recover the local thumbnail
+        # but we can show that a source is loaded on the server.
+        source_loaded = data.get('source_loaded', False)
+        if source_loaded and not self._source_set:
+            source_path = data.get('source_path', '')
+            paths = data.get('source_paths', [])
+            if paths:
+                self._source_label = f'{len(paths)} faces · averaged'
+            elif source_path:
+                self._source_label = os.path.basename(source_path)
+            else:
+                self._source_label = 'source (server)'
+            # Thumbnail file lives on the server — use empty string so QML
+            # shows the label only (no broken image path).
+            self._source_thumbnail = ''
+            self._set_source_set(True)
+
     @Slot()
     def toggleVirtualCam(self) -> None:
         if not self._virtual_cam_active:
@@ -381,6 +449,33 @@ class Bridge(QObject):
             self._stop_vcam()
             self._set_virtual_cam_active(False)
             self._set_status('pipeline connected · processing')
+
+    @Slot()
+    def toggleEnhance(self) -> None:
+        new_value = not self._enhance_active
+        self._set_enhance_active(new_value)
+        if self._connected:
+            self._client.set_enhance(new_value)
+
+    @Slot()
+    def toggleColorCorrection(self) -> None:
+        new_value = not self._color_correction_active
+        self._set_color_correction_active(new_value)
+        if self._connected:
+            self._client.set_color_correction(new_value)
+
+    @Slot()
+    def togglePreprocessing(self) -> None:
+        new_value = not self._preprocessing_active
+        self._set_preprocessing_active(new_value)
+        if self._connected:
+            self._client.set_preprocessing(new_value)
+
+    @Slot()
+    def keepAlive(self) -> None:
+        """Reset the auto-stop timer on the pipeline pod."""
+        if self._connected:
+            self._client.keep_alive()
 
     @Slot()
     def selectFaceImages(self) -> None:
@@ -630,6 +725,21 @@ class Bridge(QObject):
             self._virtual_cam_active = value
             self.virtualCamActiveChanged.emit(value)
 
+    def _set_enhance_active(self, value: bool) -> None:
+        if self._enhance_active != value:
+            self._enhance_active = value
+            self.enhanceActiveChanged.emit(value)
+
+    def _set_color_correction_active(self, value: bool) -> None:
+        if self._color_correction_active != value:
+            self._color_correction_active = value
+            self.colorCorrectionActiveChanged.emit(value)
+
+    def _set_preprocessing_active(self, value: bool) -> None:
+        if self._preprocessing_active != value:
+            self._preprocessing_active = value
+            self.preprocessingActiveChanged.emit(value)
+
     def _set_source_set(self, value: bool) -> None:
         self._source_set = value
         self.sourceSetChanged.emit(value)
@@ -747,6 +857,12 @@ class Bridge(QObject):
         self._last_frame_time = time.time()
         self._jitter_buffer.push(capture_ts, jpeg_bytes)
 
+        # Drop the loading overlay once the first processed frame arrives,
+        # guaranteeing the user sees an active swap before the overlay clears.
+        if self._awaiting_first_frame:
+            self._awaiting_first_frame = False
+            self._set_loading_message('')
+
     def _on_ws_event(self, data: Dict) -> None:
         """Called by PipelineClient when a JSON event arrives."""
         event = data.get('event', '')
@@ -755,8 +871,15 @@ class Bridge(QObject):
             scope = data.get('scope', '')
             level = data.get('level', 'info')
             if scope == 'MODEL_LOAD':
-                # Update loading overlay; clear when models are ready
-                self._set_loading_message('' if message == 'Models ready' else message)
+                if message == 'Models ready':
+                    # Models loaded; show a final status while we wait for
+                    # the first processed frame to confirm the swap works.
+                    if self._awaiting_first_frame:
+                        self._set_loading_message('Starting stream...')
+                    else:
+                        self._set_loading_message('')
+                else:
+                    self._set_loading_message(message)
             elif scope == 'DETECTION':
                 if level == 'warning':
                     self._set_detection_status('no face detected')
@@ -766,7 +889,10 @@ class Bridge(QObject):
             if message and not self._pipeline_running:
                 self._set_status(message)
         elif event == 'PIPELINE_STARTED':
-            self._set_loading_message('')
+            # Don't clear the overlay here — keep it up until the first
+            # processed frame arrives so the user sees the swap is active.
+            if not self._awaiting_first_frame:
+                self._set_loading_message('')
             if self._current_mode == 'realtime':
                 self._set_pipeline_running(True)
         elif event == 'PIPELINE_STOPPED':
@@ -782,6 +908,9 @@ class Bridge(QObject):
                 self._batch_complete = True
                 self.batchCompleteChanged.emit(True)
                 self._set_status('done')
+        elif event == 'auto_stop_warning':
+            minutes = (data.get('data') or {}).get('minutes_remaining', 5)
+            self.autoStopWarning.emit(minutes)
 
     def _on_ws_connected(self, connected: bool) -> None:
         """Called by PipelineClient when connection status changes."""

@@ -7,7 +7,6 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         'alpha': 0.7,
         'blend': 0.65,
         'luminance_blend': False,
-        'enhance_interval': 10,
         'buffer_size': 3,
         'redetect_interval': 30,
         'warmup_frames': 3,
@@ -17,7 +16,6 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         'alpha': 0.6,
         'blend': 0.65,
         'luminance_blend': True,
-        'enhance_interval': 5,
         'buffer_size': 4,
         'redetect_interval': 30,
         'warmup_frames': 5,
@@ -27,7 +25,6 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         'alpha': 0.5,
         'blend': 0.65,
         'luminance_blend': True,
-        'enhance_interval': 1,
         'buffer_size': 5,
         'redetect_interval': 20,
         'warmup_frames': 5,
@@ -49,6 +46,7 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
     'set_quality':     {'preset': str},
     'set_blend':       {'value': float},
     'set_alpha':       {'value': float},
+    'set_enhance':     {'value': bool},
     # Stream routing
     'set_input_url':   {'url': str},
     # Source embedding
@@ -59,6 +57,7 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
     'stop':            {},
     'stop_stream':     {},
     'cleanup_session': {},
+    'keep_alive':      {},
     'shutdown':        {},
 }
 
@@ -150,9 +149,11 @@ CMD_STOP_STREAM = 'stop_stream'
 CMD_SET_QUALITY = 'set_quality'
 CMD_SET_BLEND = 'set_blend'
 CMD_SET_ALPHA = 'set_alpha'
+CMD_SET_ENHANCE = 'set_enhance'
 CMD_SET_INPUT_URL = 'set_input_url'
 CMD_CREATE_EMBEDDING = 'create_embedding'
 CMD_CLEANUP_SESSION = 'cleanup_session'
+CMD_KEEP_ALIVE = 'keep_alive'
 CMD_SHUTDOWN = 'shutdown'
 
 # Event type constants
@@ -164,3 +165,4 @@ EVT_DROP_RATE = 'drop_rate'
 EVT_EMBEDDING_READY = 'embedding_ready'
 EVT_PIPELINE_STARTED = 'pipeline_started'
 EVT_PIPELINE_STOPPED = 'pipeline_stopped'
+EVT_AUTO_STOP_WARNING = 'auto_stop_warning'

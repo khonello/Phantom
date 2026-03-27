@@ -17,7 +17,7 @@ import base64
 import os
 import threading
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 # Temp directory where uploaded source images are saved server-side
 _UPLOAD_DIR = '/tmp/phantom_uploads'
@@ -44,6 +44,7 @@ class HandlerContext:
 
     pipeline: Optional[ProcessingPipeline]
     shutdown_event: Optional[threading.Event]
+    reset_auto_stop: Optional[Callable[[], None]] = None
 
 
 # ============================================================================
@@ -290,6 +291,29 @@ def handle_start(config: FaceSwapConfig, pipeline: Optional[ProcessingPipeline])
     )
 
 
+def handle_get_state(
+    config: FaceSwapConfig,
+    pipeline: Optional[ProcessingPipeline],
+) -> ResponseMessage:
+    """Return current pipeline state so a reconnecting client can sync its UI."""
+    source_loaded = False
+    if pipeline is not None and hasattr(pipeline, '_swapping_proc'):
+        source_loaded = pipeline._swapping_proc.source_face is not None
+
+    return ResponseMessage(
+        type='get_state',
+        data={
+            'source_path': config.source_path,
+            'source_paths': config.source_paths,
+            'quality': config.quality,
+            'enhance': config.enhance,
+            'pipeline_running': pipeline.is_running() if pipeline else False,
+            'source_loaded': source_loaded,
+        },
+        success=True,
+    )
+
+
 def handle_start_stream(config: FaceSwapConfig, pipeline: Optional[ProcessingPipeline]) -> ResponseMessage:
     """
     Start the streaming pipeline (webcam/realtime mode).
@@ -318,11 +342,13 @@ def handle_start_stream(config: FaceSwapConfig, pipeline: Optional[ProcessingPip
         )
 
     if pipeline.is_running():
+        # Pipeline still running from a previous session (e.g. desktop
+        # closed without pressing stop).  Let the new client join the
+        # existing stream instead of rejecting it.
         return ResponseMessage(
             type='start_stream',
-            data={},
-            success=False,
-            error='Pipeline already running',
+            data={'rejoined': True},
+            success=True,
         )
 
     # Start in background thread
@@ -461,6 +487,72 @@ def handle_set_alpha(config: FaceSwapConfig, value: float) -> ResponseMessage:
 
     return ResponseMessage(
         type='set_alpha',
+        data={'value': value},
+        success=True,
+    )
+
+
+def handle_set_enhance(config: FaceSwapConfig, value: bool) -> ResponseMessage:
+    """
+    Enable or disable GFPGAN face enhancement.
+
+    Args:
+        config: FaceSwapConfig
+        value: True to enable, False to disable
+
+    Returns:
+        ResponseMessage with success status
+    """
+    config.set('enhance', bool(value))
+    state = 'enabled' if value else 'disabled'
+    emit_status(f'Enhancement {state}', scope='API')
+
+    return ResponseMessage(
+        type='set_enhance',
+        data={'value': value},
+        success=True,
+    )
+
+
+def handle_set_color_correction(config: FaceSwapConfig, value: bool) -> ResponseMessage:
+    """
+    Enable or disable color correction for cross-skin-tone swaps.
+
+    Args:
+        config: FaceSwapConfig
+        value: True to enable, False to disable
+
+    Returns:
+        ResponseMessage with success status
+    """
+    config.set('color_correction', bool(value))
+    state = 'enabled' if value else 'disabled'
+    emit_status(f'Color correction {state}', scope='API')
+
+    return ResponseMessage(
+        type='set_color_correction',
+        data={'value': value},
+        success=True,
+    )
+
+
+def handle_set_preprocessing(config: FaceSwapConfig, value: bool) -> ResponseMessage:
+    """
+    Enable or disable frame preprocessing (CLAHE, white balance, denoise).
+
+    Args:
+        config: FaceSwapConfig
+        value: True to enable, False to disable
+
+    Returns:
+        ResponseMessage with success status
+    """
+    config.set('preprocessing', bool(value))
+    state = 'enabled' if value else 'disabled'
+    emit_status(f'Preprocessing {state}', scope='API')
+
+    return ResponseMessage(
+        type='set_preprocessing',
         data={'value': value},
         success=True,
     )
@@ -642,6 +734,34 @@ def handle_cleanup_session(config: FaceSwapConfig) -> ResponseMessage:
     )
 
 
+def handle_keep_alive(reset_fn: Optional[Callable[[], None]]) -> ResponseMessage:
+    """
+    Reset the auto-stop timer, extending the pod's uptime.
+
+    Args:
+        reset_fn: Callback to reset the auto-stop countdown
+
+    Returns:
+        ResponseMessage with success status
+    """
+    if reset_fn is None:
+        return ResponseMessage(
+            type='keep_alive',
+            data={},
+            success=False,
+            error='Auto-stop timer not active',
+        )
+
+    reset_fn()
+    emit_status('Auto-stop timer reset', scope='API')
+
+    return ResponseMessage(
+        type='keep_alive',
+        data={},
+        success=True,
+    )
+
+
 def handle_shutdown(shutdown_event: Optional[threading.Event]) -> ResponseMessage:
     """
     Shutdown the application.
@@ -723,6 +843,15 @@ def dispatch_command(
         elif command_type == 'set_alpha':
             return handle_set_alpha(config, float(data.get('value', 0.6)))
 
+        elif command_type == 'set_enhance':
+            return handle_set_enhance(config, bool(data.get('value', True)))
+
+        elif command_type == 'set_color_correction':
+            return handle_set_color_correction(config, bool(data.get('value', True)))
+
+        elif command_type == 'set_preprocessing':
+            return handle_set_preprocessing(config, bool(data.get('value', True)))
+
         elif command_type == 'set_input_url':
             return handle_set_input_url(config, data.get('url', ''))
 
@@ -733,6 +862,12 @@ def dispatch_command(
 
         elif command_type == 'cleanup_session':
             return handle_cleanup_session(config)
+
+        elif command_type == 'get_state':
+            return handle_get_state(config, ctx.pipeline)
+
+        elif command_type == 'keep_alive':
+            return handle_keep_alive(ctx.reset_auto_stop)
 
         elif command_type == 'shutdown':
             return handle_shutdown(ctx.shutdown_event)
