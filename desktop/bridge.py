@@ -369,10 +369,13 @@ class Bridge(QObject):
         # start_stream) which each block waiting for a server response.
         self._set_loading_message('Initializing...')
         self._awaiting_first_frame = True
-        self._client.set_quality(self._quality)
-        self._client.set_enhance(self._enhance_active)
-        self._client.set_color_correction(self._color_correction_active)
-        self._client.set_preprocessing(self._preprocessing_active)
+        # Fire config commands without waiting for responses — the server
+        # processes them in order before start_stream runs, and none of
+        # these can fail in a way that should block startup.
+        self._client._fire('set_quality', preset=self._quality)
+        self._client._fire('set_enhance', value=self._enhance_active)
+        self._client._fire('set_color_correction', value=self._color_correction_active)
+        self._client._fire('set_preprocessing', value=self._preprocessing_active)
         result = self._client.start_stream()
         if not result.get('success', True):
             self._set_loading_message('')

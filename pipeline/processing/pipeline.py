@@ -195,19 +195,35 @@ class ProcessingPipeline:
 
         Both models are lazily initialized by default, meaning the first frame
         that needs them blocks for 10-30s while 500MB+ of ONNX weights are
-        loaded into CUDA. Pre-loading them here makes the first swap instant.
+        loaded into CUDA. Pre-loading them here in parallel makes the first
+        swap instant and cuts startup time roughly in half.
         """
-        emit_status('Loading detection model...', scope='MODEL_LOAD')
-        try:
-            self._get_detector()._get_analyser()
-        except Exception as e:
-            emit_error(f"Detection model load failed: {e}", exception=e, scope='PIPELINE')
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        emit_status('Loading swap model...', scope='MODEL_LOAD')
-        try:
+        emit_status('Loading models...', scope='MODEL_LOAD')
+
+        def _load_detector() -> str:
+            self._get_detector()._get_analyser()
+            return 'detection'
+
+        def _load_swapper() -> str:
             self._get_swapper()._get_swapper()
-        except Exception as e:
-            emit_error(f"Swap model load failed: {e}", exception=e, scope='PIPELINE')
+            return 'swap'
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = {
+                pool.submit(_load_detector): 'detection',
+                pool.submit(_load_swapper): 'swap',
+            }
+            for future in as_completed(futures):
+                label = futures[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    emit_error(
+                        f"{label.title()} model load failed: {e}",
+                        exception=e, scope='PIPELINE',
+                    )
 
         emit_status('Models ready', scope='MODEL_LOAD')
 

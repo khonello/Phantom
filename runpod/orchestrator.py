@@ -31,8 +31,11 @@ Networking:
   - Only port 9000/tcp is exposed on the pod (no 8888 — avoids JupyterLab init)
 
 GPU selection:
-  - Auto-discovery (default): filters RunPod GPUs by RUNPOD_MIN_VRAM and RUNPOD_MAX_PRICE, cheapest first
+  - Auto-discovery (default): filters RunPod GPUs by RUNPOD_MIN_VRAM, RUNPOD_MAX_PRICE, and
+    architecture compatibility (must be <= _MAX_SUPPORTED_COMPUTE_CAP), cheapest first
   - Manual override: set RUNPOD_GPU_TYPES to try specific GPUs in order
+  - Architecture filter: GPUs with compute capability exceeding the image's PyTorch/ONNX
+    support (e.g. Blackwell sm_120 on an sm_90 image) are automatically excluded
 
 Key gotchas (see runpod/TROUBLESHOOTING.md for full details):
   - GPU display names are resolved to API IDs via GraphQL (create_pod needs the ID)
@@ -351,6 +354,72 @@ _DEFAULT_MIN_VRAM = 16
 # Maximum per-hour price (USD)
 _DEFAULT_MAX_PRICE = 1.00
 
+# ── GPU architecture compatibility ───────────────────────────────────────────
+# RunPod's API does not expose compute capability, so we maintain a static
+# mapping of GPU ID substrings to CUDA compute capability (major.minor).
+# The image's PyTorch/ONNX Runtime supports up to this architecture:
+_MAX_SUPPORTED_COMPUTE_CAP = (9, 0)  # sm_90 (Hopper) — update when image upgrades
+
+# Map GPU ID keywords to compute capability. Checked via substring match
+# against the RunPod GPU ID (e.g. "NVIDIA GeForce RTX 4090").
+# Only architectures at risk of exceeding _MAX_SUPPORTED_COMPUTE_CAP need
+# entries — older GPUs that are guaranteed compatible can be omitted.
+_GPU_COMPUTE_CAP = {
+    # Blackwell (sm_120 / compute 12.0)
+    "RTX 5090": (12, 0),
+    "RTX 5080": (12, 0),
+    "RTX 5070": (12, 0),
+    "RTX PRO 6000": (12, 0),
+    "RTX PRO 4500": (12, 0),
+    "B200": (12, 0),
+    "B100": (12, 0),
+    "GB200": (12, 0),
+    "GB202": (12, 0),
+    # Hopper (sm_90 / compute 9.0) — compatible with current image
+    "H100": (9, 0),
+    "H200": (9, 0),
+    # Ada Lovelace (sm_89 / compute 8.9) — compatible
+    "RTX 4090": (8, 9),
+    "RTX 4080": (8, 9),
+    "RTX 4070": (8, 9),
+    "RTX 4060": (8, 9),
+    "RTX 6000 Ada": (8, 9),
+    "L40": (8, 9),
+    "L4": (8, 9),
+    # Ampere (sm_86 / compute 8.6) — compatible
+    "RTX 3090": (8, 6),
+    "RTX 3080": (8, 6),
+    "RTX A6000": (8, 6),
+    "RTX A5000": (8, 6),
+    "RTX A4000": (8, 6),
+    "A40": (8, 6),
+    # Ampere datacenter (sm_80 / compute 8.0) — compatible
+    "A100": (8, 0),
+    "A30": (8, 0),
+}
+
+
+def _get_gpu_compute_cap(gpu_id: str) -> Optional[Tuple[int, int]]:
+    """Return (major, minor) compute capability for a GPU ID, or None if unknown."""
+    for keyword, cap in _GPU_COMPUTE_CAP.items():
+        if keyword in gpu_id:
+            return cap
+    return None
+
+
+def _is_gpu_compatible(gpu_id: str) -> bool:
+    """Check if a GPU's architecture is supported by the current image.
+
+    Returns True if the GPU is compatible or if its architecture is unknown
+    (unknown GPUs are allowed through — RunPod will fail at pod creation if
+    truly incompatible, and we don't want to block GPUs we simply haven't
+    mapped yet).
+    """
+    cap = _get_gpu_compute_cap(gpu_id)
+    if cap is None:
+        return True  # unknown GPU — let it through
+    return cap <= _MAX_SUPPORTED_COMPUTE_CAP
+
 
 def _get_cheapest_price(gpu: dict) -> Optional[float]:
     """Return the cheapest available on-demand price for a GPU, or None."""
@@ -364,10 +433,11 @@ def _get_cheapest_price(gpu: dict) -> Optional[float]:
 
 def _discover_gpus(api_key: str, min_vram: int, max_price: float) -> List[Tuple[str, str, int, float]]:
     """
-    Auto-discover GPUs matching VRAM and price criteria.
+    Auto-discover GPUs matching VRAM, price, and architecture criteria.
 
-    Queries all RunPod GPU types, filters by minimum VRAM and maximum
-    per-hour price, then sorts cheapest first.
+    Queries all RunPod GPU types, filters by minimum VRAM, maximum
+    per-hour price, and compute capability (must be <= _MAX_SUPPORTED_COMPUTE_CAP),
+    then sorts cheapest first.
 
     Returns:
         List of (display_name, gpu_id, vram_gb, price) tuples, sorted by price.
@@ -375,6 +445,7 @@ def _discover_gpus(api_key: str, min_vram: int, max_price: float) -> List[Tuple[
     all_gpus = _get_gpu_types(api_key)
 
     candidates = []
+    skipped_arch = []
     for gpu in all_gpus:
         gpu_id = gpu.get("id")
         name = gpu.get("displayName")
@@ -391,7 +462,18 @@ def _discover_gpus(api_key: str, min_vram: int, max_price: float) -> List[Tuple[
         if price is None or price > max_price:
             continue
 
+        # Filter by architecture compatibility
+        if not _is_gpu_compatible(gpu_id):
+            cap = _get_gpu_compute_cap(gpu_id)
+            skipped_arch.append((name, cap))
+            continue
+
         candidates.append((name, gpu_id, vram, price))
+
+    if skipped_arch:
+        names = ", ".join("{} (sm_{}{})".format(n, c[0], c[1]) for n, c in skipped_arch)
+        print("  Skipped (arch > sm_{}{}): {}".format(
+            _MAX_SUPPORTED_COMPUTE_CAP[0], _MAX_SUPPORTED_COMPUTE_CAP[1], names))
 
     # Sort by price ascending (cheapest first), then by VRAM descending as tiebreaker
     candidates.sort(key=lambda c: (c[3], -c[2]))
@@ -456,12 +538,19 @@ def _resolve_gpu_candidates(api_key: str) -> List[Tuple[str, str, int, float]]:
         candidates = []
         for name in (g.strip() for g in gpu_types_raw.split(",") if g.strip()):
             gpu = gpu_lookup.get(name)
-            if gpu:
-                vram = gpu.get("memoryInGb") or 0
-                price = _get_cheapest_price(gpu) or 0.0
-                candidates.append((name, gpu["id"], vram, price))
-            else:
+            if not gpu:
                 print("  WARNING: '{}' not found in RunPod GPU list — skipping".format(name))
+                continue
+            gpu_id = gpu["id"]
+            if not _is_gpu_compatible(gpu_id):
+                cap = _get_gpu_compute_cap(gpu_id)
+                print("  WARNING: '{}' (sm_{}{}) not compatible with image (max sm_{}{}) — skipping".format(
+                    name, cap[0], cap[1],  # type: ignore[index]
+                    _MAX_SUPPORTED_COMPUTE_CAP[0], _MAX_SUPPORTED_COMPUTE_CAP[1]))
+                continue
+            vram = gpu.get("memoryInGb") or 0
+            price = _get_cheapest_price(gpu) or 0.0
+            candidates.append((name, gpu_id, vram, price))
 
         if not candidates:
             print("ERROR: none of your preferred GPUs matched RunPod's GPU list.")
@@ -784,6 +873,12 @@ def _shell_run(channel: object, command: str, label: str) -> None:
             clean = _strip_ansi(line).rstrip()
             if _SENTINEL in clean:
                 code_str = clean.split(_SENTINEL)[-1].strip()
+                # If the shell echoed our command back (stty -echo not yet
+                # effective), the line contains literal '$?' instead of the
+                # actual exit code.  Skip it and keep reading — the real
+                # sentinel with a numeric code will follow.
+                if '$' in code_str:
+                    continue
                 try:
                     exit_code = int(code_str)
                 except ValueError as exc:
@@ -805,10 +900,11 @@ def _shell_run(channel: object, command: str, label: str) -> None:
         clean = _strip_ansi(buf).rstrip()
         if _SENTINEL in clean:
             code_str = clean.split(_SENTINEL)[-1].strip()
-            try:
-                exit_code = int(code_str)
-            except ValueError:
-                exit_code = 1
+            if '$' not in code_str:
+                try:
+                    exit_code = int(code_str)
+                except ValueError:
+                    exit_code = 1
 
     if exit_code is None:
         print("WARNING: '{}' finished without exit code — assuming success.".format(label))
@@ -1010,7 +1106,8 @@ def cmd_gpus() -> None:
 
     # Print eligible GPUs first
     if auto_candidates:
-        print("Eligible GPUs (>= {}GB VRAM, <= ${:.2f}/hr) — sorted by price:".format(min_vram, max_price))
+        print("Eligible GPUs (>= {}GB VRAM, <= ${:.2f}/hr, <= sm_{}{}) — sorted by price:".format(
+            min_vram, max_price, _MAX_SUPPORTED_COMPUTE_CAP[0], _MAX_SUPPORTED_COMPUTE_CAP[1]))
         for name, gpu_id, vram, price in auto_candidates:
             marker = " *" if name in manual_names else "  "
             print("{}  {:.<30s} {:>3}GB  ${:.2f}/hr  [{}]".format(
@@ -1018,11 +1115,36 @@ def cmd_gpus() -> None:
     else:
         print("No GPUs match criteria (>= {}GB VRAM, <= ${:.2f}/hr)".format(min_vram, max_price))
 
-    # Print all others
-    others = [g for g in all_gpus if g.get("id") not in auto_ids]
+    # Separate incompatible GPUs from other ineligible ones
+    incompatible = []
+    others = []
+    for gpu in all_gpus:
+        gpu_id = gpu.get("id", "")
+        if gpu_id in auto_ids:
+            continue
+        if not _is_gpu_compatible(gpu_id):
+            incompatible.append(gpu)
+        else:
+            others.append(gpu)
+
+    if incompatible:
+        incompatible.sort(key=lambda g: g.get("displayName", ""))
+        print("\nIncompatible GPUs (arch > sm_{}{} — not supported by image):".format(
+            _MAX_SUPPORTED_COMPUTE_CAP[0], _MAX_SUPPORTED_COMPUTE_CAP[1]))
+        for gpu in incompatible:
+            name = gpu.get("displayName", "?")
+            gpu_id = gpu.get("id", "?")
+            vram = gpu.get("memoryInGb") or 0
+            cap = _get_gpu_compute_cap(gpu_id)
+            arch_str = "sm_{}{}".format(cap[0], cap[1]) if cap else "?"
+            price = _get_cheapest_price(gpu)
+            price_str = "${:.2f}/hr".format(price) if price else "no price"
+            print("  X {:.<30s} {:>3}GB  {:>10s}  {}  [{}]".format(
+                name + " ", vram, price_str, arch_str, gpu_id))
+
     others.sort(key=lambda g: g.get("displayName", ""))
     if others:
-        print("\nOther GPUs (outside criteria):")
+        print("\nOther GPUs (outside VRAM/price criteria):")
         for gpu in others:
             name = gpu.get("displayName", "?")
             vram = gpu.get("memoryInGb") or 0
@@ -1031,7 +1153,8 @@ def cmd_gpus() -> None:
             print("    {:.<30s} {:>3}GB  {:>10s}  [{}]".format(
                 name + " ", vram, price_str, gpu.get("id", "?")))
 
-    print("\nTotal: {} GPUs ({} eligible)".format(len(all_gpus), len(auto_candidates)))
+    print("\nTotal: {} GPUs ({} eligible, {} incompatible)".format(
+        len(all_gpus), len(auto_candidates), len(incompatible)))
     if manual_names:
         print("Manual override active: {}".format(", ".join(sorted(manual_names))))
 

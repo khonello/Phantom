@@ -254,7 +254,8 @@ python runpod/orchestrator.py datacenters  # list all datacenters
 - `start` always creates a new pod; `resume` resumes an existing one
 - **Multi-datacenter fallback**: `RUNPOD_DATACENTERS=DC1:vol1,DC2:vol2` — tries all GPUs in DC1 first, falls back to DC2 with its paired volume. Network volumes are datacenter-local, so each datacenter needs its own volume.
 - Legacy single-datacenter config (`RUNPOD_DATACENTER_ID` + `RUNPOD_NETWORK_VOLUME_ID`) still works as fallback
-- **GPU auto-discovery**: By default, queries RunPod API for GPUs matching `RUNPOD_MIN_VRAM` (default 16GB) and `RUNPOD_MAX_PRICE` (default $1.00/hr), tries cheapest first. Set `RUNPOD_GPU_TYPES` to override with specific GPUs.
+- **GPU auto-discovery**: By default, queries RunPod API for GPUs matching `RUNPOD_MIN_VRAM` (default 16GB), `RUNPOD_MAX_PRICE` (default $1.00/hr), and architecture compatibility, tries cheapest first. Set `RUNPOD_GPU_TYPES` to override with specific GPUs.
+- **Architecture filtering**: GPUs whose compute capability exceeds the image's PyTorch/ONNX support are automatically excluded (e.g. Blackwell sm_120 GPUs are skipped when the image only supports up to sm_90). Controlled by `_MAX_SUPPORTED_COMPUTE_CAP` in `orchestrator.py` — update when the base image upgrades.
 - GPU display names (e.g. `RTX 4090`) are resolved to API IDs via GraphQL
 - SSH uses RunPod's proxy: `{podHostId}@ssh.runpod.io` (podHostId from GraphQL `machine.podHostId`, NOT from SDK `get_pod()`)
 - WebSocket uses RunPod's proxy: `wss://{pod_id}-9000.proxy.runpod.net/ws`

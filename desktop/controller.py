@@ -244,6 +244,21 @@ class PipelineClient:
 
     # ── Send / receive ────────────────────────────────────────────────────────
 
+    def _fire(self, action: str, **kwargs: Any) -> None:
+        """Send a command without waiting for a response.
+
+        Used for config-only commands (set_quality, set_enhance, etc.) where
+        the caller doesn't need the server's reply before proceeding.
+        """
+        with self._ws_lock:
+            ws = self._ws
+        if ws is None:
+            return
+        try:
+            ws.send(json.dumps({'action': action, **kwargs}))
+        except Exception:
+            pass  # best-effort — start_stream will catch real failures
+
     def _send(self, action: str, **kwargs: Any) -> Dict[str, Any]:
         """
         Send a command over WebSocket and wait for response.

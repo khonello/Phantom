@@ -7,9 +7,9 @@ Window {
     id: root
     visible: true
     width: 1600
-    height: 600
+    height: 620
     minimumWidth: 1080
-    minimumHeight: 600
+    minimumHeight: 620
     title: "Phantom"
     color: "#09090e"
 
