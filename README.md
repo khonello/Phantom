@@ -184,6 +184,17 @@ FFmpeg building blocks exist in `pipeline/io/ffmpeg.py`; they are not yet wired
 in. This also means the CI end-to-end test and the desktop VIDEO mode do not
 currently pass.
 
+### Where this is going
+
+Today the pipeline is single-tenant: one process, one session, provisioned by
+hand through `runpod/orchestrator.py`. The intended shape is a session platform —
+customers buy time, a scheduler places sessions on pooled GPUs across regions,
+and failures are absorbed rather than passed on.
+
+[docs/SESSION_PLANE.md](docs/SESSION_PLANE.md) assesses that architecture against
+the code as it stands: what already exists, what blocks GPU session packing, and
+a staged path. It is an assessment, not a commitment — nothing in it is built.
+
 ## Development
 
 ### Project Structure
