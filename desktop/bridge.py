@@ -13,6 +13,7 @@ from PySide6.QtGui import QPixmap, QImage, QPainter
 from PySide6.QtQuick import QQuickPaintedItem
 
 from pipeline.io.ffmpeg import is_image
+from pipeline.api.schema import PRESETS
 from desktop.controller import PipelineClient
 from desktop.audio import AudioCapture, AudioPlayback, JitterBuffer
 from desktop.voice import VoiceTransformer
@@ -503,7 +504,7 @@ class Bridge(QObject):
             self._set_embedding_pending(True)
             self._set_status(f'uploading {len(valid)} images...')
         else:
-            self._set_status(f'uploading face...')
+            self._set_status('uploading face...')
 
         def _do_upload(file_paths: List[str]) -> None:
             import base64
@@ -948,12 +949,24 @@ class Bridge(QObject):
     # Size of the capture_ts header prepended to binary frames (int64 nanoseconds)
     _TS_HEADER_SIZE = 8
 
-    # Capture settings per quality preset: (width, height, fps, jpeg_quality)
-    _QUALITY_CAPTURE: Dict[str, tuple] = {
-        'fast':       (480, 270,  15, 60),
-        'optimal':    (640, 360,  20, 70),
-        'production': (960, 540,  30, 85),
-    }
+    def _capture_settings(self) -> Tuple[int, int, int, int]:
+        """
+        Capture settings for the current quality preset.
+
+        Read from `pipeline.api.schema.PRESETS` rather than a table of our own,
+        so the desktop's webcam and the pipeline's own VideoCapture loop cannot
+        disagree about what a preset means.
+
+        Returns:
+            (width, height, fps, jpeg_quality)
+        """
+        preset = PRESETS.get(self._quality) or PRESETS['optimal']
+        return (
+            int(preset['capture_width']),
+            int(preset['capture_height']),
+            int(preset['capture_fps']),
+            int(preset['jpeg_quality']),
+        )
 
     def _run_webcam(self, webcam_index: int) -> None:
         cap = cv2.VideoCapture(webcam_index)
@@ -963,10 +976,12 @@ class Bridge(QObject):
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
         # Apply capture settings for the current quality preset
-        w, h, fps, _ = self._QUALITY_CAPTURE.get(self._quality, self._QUALITY_CAPTURE['optimal'])
+        w, h, fps, jpeg_quality = self._capture_settings()
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
         cap.set(cv2.CAP_PROP_FPS, fps)
+
+        encode_params = [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality]
 
         while not self._webcam_stop.is_set():
             ret, frame = cap.read()
@@ -978,8 +993,7 @@ class Bridge(QObject):
             webcam_buffer.update_from_numpy(frame)
 
             if self._ws_push_active.is_set():
-                _, _, _, jpeg_quality = self._QUALITY_CAPTURE.get(self._quality, self._QUALITY_CAPTURE['optimal'])
-                _, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
+                _, jpeg = cv2.imencode('.jpg', frame, encode_params)
                 header = struct.pack('<q', capture_ts)
                 self._client.send_frame(header + jpeg.tobytes())
 

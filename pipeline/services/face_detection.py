@@ -68,27 +68,53 @@ class FaceDetector:
         """
         self.config = config
         self._analyser: Optional[Any] = None
+        self._prepared_size: int = 0
         self._lock = threading.Lock()
+
+    # Detector input is square and must be a multiple of 32 for the retinaface
+    # backbone's stride. Values outside this range are not useful: below 256 the
+    # detector starts missing faces at ordinary call framing, and above 640 it
+    # costs more than it finds.
+    _DET_MIN = 256
+    _DET_MAX = 640
+    _DET_STRIDE = 32
+
+    def _resolve_det_size(self) -> int:
+        """Detector input size from config, snapped to a valid value."""
+        requested = int(getattr(self.config, 'det_size', 448) or 448)
+        clamped = max(self._DET_MIN, min(self._DET_MAX, requested))
+        return clamped - (clamped % self._DET_STRIDE)
 
     def _get_analyser(self) -> Any:
         """
         Get or create the FaceAnalysis model (lazy initialization).
 
-        Thread-safe. Model is cached after first access.
+        Thread-safe. Model is cached after first access, and re-prepared if
+        `det_size` changed — switching quality preset changes it, and the
+        prepared size is baked in at `prepare()` time.
+
         Resolves model root to RunPod volume if available.
         """
-        if self._analyser is None:
-            with self._lock:
-                if self._analyser is None:
-                    root = _get_insightface_root()
-                    self._analyser = insightface.app.FaceAnalysis(
-                        name='buffalo_l',
-                        root=root,
-                        providers=self.config.execution_providers,
-                    )
-                    # det_thresh=0.35: lower than the default 0.5 to handle
-                    # JPEG-compressed webcam frames and varied lighting.
-                    self._analyser.prepare(ctx_id=0, det_size=(640, 640), det_thresh=0.35)
+        size = self._resolve_det_size()
+
+        if self._analyser is not None and self._prepared_size == size:
+            return self._analyser
+
+        with self._lock:
+            if self._analyser is None:
+                root = _get_insightface_root()
+                self._analyser = insightface.app.FaceAnalysis(
+                    name='buffalo_l',
+                    root=root,
+                    providers=self.config.execution_providers,
+                )
+
+            if self._prepared_size != size:
+                # det_thresh=0.35: lower than the default 0.5 to handle
+                # JPEG-compressed webcam frames and varied lighting.
+                self._analyser.prepare(ctx_id=0, det_size=(size, size), det_thresh=0.35)
+                self._prepared_size = size
+
         return self._analyser
 
     def detect(self, frame: Frame) -> List[Detection]:

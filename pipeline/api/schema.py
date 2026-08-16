@@ -2,8 +2,22 @@ from typing import Any, Dict
 
 # Quality presets — single source of truth, applied via FaceSwapConfig.apply_preset().
 #
-# These trade latency against realism. Higher presets composite at a larger
-# working resolution, smooth harder, restore more, and enable occlusion masking.
+# A preset picks how much compute to spend. It does **not** change how the face
+# looks.
+#
+# That distinction is the whole design. `enhancer_weight` and `enhance_strength`
+# decide whether the output reads as a real video call or as AI, and neither one
+# costs anything to compute — the weight is a scalar model input, the strength is
+# one addWeighted. Varying them per preset meant "production" restored hardest
+# and so looked the *most* synthetic, while presenting itself as the best
+# option. They are now identical across all three presets, so an operator picking
+# a preset for their GPU cannot accidentally change the look.
+#
+# What varies is only what actually costs: capture resolution and frame rate,
+# detector input size, compositing working resolution, and whether the occluder
+# runs. Landmark and pixel EMA vary with frame rate, since smoothing across
+# frames means smoothing across time — the same factor at 15fps reaches twice as
+# far back as it does at 30fps.
 #
 # Deliberately absent: `enhance` and `color_correction`. Both have explicit
 # toggles in the desktop header, and a preset must not silently undo something
@@ -14,37 +28,60 @@ from typing import Any, Dict
 # blending is handled by the compositor's mask. The fields still exist on
 # FaceSwapConfig so the `set_blend` / `set_alpha` API commands keep working,
 # but nothing reads them.
+
+# Look parameters — identical in every preset. Change these to change the look
+# globally; override per-run with --enhancer-weight / --enhance-strength or the
+# set_realism command.
+_LOOK: Dict[str, Any] = {
+    'enhancer_weight': 0.7,   # CodeFormer fidelity: 0=most restoration, 1=closest to input
+    'enhance_strength': 0.7,  # how much of the restored face to keep
+    'grain': True,            # cheap, and the biggest believability win per ms
+}
+
 PRESETS: Dict[str, Dict[str, Any]] = {
     'fast': {
-        'alpha': 0.7,             # lighter landmark smoothing
+        **_LOOK,
+        # Capture
+        'capture_width': 480,
+        'capture_height': 270,
+        'capture_fps': 15,
+        'jpeg_quality': 60,
+        # Compute
+        'det_size': 320,          # detector input; runs every frame, so this
+                                  # is the single largest cost in the loop
         'aligned_size': 192,      # cheaper compositing
-        'enhancer_weight': 0.8,   # lean to fidelity — least restoration work
-        'enhance_strength': 0.5,
-        'temporal_alpha': 0.7,
         'occluder': False,        # skips an ONNX pass per frame
-        'grain': True,            # cheap, and the biggest believability win
+        # Smoothing, scaled to frame rate
+        'alpha': 0.7,
+        'temporal_alpha': 0.7,
         'buffer_size': 3,
         'warmup_frames': 3,
     },
     'optimal': {
-        'alpha': 0.6,
+        **_LOOK,
+        'capture_width': 640,
+        'capture_height': 360,
+        'capture_fps': 20,
+        'jpeg_quality': 70,
+        'det_size': 448,
         'aligned_size': 256,
-        'enhancer_weight': 0.7,
-        'enhance_strength': 0.7,
-        'temporal_alpha': 0.6,
         'occluder': True,
-        'grain': True,
+        'alpha': 0.6,
+        'temporal_alpha': 0.6,
         'buffer_size': 4,
         'warmup_frames': 5,
     },
     'production': {
-        'alpha': 0.5,             # heaviest landmark smoothing
+        **_LOOK,
+        'capture_width': 960,
+        'capture_height': 540,
+        'capture_fps': 30,
+        'jpeg_quality': 85,
+        'det_size': 640,
         'aligned_size': 320,
-        'enhancer_weight': 0.6,   # allow more restoration
-        'enhance_strength': 0.8,
-        'temporal_alpha': 0.5,
         'occluder': True,
-        'grain': True,
+        'alpha': 0.5,
+        'temporal_alpha': 0.5,
         'buffer_size': 5,
         'warmup_frames': 5,
     },
@@ -96,7 +133,7 @@ EVENTS: Dict[str, Dict[str, Any]] = {
 # ============================================================================
 # Typed message envelopes for future WebSocket API server (Phase 4)
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 

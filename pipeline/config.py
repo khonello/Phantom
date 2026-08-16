@@ -47,6 +47,18 @@ class FaceSwapConfig:
     buffer_size: int = 4
     warmup_frames: int = 5
 
+    # Capture and encode, driven by the quality preset. Shared by the pipeline's
+    # own VideoCapture loop and the desktop's webcam thread, so local and push
+    # mode capture identically.
+    capture_width: int = 640
+    capture_height: int = 360
+    capture_fps: int = 20
+    jpeg_quality: int = 70
+
+    # Detector input size. Detection runs on every frame, so this is the single
+    # largest per-frame cost — 320 is a quarter the pixels of 640.
+    det_size: int = 448
+
     # Realism / compositing
     enhancer_model: str = 'codeformer'  # 'codeformer' (ONNX) or 'gfpgan' (torch)
     enhancer_weight: float = 0.7    # CodeFormer fidelity: 0 = heaviest restoration

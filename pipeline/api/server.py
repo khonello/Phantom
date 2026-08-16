@@ -22,11 +22,10 @@ import struct
 import sys
 import threading
 import time
-from typing import Any, Dict, Optional, Set, Tuple
+from typing import Any, Dict, Optional, Set
 
 from pipeline.config import FaceSwapConfig, CONFIG
 from pipeline.events import BUS, FRAME_READY, DETECTION, STATUS_CHANGED, PIPELINE_STARTED, PIPELINE_STOPPED, WARNING
-from pipeline.api.schema import ResponseMessage
 from pipeline.api.handlers import dispatch_command, HandlerContext
 from pipeline.processing.pipeline import ProcessingPipeline
 from pipeline.logging import emit_status, emit_error
@@ -555,8 +554,13 @@ class WebSocketAPIServer:
         """
         import cv2
         try:
+            # Preset-driven rather than fixed at 85: this is the return leg the
+            # operator actually watches, and on `fast` a fixed 85 spent latency
+            # and bandwidth re-encoding a 480x270 frame far above the quality it
+            # was captured at.
+            quality = int(getattr(self.config, 'jpeg_quality', 70) or 70)
             success, jpeg_data = cv2.imencode(
-                '.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85]
+                '.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality]
             )
             if success:
                 header = struct.pack('<q', capture_ts)

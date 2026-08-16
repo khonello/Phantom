@@ -439,9 +439,13 @@ class ProcessingPipeline:
         cap = cv2.VideoCapture(input_source)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         if not self.config.input_url:
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 960)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 540)
-            cap.set(cv2.CAP_PROP_FPS, 30)
+            # Driven by the quality preset, matching what the desktop requests
+            # of its own webcam in push mode. Previously hardcoded to 960x540
+            # at 30fps, which meant a local run always paid production capture
+            # cost no matter which preset was selected.
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.capture_width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.capture_height)
+            cap.set(cv2.CAP_PROP_FPS, self.config.capture_fps)
 
         frame_count = 0
         seq = 0
