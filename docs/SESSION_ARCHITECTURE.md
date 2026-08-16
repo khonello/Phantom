@@ -70,6 +70,39 @@ A session stays active until either:
 This is a **long-lived compute session**, deliberately not the conventional
 `upload → inference → result` API.
 
+### Payment
+
+**Bitcoin over the Lightning Network.** At 0.2% it removes what would otherwise
+be the second-largest cost line: a card charge on a $10 PAYG purchase costs
+$0.59, more than the compute it pays for. On-chain Bitcoin is unusable at the
+small tiers — a ~$3 network fee is 30% of a PAYG purchase — so Lightning is the
+primary rail, with on-chain viable only as a Day Pass fallback.
+
+Three consequences the architecture has to absorb:
+
+- **Payments are irreversible.** There is no chargeback to fear, which suits a
+  face-swapping product, but there is also no refund mechanism worth relying on:
+  a Lightning refund requires the customer to supply an invoice, which they may
+  never do.
+- **Invoices are USD-denominated and short-lived.** Quote in sats against a USD
+  price with a expiry of roughly fifteen minutes, and decide explicitly whether
+  revenue is auto-converted or held. Holding is an unhedged position on the
+  entire top line.
+- **Liquidity is operational work.** Receiving over Lightning needs inbound
+  capacity and a node that stays online. A managed provider costs about 1% and
+  removes that; self-hosting via BTCPay costs about 0.2% and adds channel
+  management. Start managed, move in-house if volume justifies it.
+
+> **Annotation — irreversible payment argues for a credit balance, not
+> per-purchase sessions.** §11 recommends crediting interrupted minutes back to
+> the customer. Under Bitcoin, refunding *money* is painful and refunding *time*
+> is trivial — so purchases should top up a per-customer balance of hours, and
+> sessions should draw that balance down. PAYG's "full hour deducted at session
+> start" then becomes a balance deduction rather than a charge, packs are simply
+> larger top-ups, and an interrupted session credits hours back with no payment
+> rail involved at all. This is both simpler and the only refund story that
+> works on an irreversible rail.
+
 > **Annotation — three things the tiers imply for the architecture.**
 >
 > **`max_sessions` becomes a pricing input, not just a capacity number.** A

@@ -139,21 +139,28 @@ many times rather than once.
 
 ### Two consequences worth acting on
 
-**Payment fees now exceed GPU cost on PAYG.** At Stripe's 2.9% + $0.30, a $10
-PAYG charge costs $0.59 to collect against $0.50 of packed GPU.
+**Payment is Bitcoin over Lightning**, which removes what would otherwise be
+the second-largest cost line. On cards, a $10 PAYG charge costs $0.59 to collect
+against $0.50 of packed GPU — the fee would exceed the compute.
 
 ```
-  tier              fee   fee %    GPU 2x
-  ────────────────────────────────────────
-  PAYG            $0.59    5.9%     $0.50    ← fee > compute
-  4-Hour Pack     $1.32    3.8%     $2.00
-  10-Hour Pack    $2.33    3.3%     $5.00
-  Day Pass        $3.20    3.2%    $12.00
+  rail                PAYG $10        Day Pass $100
+  ─────────────────────────────────────────────────
+  Stripe card      $0.59  (5.9%)     $3.20  (3.2%)
+  BTC on-chain     $3.00 (30.0%)     $3.00  (3.0%)   ← unusable at $10
+  BTC Lightning    $0.02  (0.2%)     $0.20  (0.2%)   ← chosen
 ```
 
-This validates the tier structure independently of the discounts: moving
-customers up the ladder cuts payment overhead from 5.9% to 3.2%. It also argues
-against ever going below $10 as a minimum purchase.
+Switching PAYG from cards to Lightning saves $0.57 per session — **more than
+packing 1→2 saves ($0.50)**, for an integration rather than a refactor. It is
+the cheapest margin win available.
+
+Two knock-on effects worth noting. Fee overhead is now flat at 0.2% across all
+tiers, so **the tier ladder can no longer be justified on payment costs** — it
+rests on commitment and on utilisation, which is fine, but the earlier argument
+that packs reduce payment overhead no longer applies. And on-chain remains
+viable only for the Day Pass, so Lightning cannot be the sole rail if you want
+an on-chain fallback at the top tier.
 
 **PAYG's "full hour deducted at session start" is a gift to the architecture.**
 Once the hour is paid, holding that customer's worker for the remainder of it
