@@ -80,10 +80,10 @@ primary rail, with on-chain viable only as a Day Pass fallback.
 
 Three consequences the architecture has to absorb:
 
-- **Payments are irreversible.** There is no chargeback to fear, which suits a
-  face-swapping product, but there is also no refund mechanism worth relying on:
-  a Lightning refund requires the customer to supply an invoice, which they may
-  never do.
+- **Payments are irreversible, and there is no refund system.** No chargeback
+  to fear, which suits a face-swapping product. Refunds are not a product
+  feature: if one is genuinely demanded, Bitcoin is sent manually to the
+  customer's address. That is an exception handled by a person, not a code path.
 - **Invoices are USD-denominated and short-lived.** Quote in sats against a USD
   price with a expiry of roughly fifteen minutes, and decide explicitly whether
   revenue is auto-converted or held. Holding is an unhedged position on the
@@ -93,15 +93,26 @@ Three consequences the architecture has to absorb:
   removes that; self-hosting via BTCPay costs about 0.2% and adds channel
   management. Start managed, move in-house if volume justifies it.
 
-> **Annotation — irreversible payment argues for a credit balance, not
-> per-purchase sessions.** §11 recommends crediting interrupted minutes back to
-> the customer. Under Bitcoin, refunding *money* is painful and refunding *time*
-> is trivial — so purchases should top up a per-customer balance of hours, and
-> sessions should draw that balance down. PAYG's "full hour deducted at session
-> start" then becomes a balance deduction rather than a charge, packs are simply
-> larger top-ups, and an interrupted session credits hours back with no payment
-> rail involved at all. This is both simpler and the only refund story that
-> works on an irreversible rail.
+> **Annotation — a balance of hours is the right model, and it is not a refund
+> mechanism.** Two distinct things are easy to conflate here:
+>
+> - **Paying money out** — not supported. Manual, exceptional, handled by a
+>   person.
+> - **Returning unused time** — putting hours back on a balance the customer
+>   already holds. No payment rail, no payout, no reversal.
+>
+> Purchases should top up a per-customer balance of hours, and sessions draw it
+> down. PAYG's "full hour deducted at session start" becomes a balance
+> deduction; packs are larger top-ups. This is simpler than per-purchase
+> accounting regardless of the refund position.
+>
+> It also makes the compensation question cheap to answer. A Day Pass that dies
+> at hour 2 of 24 leaves 22 hours owed. Sending that back as Bitcoin is a
+> **$91.67 payout**; returning it to the balance costs the GPU time to serve it
+> — about **$11 at two sessions per card**, eight times less, and the customer
+> stays rather than leaves. Whether to do that automatically is a policy
+> decision, but the mechanism should exist because it is far cheaper than the
+> alternative it replaces.
 
 > **Annotation — three things the tiers imply for the architecture.**
 >
@@ -448,7 +459,8 @@ paths, and the venv lives on the network volume so it survives pod restarts.
 > come back. The machinery is still what *detects* the failure; what it should
 > drive is (a) a warm pre-loaded standby slot, since recovery time is dominated
 > by model loading, (b) scheduler bias toward stability over price, and
-> (c) automatic billing credit for interrupted minutes.
+> (c) returning interrupted time to the customer's hour balance — not a
+> payout, and roughly eight times cheaper than one (see §1).
 
 ---
 

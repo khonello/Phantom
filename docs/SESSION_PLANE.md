@@ -571,14 +571,17 @@ it can land as soon as stage 3 does.
 
 ### 6. Resilience
 
-*Ships: sessions that survive infrastructure failure, or refund themselves.*
+*Ships: sessions that survive infrastructure failure, or return the time.*
 
 - Worker → backend heartbeat and session leases, so a dead GPU stops being
   advertised as available.
 - Watchdog around the frame loop specifically — **progress-based, not
   liveness-based**, because the CUDA-hang case leaves the process responsive.
 - Retry classification and bounded attempts, as proposed.
-- Automatic credit for interrupted minutes.
+- Return interrupted time to the customer's hour balance. Not a refund —
+  refunds are manual and exceptional. Returning 22 unused Day Pass hours to a
+  balance costs ~$11 of GPU against a $91.67 Bitcoin payout, and keeps the
+  customer.
 
 ### 7. Provider abstraction
 
