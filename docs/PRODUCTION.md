@@ -132,7 +132,8 @@ pip install -r requirements-pipeline-gpu.txt
 # Download face swap model
 mkdir -p pipeline/models
 # Place inswapper_128.onnx in pipeline/models/
-# Place GFPGANv1.4.pth in pipeline/models/ (optional, for enhancement)
+# codeformer.onnx and dfl_xseg.onnx download automatically on first use
+# GFPGANv1.4.pth only needed for --enhancer-model gfpgan (manual download)
 ```
 
 ---
@@ -227,13 +228,18 @@ vastai show instance <ID> | grep ports
 
 ## Quality Preset by GPU
 
-| GPU | VRAM | Recommended Preset | GFPGAN |
+| GPU | VRAM | Recommended Preset | Notes |
 |---|---|---|---|
-| RTX 3080 | 10GB | `optimal` | interval 10+ |
-| RTX 3090 | 24GB | `optimal` or `production` | interval 5 |
-| RTX 4090 | 24GB | `production` | interval 1 |
+| RTX 3080 | 10GB | `fast` or `optimal` | Drop the occluder if frames back up |
+| RTX 3090 | 24GB | `optimal` | Comfortable headroom |
+| RTX 4090 | 24GB | `optimal` or `production` | |
 
-Start with `optimal`. Switch to `production` if you have headroom and want maximum quality.
+Start with `optimal`. Switch to `production` if you have headroom.
+
+Note `production` is not simply "better": it composites at 320px and restores
+harder, which on a video call can push the face past believable and into
+noticeably-cleaner-than-the-room. Judge it on real footage rather than assuming
+the highest preset wins — see [ENHANCEMENT.md](ENHANCEMENT.md).
 
 ---
 

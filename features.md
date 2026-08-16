@@ -6,9 +6,16 @@ Comprehensive feature reference for the Phantom face-swapping pipeline, desktop 
 
 ## Face Processing
 
+The design target is **what a real video call looks like** — a face carrying
+sensor noise, compression, and ordinary imperfection. Not a high-resolution
+portrait, and not the poreless "beautified" look that reads as AI instantly.
+Every stage below is tuned toward that, and several deliberately *add* back
+imperfection that the models remove.
+
 ### Face Detection
 - InsightFace FaceAnalysis (buffalo_l model) with configurable detection threshold (0.35)
 - Single-face or multi-face detection modes
+- Runs on **every frame**, so the swap is always warped with current landmarks
 - No-face streak detection with warnings after 3 consecutive empty frames
 - Thread-safe lazy initialization with execution provider selection (CUDA, CPU, ROCm, DML)
 
@@ -16,68 +23,185 @@ Comprehensive feature reference for the Phantom face-swapping pipeline, desktop 
 - ONNX-based inswapper_128 model
 - Multiple source images with embedding averaging for improved likeness
 - Pre-computed `.npy` embedding file support
+- `swap_aligned()` returns the raw aligned crop plus its affine (`paste_back=False`),
+  handing compositing to `FaceCompositor` instead of letting the model paste
+- Falls back to InsightFace's own compositing if a build cannot supply the affine
 - Model resolution priority: RunPod network volume → local `models/` → working directory
 
-### Face Tracking
-- Three tracker algorithms: CSRT (accurate), KCF (fast), MOSSE (ultra-fast)
-- Exponential Moving Average (EMA) keypoint smoothing with configurable alpha
-- Automatic redetection on interval or tracker failure
-- Fallback to raw detection when tracker is unavailable
+### Landmark Stabilization
+- `LandmarkStabilizer` — EMA on `kps` (drives the swap warp) and
+  `landmark_2d_106` (drives the mask), smoothed together so the two never disagree
+- Replaces the previous CSRT/KCF/MOSSE correlation trackers. With detection on
+  every frame a tracker only added latency and a stale warp
+- Resets on face loss (3 consecutive misses) and on large centroid jumps, so
+  re-acquisition does not interpolate from a stale position
+- Bypassed in multi-face mode, where per-frame detection order is not stable
 
-### Face Enhancement
-- GFPGAN-based face restoration (synchronous, GPU-optimized)
-- Independent toggle — enable/disable at any time from desktop or API
-- Graceful fallback if GFPGAN or model files are unavailable
-- torchvision >= 0.18 compatibility shim
+### Face Restoration
+Two backends, selected by `enhancer_model`:
 
-### Blending
-- Configurable face blend ratio (0–1)
-- Luminance-adaptive blending for natural lighting match
+- **CodeFormer** (default) — ONNX, runs on the onnxruntime session the swapper
+  already needs, so it adds no dependency. Model downloads on first use.
+  Exposes a **fidelity weight**: `0.0` restores hardest and hallucinates most,
+  `1.0` stays closest to the input.
+- **GFPGAN** — the previous backend, kept for comparison on real footage.
+  Needs torch + the `gfpgan` package, plus a torchvision ≥ 0.18 shim.
+
+CodeFormer is the default because GFPGAN v1.4 restores toward a beautified,
+poreless look with no way to dial it back. `enhance_strength` then blends only
+part of the restored face back in, keeping some of the input's imperfection.
+
+Both are trained on **FFHQ-framed 512×512 crops** and rely on features sitting
+where FFHQ puts them, so the compositor warps into FFHQ space around the restore
+call rather than handing them the swapper's tighter arcface crop.
+
+### Compositing
+Everything after the swap happens in **aligned face space**, not on whole frames
+(`pipeline/processing/compositor.py`). Per face:
+
+1. **Restore** — in FFHQ space, blended back at `enhance_strength`
+2. **Temporal EMA** — on aligned pixels, gated by measured motion so it releases
+   when the subject moves and cannot ghost
+3. **Colour match** — LAB transfer sampled *inside the mask only*, ramped by
+   colour distance so it never snaps on and off between frames
+4. **Detail match** — high-frequency band scaled to the target's, correcting in
+   both directions (the swap is softer before restoration, sharper after)
+5. **Warp back** — into a region of interest, so cost scales with face size
+6. **Composite** — soft alpha, feathered in both aligned and frame space
+7. **Grain** — monochrome sensor noise matched to the surrounding frame
+
+Geometry uses a closed-form Umeyama similarity fit, not
+`cv2.estimateAffinePartial2D` — the OpenCV estimators are randomized, and
+anything that varies frame to frame feeds straight back into shimmer.
+
+### Masking
+`FaceMasker` multiplies three terms in aligned space:
+
+- **Landmark hull** — convex hull of the 106 landmarks InsightFace already
+  computes, so it costs nothing extra and follows the real jawline rather than
+  assuming an ellipse
+- **Valid region** — the part of the crop that actually sampled real pixels, so
+  faces near the frame edge do not bleed a black border into the composite
+- **Occlusion** — optional DFL XSeg segmentation, so hands, microphones and hair
+  crossing the face are not painted over with swapped skin
+
+Degrades to hull + valid-region if the XSeg model is unavailable.
 
 ---
 
 ## Pipeline Modes
 
+### Stream — Realtime
+The primary mode, and where development is focused.
+
+- Live webcam capture or network stream (RTSP/RTMP/HTTP)
+- WebSocket push mode (desktop sends JPEG frames — used on RunPod, where the
+  pod has no camera)
+- Processing chain: Detect → Stabilize → Swap → Composite → Emit
+- Frame warmup period (configurable, default 5 frames)
+- Per-stage timing diagnostics at `--log-level debug`
+- Frame drop detection and reporting
+- Parallel model warm-up on start (detection, swap, occluder, restoration)
+
 ### Batch — Image
 - Single image face swap with source embedding
-- Optional enhancement post-processing
+- Shares the **same** compositing path as stream mode, so batch and realtime
+  output cannot drift apart. Temporal smoothing is a no-op with no previous frame
 - Output to file
 
 ### Batch — Video
-- Full video processing with face detection per frame
-- Audio preservation from source
-- FPS preservation from source
-- Video encoder selection: libx264, libx265, libvpx-vp9
-- CRF quality control (0–51, default 18)
-- FFmpeg hardware acceleration (`-hwaccel auto`)
+> **Not yet implemented.** `ProcessingPipeline._process_target_batch()` handles
+> images only and reports an error for video. The FFmpeg building blocks all
+> exist in `pipeline/io/ffmpeg.py` (`extract_frames`, `create_video`,
+> `restore_audio`, `clean_temp`) but are not yet wired into the pipeline.
+>
+> Affects: desktop VIDEO mode (fully built UI-side, errors on start), the CLI
+> `-t <video>` path, and the CI end-to-end test.
+>
+> Planned once the live-call path meets its quality target. Because batch reuses
+> the same compositor, most of the work is frame iteration and audio/FPS
+> restoration rather than new image processing.
 
-### Stream — Realtime
-- Live webcam capture or network stream (RTSP/RTMP/HTTP)
-- WebSocket push mode (desktop sends JPEG frames)
-- Processing chain: Detect → Track → Swap → Enhance → Emit
-- Frame warmup period (configurable, default 5 frames)
-- Per-stage timing diagnostics (detect, track, swap, enhance, total)
-- Frame drop detection and reporting
+Settings already in place for it: audio preservation, FPS preservation, encoder
+selection (libx264, libx265, libvpx-vp9), CRF quality (0–51, default 18).
 
 ---
 
 ## Quality Presets
 
-Three presets control tracking, smoothing, and blending. Enhancement is independent.
+Three presets trade latency against realism. Defined once in
+`pipeline/api/schema.py::PRESETS`, applied via `FaceSwapConfig.apply_preset()`.
 
-| Setting            | Fast  | Optimal (default) | Production |
-|--------------------|-------|--------------------|------------|
-| Tracker            | KCF   | CSRT               | CSRT       |
-| Alpha (smoothing)  | 0.7   | 0.6                | 0.5        |
-| Blend              | 0.65  | 0.65               | 0.65       |
-| Luminance Blend    | No    | Yes                | Yes        |
-| Buffer Size        | 3     | 4                  | 5          |
-| Redetect Interval  | 30    | 30                 | 20         |
-| Warmup Frames      | 3     | 5                  | 5          |
+| Setting              | Fast  | Optimal (default) | Production |
+|----------------------|-------|-------------------|------------|
+| Landmark EMA (alpha) | 0.7   | 0.6               | 0.5        |
+| Compositing size     | 192   | 256               | 320        |
+| Fidelity weight      | 0.8   | 0.7               | 0.6        |
+| Restore strength     | 0.5   | 0.7               | 0.8        |
+| Temporal EMA         | 0.7   | 0.6               | 0.5        |
+| Occlusion masking    | Off   | On                | On         |
+| Grain matching       | On    | On                | On         |
+| Buffer size          | 3     | 4                 | 5          |
+| Warmup frames        | 3     | 5                 | 5          |
 
-**Fast**: Lower latency, less smoothing. Best for testing or low-powered GPUs.
-**Optimal**: Balanced quality and performance. Default for most use cases.
-**Production**: Maximum smoothing and stability. Best for final output or recording.
+Desktop capture settings paired with each preset (`desktop/bridge.py::_QUALITY_CAPTURE`):
+
+| Setting            | Fast    | Optimal | Production |
+|--------------------|---------|---------|------------|
+| Capture resolution | 480×270 | 640×360 | 960×540    |
+| Frame rate         | 15 fps  | 20 fps  | 30 fps     |
+| JPEG quality       | 60      | 70      | 85         |
+
+**Fast**: Lower latency, cheaper compositing, no occlusion pass. Best for testing or low-powered GPUs.
+**Optimal**: Balanced. Default for most use cases.
+**Production**: Largest working resolution, heaviest smoothing and restoration.
+
+Note the capture resolutions are deliberately modest. The target is a normal
+video call, and a 1080p-sharp face on a call is itself a tell.
+
+Presets deliberately **do not** set `enhance` or `color_correction` — both have
+explicit toggles in the desktop header, and a preset must not silently undo
+something the operator just clicked.
+
+Changing quality restarts the webcam capture device to apply the new
+resolution/fps.
+
+---
+
+## Realism Knobs
+
+| Field | Default | Effect |
+|-------|---------|--------|
+| `enhance` | `True` | Face restoration on/off |
+| `enhancer_model` | `codeformer` | Backend (`codeformer` or `gfpgan`) |
+| `enhancer_weight` | `0.7` | CodeFormer fidelity: `0`=most restoration, `1`=closest to input |
+| `enhance_strength` | `0.7` | How much of the restored face to keep |
+| `aligned_size` | `256` | Compositing working resolution (clamped 128–512) |
+| `temporal_alpha` | `0.6` | EMA on aligned pixels, kills shimmer (`1.0` disables) |
+| `color_correction` | `True` | LAB transfer, sampled inside the mask |
+| `color_strength` | `1.0` | Scales that transfer |
+| `grain` | `True` | Matches sensor noise on the composited face |
+| `occluder` | `True` | XSeg mask so hands/mics are not overpainted |
+
+Three ways to set them:
+
+- **Quality preset** — the desktop dropdown; see the table above.
+- **CLI / env** — `--enhancer-model`, `--enhancer-weight`, `--enhance-strength`,
+  `--aligned-size`, `--temporal-alpha`, `--color-strength`, `--no-enhance`,
+  `--no-grain`, `--no-occluder`. Each also reads an env var
+  (`ENHANCER_MODEL`, `ENHANCER_WEIGHT`, …) since the pod is configured via `.env`.
+  Precedence: preset first, then CLI/env overrides.
+- **`set_realism` API command** — `{"action": "set_realism", "values": {...}}`,
+  or `controller.set_realism(enhancer_weight=0.5)`. Validates and clamps;
+  unknown fields are reported back rather than silently ignored.
+
+> These are not yet exposed in the desktop UI — live A/B tuning currently
+> requires the API or a Python REPL.
+
+Models (`codeformer.onnx`, `dfl_xseg.onnx`) download on first use to
+`/workspace/models/` or `pipeline/models/`. If one is unavailable the pipeline
+degrades — masking falls back to landmark hull + valid-region, restoration falls
+back to the other backend or off — rather than failing.
 
 ---
 
@@ -98,10 +222,16 @@ Three presets control tracking, smoothing, and blending. Enhancement is independ
 | `set_target` | Set target image or video |
 | `set_output` | Set output file path |
 | `set_quality` | Apply quality preset (fast/optimal/production) |
-| `set_blend` | Set face blend ratio |
-| `set_alpha` | Set EMA smoothing factor |
-| `set_enhance` | Toggle face enhancement on/off |
+| `set_alpha` | Set landmark EMA smoothing factor |
+| `set_enhance` | Toggle face restoration on/off |
+| `set_realism` | Set any realism knob(s) — validated and clamped |
+| `set_color_correction` | Toggle LAB colour transfer |
+| `set_preprocessing` | Toggle input normalization (lighting, white balance) |
+| `set_blend` | Legacy blend ratio — accepted, no longer read |
 | `set_input_url` | Set network stream URL |
+| `upload_source` | Send a source image as binary (used for remote pods) |
+| `get_state` | Read current config back, for UI re-sync after reconnect |
+| `cleanup_session` | Clear source/target/output and temporary session files |
 | `set_keep_fps` | Preserve original FPS |
 | `set_keep_audio` | Preserve original audio |
 | `set_many_faces` | Toggle multi-face mode |
@@ -137,7 +267,9 @@ Three presets control tracking, smoothing, and blending. Enhancement is independ
 - Webcam index selector
 - Quality preset dropdown (fast / optimal / production)
 - VCAM toggle — route processed frames to virtual camera
-- Enhance toggle — enable/disable GFPGAN enhancement in real time
+- Enhance toggle — enable/disable face restoration in real time
+- Color correction toggle — LAB transfer for cross-skin-tone swaps
+- Preprocessing toggle — input lighting / white-balance normalization
 - Start / Stop button
 - Live processed frame display
 
@@ -230,14 +362,26 @@ python runpod/orchestrator.py datacenters  # List all datacenters
 | `API_PORT` | WebSocket server port | 9000 |
 | `LOG_LEVEL` | Logging verbosity | info |
 | `PHANTOM_API_URL` | Desktop → pipeline WebSocket URL | ws://localhost:9000/ws |
+| `ENHANCER_MODEL` | Restoration backend | codeformer |
+| `ENHANCER_WEIGHT` | CodeFormer fidelity (0–1) | preset |
+| `ENHANCE_STRENGTH` | How much restored face to keep (0–1) | preset |
+| `ALIGNED_SIZE` | Compositing working resolution | preset |
+| `TEMPORAL_ALPHA` | EMA on composited pixels | preset |
+| `COLOR_STRENGTH` | Scales the LAB transfer | 1.0 |
+| `ENHANCE` / `GRAIN` / `OCCLUDER` | Feature toggles | on |
 
 ### CLI Arguments
 ```
-python pipeline.py -s <source> -t <target> -o <output>   # Batch mode
-python pipeline.py --stream                                # Realtime mode
-python pipeline.py --execution-provider cuda               # GPU selection
-python pipeline.py --quality production                    # Preset selection
-python pipeline.py --tracker csrt --alpha 0.6 --blend 0.65 # Fine-tuning
+python pipeline.py -s <source> -t <target> -o <output>  # Batch (image only)
+python pipeline.py --stream                             # Realtime mode
+python pipeline.py --execution-provider cuda            # GPU selection
+python pipeline.py --quality production                 # Preset selection
+python pipeline.py --log-level debug                    # Per-stage timings
+
+# Realism tuning (override the preset)
+python pipeline.py --stream --enhancer-weight 0.5 --enhance-strength 0.6
+python pipeline.py --stream --enhancer-model gfpgan --aligned-size 320
+python pipeline.py --stream --no-grain --no-occluder
 ```
 
 ---
@@ -367,41 +511,41 @@ How each frame flows through the realtime processing chain:
 Webcam / Network Stream / Desktop Push
 │
 ▼
-┌──────────────────────────────────────────────────┐
-│  ProcessingPipeline                              │
-│                                                  │
-│  frame arrives                                   │
-│  │                                               │
-│  ├─ Warmup period? (first N frames)              │
-│  │   └─ Yes → skip processing, emit raw frame    │
-│  │                                               │
-│  ├─ Time to redetect? (every 20-30 frames)       │
-│  │   ├─ Yes → DetectionProcessor                 │
-│  │   │        run InsightFace on full frame       │
-│  │   │        ├─ Face found → update tracker      │
-│  │   │        └─ No face   → emit face_lost       │
-│  │   │                                            │
-│  │   └─ No  → TrackingProcessor                  │
-│  │            use tracker (CSRT/KCF/MOSSE)        │
-│  │            predict face position from motion    │
-│  │            apply EMA smoothing to keypoints     │
-│  │            ├─ Tracker OK → use predicted bbox   │
-│  │            └─ Tracker lost → force redetect     │
-│  │                                               │
-│  ├─ SwappingProcessor                            │
-│  │   load source embedding (single or averaged)   │
-│  │   run ONNX inswapper_128 model                 │
-│  │   blend swapped face onto frame                │
-│  │                                               │
-│  ├─ Enhancement enabled?                         │
-│  │   ├─ Yes → EnhancementProcessor               │
-│  │   │        GFPGAN restore (synchronous, ~10ms) │
-│  │   └─ No  → skip                               │
-│  │                                               │
-│  └─ BlendingProcessor                            │
-│     apply blend ratio + luminance matching         │
-│                                                  │
-└──────────────┬───────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│  ProcessingPipeline                                  │
+│                                                      │
+│  frame arrives                                       │
+│  │                                                   │
+│  ├─ Warmup period? (first N frames)                  │
+│  │   └─ Yes → skip, do not emit                      │
+│  │                                                   │
+│  ├─ PreprocessingProcessor (optional)                │
+│  │   normalize lighting / white balance              │
+│  │                                                   │
+│  ├─ DetectionProcessor — EVERY frame                 │
+│  │   run InsightFace on full frame                   │
+│  │   └─ No face → stabilizer.mark_missing()          │
+│  │               (resets state after 3 misses)       │
+│  │                                                   │
+│  ├─ LandmarkStabilizer  (single-face only)           │
+│  │   EMA on kps + landmark_2d_106 together           │
+│  │   resets on large centroid jump                   │
+│  │                                                   │
+│  ├─ SwappingProcessor.swap_aligned()                 │
+│  │   ONNX inswapper_128, paste_back=False            │
+│  │   → returns (aligned crop, affine)                │
+│  │                                                   │
+│  └─ FaceCompositor.composite()  ── aligned space ──┐ │
+│      1. restore   CodeFormer in FFHQ space,        │ │
+│                   blended at enhance_strength      │ │
+│      2. temporal  EMA on pixels, released on motion│ │
+│      3. mask      hull × valid-region × XSeg       │ │
+│      4. colour    LAB, sampled inside mask         │ │
+│      5. detail    high-frequency band matched      │ │
+│      6. warp back into ROI, soft-alpha composite   │ │
+│      7. grain     sensor noise matched to frame    │ │
+│                                                  ──┘ │
+└──────────────┬───────────────────────────────────────┘
                │
                ▼
          EventBus.emit(FRAME_READY)
@@ -410,6 +554,11 @@ Webcam / Network Stream / Desktop Push
          WebSocket Server
          encode as JPEG → push binary frame to all clients
 ```
+
+Temporal continuity comes from EMA — on landmarks and on aligned pixels — not
+from a correlation tracker carrying a stale face forward. Both release under
+motion and reset on face loss or source change. Both are bypassed when
+`many_faces` is set, since per-frame detection order is not stable.
 
 ---
 

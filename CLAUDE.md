@@ -11,6 +11,31 @@ Phantom is a modern, composable face-swapping application for videos and images.
 - `pipeline.py` (headless engine): Supports batch mode (`-s <source> -t <target> -o <output>`) and realtime stream mode
 - `desktop.py` (GUI controller): Qt/PySide6 interface, communicates with pipeline via WebSocket API on port 9000
 
+### Design target
+**What a real video call looks like** — sensor noise, compression, ordinary
+imperfection. Not a high-resolution portrait, and not the poreless "beautified"
+look. Three failure modes drive most decisions in this codebase:
+
+1. **Too clean** — perfectly sharp, poreless skin on a 720p webcam feed
+2. **A visible seam** — any edge, halo or colour step where the swap meets the head
+3. **Wrong motion** — shimmer, jitter, or a face lagging the head it sits on
+
+Several stages deliberately degrade the output (grain, partial restoration,
+detail matching downward) because matching the frame beats looking good in
+isolation. When changing anything here, judge it on real footage, not stills.
+
+### Current state
+Development is focused on the **live call** path; batch follows and reuses the
+same compositor.
+
+- Working: realtime stream, aligned-space compositing, RunPod deployment,
+  desktop LIVE mode, batch **image**
+- **Not implemented**: batch **video** — `ProcessingPipeline._process_target_batch()`
+  handles images only. The FFmpeg helpers exist in `pipeline/io/ffmpeg.py` but are
+  not wired in. This also breaks desktop VIDEO mode and the CI end-to-end test.
+- Not exposed: realism knobs have no desktop UI (API/CLI only)
+- No automated tests exist
+
 ## Quick Commands
 
 ### Running
@@ -42,7 +67,7 @@ Phantom is a modern, composable face-swapping application for videos and images.
 **Services Layer (ML/CV components):**
 - **pipeline/services/face_detection.py**: `FaceDetector` (InsightFace wrapper)
 - **pipeline/services/face_swapping.py**: `FaceSwapper` (ONNX face swap)
-- **pipeline/services/enhancement.py**: `Enhancer` (GFPGAN face enhancement)
+- **pipeline/services/enhancement.py**: `Enhancer` (CodeFormer ONNX, or GFPGAN)
 - **pipeline/services/face_tracking.py**: `LandmarkStabilizer` (EMA on face landmarks)
 - **pipeline/services/masking.py**: `FaceMasker` (landmark hull + optional XSeg occlusion)
 - **pipeline/services/database.py**: `FaceDatabase` (embedding cache & averaging)
@@ -244,8 +269,9 @@ back to the other backend or off — rather than failing.
 - **Python**: 3.9+ (required for type annotations)
 - **Deep Learning**: `torch`, `onnxruntime`, `tensorflow`, `insightface`
 - **Computer Vision**: `opencv-python`, `pillow`
-- **Enhancement**: `gfpgan` (optional, graceful fallback if missing)
-- **GUI**: `customtkinter` (for desktop.py)
+- **Restoration**: CodeFormer runs on `onnxruntime` (no extra dependency);
+  `gfpgan` is only needed for the alternate backend, graceful fallback if missing
+- **GUI**: `PySide6` / Qt Quick (for desktop.py)
 - **External**: FFmpeg (required for video encoding/decoding)
 
 ### Platform-Specific

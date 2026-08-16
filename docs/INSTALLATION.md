@@ -96,12 +96,20 @@ pip install pyvirtualcam
 
 ### 5. Download Models
 
-On first run, roop-cam automatically downloads ~300MB of models:
-- `inswapper_128.onnx` (face swapper, ~512MB) from Hugging Face
-- `GFPGANv1.4.pth` (face enhancer, optional)
+On first run, Phantom automatically downloads its models:
+- `inswapper_128.onnx` (face swapper, ~350MB) from Hugging Face
+- `codeformer.onnx` (face restoration, ~360MB) from facefusion-assets
+- `dfl_xseg.onnx` (occlusion masking, ~50MB) from facefusion-assets
 - `buffalo_l` (InsightFace face detection, auto-downloaded by InsightFace library)
+- `GFPGANv1.4.pth` — only needed for `--enhancer-model gfpgan`; **manual
+  download** from https://github.com/TencentARC/GFPGAN/releases
 
-These are cached in `models/` directory for subsequent runs.
+These are cached in `pipeline/models/` for subsequent runs (or
+`/workspace/models/` on RunPod, so they survive pod restarts).
+
+The restoration and masking models are optional at runtime: if a download fails,
+masking falls back to landmark hull only and restoration falls back to the other
+backend or off. The pipeline still runs.
 
 ## GPU Setup (Optional)
 

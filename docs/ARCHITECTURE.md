@@ -23,13 +23,15 @@ Phantom is a modern, event-driven face-swapping application refactored for compo
 **Services (ML/CV):**
 - `pipeline/services/face_detection.py` — InsightFace wrapper
 - `pipeline/services/face_swapping.py` — ONNX face swap model
-- `pipeline/services/enhancement.py` — GFPGAN enhancement (optional)
-- `pipeline/services/face_tracking.py` — OpenCV tracking state
+- `pipeline/services/enhancement.py` — Face restoration (CodeFormer / GFPGAN)
+- `pipeline/services/masking.py` — Landmark hull + valid region + XSeg occlusion
+- `pipeline/services/face_tracking.py` — LandmarkStabilizer (EMA on landmarks)
 - `pipeline/services/database.py` — Embedding cache & averaging
 
 **Processing Pipeline:**
 - `pipeline/processing/pipeline.py` — Main orchestrator (batch & stream modes)
 - `pipeline/processing/frame_processor.py` — Composable processor chain
+- `pipeline/processing/compositor.py` — FaceCompositor (aligned-space compositing)
 - `pipeline/processing/async_processor.py` — Background processing wrapper
 
 **I/O Layer:**
@@ -84,11 +86,11 @@ A modern interface that:
                │ EventBus (pub/sub)
     ┌──────────▼───────────────┐
     │  frame_processor chain    │
-    │  - Detection              │
-    │  - Tracking              │
-    │  - Swapping              │
-    │  - Enhancement           │
-    │  - Blending              │
+    │  - Preprocessing          │
+    │  - Detection (every frame)│
+    │  - Landmark stabilization │
+    │  - Swapping (aligned)     │
+    │  - Compositing            │
     └──────────┬───────────────┘
                │
     ┌──────────▼───────────────┐
@@ -224,27 +226,36 @@ with pyvirtualcam.Camera(backend='obs') as cam:
 
 ### Real-time Processing (Stream Mode)
 
-- **Input**: Webcam or network source (OpenCV)
-- **Face detection**: Every 30 frames (configurable)
-- **Face tracking**: Smooth motion estimation between detections
-- **Blending**: Luminance-adaptive blend for seamless integration
-- **Enhancement**: Optional GFPGAN post-processing (every N frames)
-- **Output**: 960x540 @ 30 FPS (adjustable)
+- **Input**: Webcam, network source (OpenCV), or JPEG frames pushed over WebSocket
+- **Face detection**: Every frame — no correlation tracker, no stale geometry
+- **Stabilization**: EMA on landmarks (warp) and on aligned pixels (shimmer)
+- **Compositing**: Aligned-space — masking, colour, detail, grain
+- **Restoration**: Optional, in FFHQ space, blended back at partial strength
+- **Output**: 480x270 to 960x540, 15–30 FPS, set by quality preset
 
 ### Bottlenecks
 
-1. **Face detection** (InsightFace) — most expensive operation
-2. **Face swapping** (ONNX inference) — depends on GPU availability
-3. **WebSocket broadcast** — can drop frames if network is slow
-4. **Virtual camera** — minimal overhead (frame copy only)
+1. **Face detection** (InsightFace) — runs every frame, most expensive operation
+2. **Face restoration** (CodeFormer/GFPGAN) — second most expensive
+3. **Face swapping** (ONNX inference) — depends on GPU availability
+4. **Occlusion masking** (XSeg) — one extra ONNX pass per frame
+5. **WebSocket broadcast** — can drop frames if network is slow
+6. **Virtual camera** — minimal overhead (frame copy only)
 
 ### Optimization Strategies
 
-- **Detection interval**: Skip detection on non-keyframes (cached tracking)
-- **Enhancement interval**: Only enhance every N frames
-- **Tracker**: Use lightweight trackers (MOSSE, KCF) to reduce detection frequency
 - **GPU acceleration**: Use CUDA/CoreML for 5-10x speedup
-- **Resolution**: 960x540 chosen for balance (not too heavy, not too light)
+- **Aligned-space work**: Compositing happens at 192–320px, not frame size
+- **ROI warp-back**: Cost scales with face size, not frame size
+- **Parallel warm-up**: Detection, swap, occluder and restoration models load
+  concurrently on start, halving startup time
+- **Capture resolution**: Set by preset. Modest resolutions are both cheaper and
+  closer to the target look
+- **Preset trade-offs**: `fast` drops the occluder pass and composites at 192px
+
+Detection is deliberately *not* skipped or intervalled. A correlation tracker
+between detections warps the swap with stale landmarks, which costs more in
+quality than it saves in latency.
 
 ## Thread Safety
 
@@ -252,7 +263,7 @@ with pyvirtualcam.Camera(backend='obs') as cam:
 
 - **Capture thread** (InputSource): Reads frames from webcam/file/network
 - **Processing thread** (ProcessingPipeline): Runs frame processor chain
-- **Async enhancement thread** (AsyncProcessor): Background GFPGAN enhancement
+- **Model warm-up pool**: Loads the four ONNX models in parallel at stream start
 - **WebSocket server thread**: Receives commands, broadcasts events
 - **Event bus** (EventBus): Pub/sub dispatch (synchronous, in calling thread)
 - **Desktop bridge**: Subscribes to events, updates UI
@@ -280,7 +291,9 @@ with pyvirtualcam.Camera(backend='obs') as cam:
 - **Model weights**: Lazy loaded, cached in memory or CUDA
   - InsightFace (det_size=480) — ~200MB
   - Inswapper_128 (ONNX) — ~350MB
-  - GFPGAN (optional) — ~350MB
+  - CodeFormer (ONNX, optional) — ~360MB
+  - DFL XSeg (ONNX, optional) — ~50MB
+  - GFPGAN (torch, optional) — ~350MB
 - **Memory limits** (`CONFIG.max_memory`):
   - Set via `--max-memory` flag or GUI
   - Enforced per `limit_resources()` on startup
