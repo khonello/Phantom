@@ -135,6 +135,17 @@ class FaceCompositor:
     # detail, and because mask edges and detail statistics both degrade at 128.
     _ALIGNED_MIN = 128
     _ALIGNED_MAX = 512
+    # `config.aligned_size` is a *ceiling*; the size actually used is chosen per
+    # face from how many pixels it occupies in the frame. Compositing a face
+    # that covers 130px of frame at 320 upsamples the swapper's 128 output more
+    # than twice over and then does every downstream stage on six times the
+    # pixels, for detail that was never in the source. Sitting near the face's
+    # own resolution is both cheaper and more honest.
+    _ALIGNED_STEPS = (128, 192, 256, 320, 384, 448, 512)
+    # Fractional change required before switching step. Without it a face
+    # hovering on a boundary would flip size frame to frame, and each flip
+    # discards the temporal state (the smoothed buffer is the wrong shape).
+    _ALIGNED_HYSTERESIS = 0.18
 
     # Gaussian sigma separating "texture" from "shape", specified at 256 and
     # scaled with the working resolution so detail matching behaves the same
@@ -155,15 +166,55 @@ class FaceCompositor:
     # brightness and matters; forcing L *std* flattens facial contrast.
     _LUMA_STD_DAMP = 0.5
 
-    # Mean absolute difference between consecutive real crops, in 0-255, at
-    # which temporal smoothing is fully released. Below the floor the subject
-    # is effectively still; above the ceiling they are talking or turning and
-    # smoothing would ghost.
-    _MOTION_FLOOR = 2.0
-    _MOTION_CEIL = 8.0
+    # Illumination matching. A global mean/std shift is correct only when the
+    # light is flat; a video call almost never is — there is a window or a lamp
+    # on one side. Under directional light the real face carries a brightness
+    # gradient the swap does not, and no single shift can match both ends of it,
+    # so it lands correct on average and visibly wrong at one edge.
+    #
+    # This corrects the *low-frequency* difference that survives the global
+    # match. The scale factor is what keeps it from copying the target's face
+    # onto the swap: the residual is computed at 1/8 resolution, so only
+    # illumination survives it, never features.
+    _ILLUM_DOWNSCALE = 8
+    _ILLUM_SIGMA = 4.0    # at the downscaled resolution, so 32px at full size
+    _ILLUM_LIMIT = 12.0   # max correction in LAB units, per channel
+    _ILLUM_SCALE = 0.7    # match most of the gradient, not all of it
+
+    # Whole-crop motion, as mean absolute difference between consecutive real
+    # crops in 0-255, at which temporal smoothing is fully released. Below the
+    # floor the subject is effectively still; above the ceiling they are turning
+    # and smoothing would ghost.
+    #
+    # These sit lower than they would need to for a raw per-pixel difference.
+    # The change map is area-reduced first (see _MOTION_DOWNSCALE), which takes
+    # sensor noise out of the measurement — so the floor no longer has to clear
+    # a noise baseline of its own, and the same numeric reading now means
+    # strictly more real motion than it used to.
+    _MOTION_FLOOR = 1.0
+    _MOTION_CEIL = 6.0
+    # Per-region motion, measured as excess over the crop's own still baseline.
+    # This is what catches a mouth moving while the head is still — motion
+    # confined to a small part of the crop that a whole-crop average cannot see.
+    # Relative to the baseline rather than absolute, so it self-calibrates to
+    # however noisy the camera is.
+    _MOTION_LOCAL_FLOOR = 1.5
+    _MOTION_LOCAL_RANGE = 6.0
+    # Blur applied to the change map before gating, in pixels at 256. Without it
+    # the gate would respond to sensor noise, which is per-pixel; with it the
+    # gate asks whether a *region* moved.
+    _MOTION_SIGMA = 6.0
+    # The change map is built at 1/N resolution. This is not only for speed: the
+    # area-average suppresses sensor noise, which is spatially incoherent, while
+    # leaving real motion, which is not. The measure therefore reports motion
+    # rather than noise, and a genuinely still subject is smoothed properly
+    # instead of being held part-way open by whatever grain the camera has.
+    _MOTION_DOWNSCALE = 4
 
     # Noise sigma is clamped to this range before grain is applied.
     _GRAIN_MAX = 6.0
+    # Subsampling stride for the noise estimate.
+    _NOISE_STRIDE = 2
     # Laplacian (4-neighbour) amplifies noise variance by the sum of its
     # squared coefficients: 4*(1^2) + (-4)^2 = 20.
     _LAPLACIAN_GAIN = np.sqrt(20.0)
@@ -188,11 +239,13 @@ class FaceCompositor:
 
         self._prev_fake: Optional[Frame] = None
         self._prev_real: Optional[Frame] = None
+        self._working_size: Optional[int] = None
 
     def reset(self) -> None:
         """Drop temporal state (face lost, source changed, pipeline restart)."""
         self._prev_fake = None
         self._prev_real = None
+        self._working_size = None
 
     # ------------------------------------------------------------------
     # Entry point
@@ -235,7 +288,7 @@ class FaceCompositor:
         matrix: Matrix,
     ) -> Frame:
         """Implementation of `composite`."""
-        size = self._aligned_size()
+        size = self._aligned_size(matrix, swapped.shape[0])
 
         # Rescale the swapper's affine to our working resolution. Scaling the
         # output canvas by k scales all six entries by k, exactly.
@@ -269,11 +322,42 @@ class FaceCompositor:
     # Aligned-space stages
     # ------------------------------------------------------------------
 
-    def _aligned_size(self) -> int:
-        """Working resolution for aligned space, clamped to a sane range."""
+    def _aligned_size(self, matrix: Matrix, crop_size: int) -> int:
+        """
+        Working resolution for aligned space, chosen from the face's size.
+
+        `config.aligned_size` sets the ceiling. Within it, the size follows how
+        many frame pixels the face actually covers, so someone sitting back from
+        the camera is not composited at the same cost as someone filling it —
+        and, more importantly, is not upsampled to a detail level their webcam
+        never captured.
+
+        Args:
+            matrix: 2x3 affine mapping frame space -> the swapper's crop
+            crop_size: Edge length of the swapper's output crop
+
+        Returns:
+            Even working resolution, within [_ALIGNED_MIN, config ceiling].
+        """
         requested = int(getattr(self.config, 'aligned_size', 256) or 256)
-        clamped = max(self._ALIGNED_MIN, min(self._ALIGNED_MAX, requested))
-        return clamped - (clamped % 2)
+        ceiling = max(self._ALIGNED_MIN, min(self._ALIGNED_MAX, requested))
+
+        # A similarity transform's linear part scales area by its determinant,
+        # so the face's extent in frame is the crop size divided by that scale.
+        scale = float(np.sqrt(abs(float(np.linalg.det(matrix[:, :2])))))
+        extent = (crop_size / scale) if scale > 1e-6 else float(ceiling)
+        target = float(np.clip(extent, self._ALIGNED_MIN, ceiling))
+
+        current = self._working_size
+        if current is not None and self._ALIGNED_MIN <= current <= ceiling:
+            if abs(target - current) <= current * self._ALIGNED_HYSTERESIS:
+                return current
+
+        steps = [s for s in self._ALIGNED_STEPS if self._ALIGNED_MIN <= s <= ceiling]
+        chosen = min(steps or [self._ALIGNED_MIN], key=lambda s: abs(s - target))
+
+        self._working_size = chosen
+        return chosen
 
     def _enhance(
         self,
@@ -435,20 +519,92 @@ class FaceCompositor:
             return fake
 
         current_real = real.astype(np.float32)
-        change = float(np.abs(current_real - prev_real).mean())
-        gate = np.clip(
-            (change - self._MOTION_FLOOR) / (self._MOTION_CEIL - self._MOTION_FLOOR),
-            0.0,
-            1.0,
-        )
-        effective = alpha + (1.0 - alpha) * gate
+        gate = self._motion_gate(current_real, prev_real)
 
-        smoothed = effective * fake.astype(np.float32) + (1.0 - effective) * prev_fake
+        # prev + (fake - prev) * effective, with the gate merged to three
+        # channels up front. The equivalent broadcast form builds a full-size
+        # temporary for every term, which on this path is the single most
+        # expensive thing the compositor does.
+        effective = alpha + (1.0 - alpha) * cv2.merge([gate, gate, gate])
+
+        smoothed = cv2.add(
+            prev_fake,
+            cv2.multiply(cv2.subtract(fake.astype(np.float32), prev_fake), effective),
+        )
 
         self._prev_fake = smoothed
         self._prev_real = current_real
 
         return np.clip(smoothed, 0, 255).astype(np.uint8)
+
+    def _motion_gate(self, current_real: Frame, prev_real: Frame) -> Frame:
+        """
+        Per-pixel release factor for temporal smoothing: 0 = smooth fully,
+        1 = pass the current frame through untouched.
+
+        Combines two measures, and takes whichever releases more:
+
+        - **Whole-crop** — the subject turned or moved. Unchanged from the
+          original behaviour, so its tuning still means what it did.
+        - **Per-region** — this part of the face moved more than the rest of
+          it. This is the one that matters on a call. Someone talking with a
+          still head changes only the mouth, perhaps 15% of the crop; averaged
+          over the whole crop that lands below the floor, the gate reads
+          "still", and smoothing stays fully on over the exact region a viewer
+          is watching. Lips then blend across frames and smear.
+
+        Taking the maximum means this can only ever smooth *less* than before,
+        never more. That is the safe direction: under-smoothing costs a little
+        shimmer, over-smoothing ghosts the mouth.
+
+        Args:
+            current_real: Aligned real crop for this frame (float32)
+            prev_real: Aligned real crop for the previous frame (float32)
+
+        Returns:
+            float32 gate with shape (H, W); the caller expands it to three
+            channels.
+        """
+        size = current_real.shape[0]
+        small = max(16, size // self._MOTION_DOWNSCALE)
+
+        current_small = cv2.resize(current_real, (small, small), interpolation=cv2.INTER_AREA)
+        prev_small = cv2.resize(prev_real, (small, small), interpolation=cv2.INTER_AREA)
+
+        difference = cv2.absdiff(current_small, prev_small)
+        change: Frame = (
+            difference[:, :, 0] + difference[:, :, 1] + difference[:, :, 2]
+        ).astype(np.float32)
+        change *= 1.0 / 3.0
+
+        sigma = (
+            self._MOTION_SIGMA * size / self._DETAIL_SIGMA_REFERENCE
+        ) / self._MOTION_DOWNSCALE
+        blurred: Frame = cv2.GaussianBlur(change, (0, 0), max(sigma, 0.6))
+
+        global_change = float(blurred.mean())
+        global_gate = float(np.clip(
+            (global_change - self._MOTION_FLOOR)
+            / (self._MOTION_CEIL - self._MOTION_FLOOR),
+            0.0,
+            1.0,
+        ))
+
+        # The median is dominated by still skin even mid-sentence, which makes
+        # it a good estimate of this camera's no-motion level — including its
+        # residual noise, so the local term does not need to know the sensor.
+        baseline = float(np.median(blurred))
+        local_gate = np.clip(
+            (blurred - baseline - self._MOTION_LOCAL_FLOOR) / self._MOTION_LOCAL_RANGE,
+            0.0,
+            1.0,
+        )
+
+        np.maximum(local_gate, global_gate, out=local_gate)
+        gate: Frame = cv2.resize(
+            local_gate, (size, size), interpolation=cv2.INTER_LINEAR,
+        )
+        return gate
 
     def _match_color(self, fake: Frame, real: Frame, mask: Mask) -> Frame:
         """
@@ -457,9 +613,21 @@ class FaceCompositor:
         Statistics are sampled *inside the mask only*. Sampling a bounding
         box instead pulls in hair and background, which is how a bright
         window behind someone ends up shifting their skin tone.
+
+        Two passes, deliberately gated differently. The global mean/std
+        transfer only engages once the overall colours actually differ, since
+        correcting a match is pure risk. The illumination pass always runs,
+        because the case it exists for — a face lit from one side — is one
+        where the global means already agree and only their *distribution*
+        across the face differs. Gating it on the same distance would switch
+        it off in precisely the situation it was written for.
         """
         binary = (mask > 0.5).astype(np.uint8)
         if int(binary.sum()) < 64:
+            return fake
+
+        color_strength = float(np.clip(self.config.color_strength, 0.0, 1.0))
+        if color_strength <= 0.0:
             return fake
 
         fake_lab = cv2.cvtColor(fake, cv2.COLOR_BGR2LAB)
@@ -468,33 +636,130 @@ class FaceCompositor:
         fake_mean, fake_std = cv2.meanStdDev(fake_lab, mask=binary)
         real_mean, real_std = cv2.meanStdDev(real_lab, mask=binary)
 
+        # Ramp rather than a threshold, so correction never snaps on and off
+        # between frames.
         delta = float(np.linalg.norm(real_mean - fake_mean))
-        strength = float(np.clip(
+        global_strength = color_strength * float(np.clip(
             (delta - self._COLOR_FLOOR) / self._COLOR_RANGE, 0.0, 1.0,
         ))
-        strength *= float(np.clip(self.config.color_strength, 0.0, 1.0))
-        if strength <= 0.0:
-            return fake
 
         result = fake_lab.astype(np.float32)
-        for channel in range(3):
-            f_mean = float(fake_mean[channel][0])
-            f_std = float(fake_std[channel][0])
-            r_mean = float(real_mean[channel][0])
-            r_std = float(real_std[channel][0])
 
-            if f_std < 1e-3:
-                ratio = 1.0
-            else:
-                ratio = float(np.clip(r_std / f_std, *self._COLOR_RATIO))
-            if channel == 0:
-                ratio = 1.0 + (ratio - 1.0) * self._LUMA_STD_DAMP
+        if global_strength > 0.0:
+            # Per channel the transfer is affine — scale then shift — so the
+            # coefficients can be solved as three scalars and applied in one
+            # vectorised pass. Written out channel by channel this was nine
+            # full-resolution array operations per frame.
+            #
+            #   new = x + ((x - f_mean) * ratio + r_mean - x) * s
+            #       = x * (1 - s + s * ratio) + s * (r_mean - f_mean * ratio)
+            gain = np.ones(3, dtype=np.float32)
+            offset = np.zeros(3, dtype=np.float32)
 
-            target = (result[:, :, channel] - f_mean) * ratio + r_mean
-            result[:, :, channel] += (target - result[:, :, channel]) * strength
+            for channel in range(3):
+                f_mean = float(fake_mean[channel][0])
+                f_std = float(fake_std[channel][0])
+                r_mean = float(real_mean[channel][0])
+                r_std = float(real_std[channel][0])
+
+                if f_std < 1e-3:
+                    ratio = 1.0
+                else:
+                    ratio = float(np.clip(r_std / f_std, *self._COLOR_RATIO))
+                if channel == 0:
+                    ratio = 1.0 + (ratio - 1.0) * self._LUMA_STD_DAMP
+
+                gain[channel] = 1.0 - global_strength + global_strength * ratio
+                offset[channel] = global_strength * (r_mean - f_mean * ratio)
+
+            result *= gain
+            result += offset
+
+        result = self._match_illumination(
+            result, real_lab.astype(np.float32), mask, color_strength,
+        )
 
         corrected = np.clip(result, 0, 255).astype(np.uint8)
         return cv2.cvtColor(corrected, cv2.COLOR_LAB2BGR)
+
+    def _match_illumination(
+        self,
+        fake_lab: Frame,
+        real_lab: Frame,
+        mask: Mask,
+        strength: float,
+    ) -> Frame:
+        """
+        Match the low-frequency lighting gradient the global transfer misses.
+
+        Works on a heavily downscaled residual, which does three things at once:
+        it is cheap, it guarantees only illumination survives (facial features
+        cannot outlive an 8x reduction), and the bilinear upsample gives a
+        smooth correction field with no edges of its own.
+
+        The blur is *normalized by the mask* — each output pixel is divided by
+        the blurred mask weight — so only in-mask pixels contribute. Blurring
+        the raw residual instead would pull hair and background into the
+        correction, which is the same mistake sampling a bounding box makes.
+
+        Args:
+            fake_lab: Globally colour-matched swap, LAB float32
+            real_lab: Target crop, LAB float32
+            mask: Soft compositing mask in [0, 1]
+            strength: Same ramped strength the global transfer used
+
+        Returns:
+            fake_lab with the illumination residual added.
+        """
+        size = fake_lab.shape[0]
+        half = max(16, size // 2)
+        small = max(8, size // self._ILLUM_DOWNSCALE)
+
+        # Everything below half resolution, so only the final add touches a
+        # full-size array. Subtraction is linear, so downscaling the two crops
+        # before differencing is exact; the mask weighting must still happen
+        # before the reduction to `small`, or out-of-mask pixels would leak in.
+        real_half = cv2.resize(real_lab, (half, half), interpolation=cv2.INTER_AREA)
+        fake_half = cv2.resize(fake_lab, (half, half), interpolation=cv2.INTER_AREA)
+        weight_half = cv2.resize(mask, (half, half), interpolation=cv2.INTER_AREA)
+
+        residual = cv2.multiply(
+            cv2.subtract(real_half, fake_half),
+            cv2.merge([weight_half, weight_half, weight_half]),
+        )
+
+        # INTER_AREA is a box filter, so the downsample is itself most of the
+        # smoothing; the Gaussian below only has to finish the job.
+        residual_small = cv2.resize(residual, (small, small), interpolation=cv2.INTER_AREA)
+        weight_small = cv2.resize(weight_half, (small, small), interpolation=cv2.INTER_AREA)
+
+        sigma = self._ILLUM_SIGMA * small / 32.0
+        residual_small = cv2.GaussianBlur(residual_small, (0, 0), max(sigma, 0.8))
+
+        # Two different uses of the mask, which must not be the same array:
+        # `denominator` is the blurred weight the residual was accumulated
+        # against, and dividing by it is what makes this a normalized
+        # convolution. `weight_small` is the fade applied afterwards. Reusing
+        # one for both would cancel the fade out entirely.
+        denominator = cv2.GaussianBlur(weight_small, (0, 0), max(sigma, 0.8))
+
+        scaled: Frame = residual_small
+        scaled /= np.maximum(denominator, 1e-3)[:, :, None]
+        np.clip(scaled, -self._ILLUM_LIMIT, self._ILLUM_LIMIT, out=scaled)
+
+        # Fade the correction out with the mask, so it cannot introduce an edge
+        # of its own where the composite is already handing back to the frame.
+        # Folded in here rather than after the upsample: the fade is inherently
+        # low-frequency, and doing it at full size would cost more than the rest
+        # of this method put together.
+        scaled *= (strength * self._ILLUM_SCALE * weight_small)[:, :, None]
+
+        correction = cv2.resize(
+            scaled, (size, size), interpolation=cv2.INTER_LINEAR,
+        )
+
+        corrected: Frame = cv2.add(fake_lab, correction)
+        return corrected
 
     def _match_detail(self, fake: Frame, real: Frame, mask: Mask) -> Frame:
         """
@@ -505,8 +770,8 @@ class FaceCompositor:
         necessary here: the swap is softer than the frame before enhancement
         and sharper after it.
         """
-        selection = mask > 0.5
-        if int(selection.sum()) < 64:
+        binary = (mask > 0.5).astype(np.uint8)
+        if cv2.countNonZero(binary) < 64:
             return fake
 
         fake_f = fake.astype(np.float32)
@@ -519,16 +784,25 @@ class FaceCompositor:
         fake_low = cv2.GaussianBlur(fake_f, (0, 0), sigma)
         real_low = cv2.GaussianBlur(real_f, (0, 0), sigma)
 
-        fake_high = fake_f - fake_low
-        real_high = real_f - real_low
+        fake_high = cv2.subtract(fake_f, fake_low)
+        real_high = cv2.subtract(real_f, real_low)
 
-        fake_energy = float(fake_high[selection].std())
-        real_energy = float(real_high[selection].std())
+        # meanStdDev with a mask rather than `array[boolean]`, which would
+        # allocate a copy of every selected pixel on every frame. The high band
+        # has ~zero mean per channel, so pooling the per-channel deviations
+        # reproduces the previous single-population figure.
+        _, fake_dev = cv2.meanStdDev(fake_high, mask=binary)
+        _, real_dev = cv2.meanStdDev(real_high, mask=binary)
+        fake_energy = float(np.sqrt(np.mean(np.square(fake_dev))))
+        real_energy = float(np.sqrt(np.mean(np.square(real_dev))))
         if fake_energy < 1e-3:
             return fake
 
         ratio = float(np.clip(real_energy / fake_energy, *self._DETAIL_RATIO))
-        matched = fake_low + fake_high * ratio
+
+        # fake_low + (fake - fake_low) * ratio, rearranged so it is one fused
+        # pass rather than a multiply and an add over separate temporaries.
+        matched = cv2.addWeighted(fake_f, ratio, fake_low, 1.0 - ratio, 0.0)
 
         return np.clip(matched, 0, 255).astype(np.uint8)
 
@@ -574,8 +848,15 @@ class FaceCompositor:
         warped_mask = np.clip(warped_mask, 0.0, 1.0)
 
         target = frame[y0:y1, x0:x1].astype(np.float32)
-        alpha = warped_mask[:, :, None]
-        blended = warped_fake.astype(np.float32) * alpha + target * (1.0 - alpha)
+
+        # target + (fake - target) * alpha. Written with an explicit 3-channel
+        # alpha and cv2 ops rather than `mask[:, :, None]` broadcasting, which
+        # numpy expands into a temporary the size of the ROI on every frame.
+        alpha = cv2.merge([warped_mask, warped_mask, warped_mask])
+        blended = cv2.add(
+            target,
+            cv2.multiply(cv2.subtract(warped_fake.astype(np.float32), target), alpha),
+        )
 
         if self.config.grain:
             blended = self._add_grain(blended, target, warped_mask)
@@ -648,8 +929,17 @@ class FaceCompositor:
         gray = cv2.cvtColor(np.clip(region, 0, 255).astype(np.uint8), cv2.COLOR_BGR2GRAY)
         laplacian = cv2.Laplacian(gray, cv2.CV_32F)
 
-        median = float(np.median(laplacian))
-        mad = float(np.median(np.abs(laplacian - median)))
+        # Estimate from a subsample. Both medians are sorts, and a noise sigma
+        # converges on far fewer than the ~35k pixels a face ROI carries; the
+        # stride costs nothing and removes two full-size sorts per frame.
+        sample: Frame = np.ascontiguousarray(
+            laplacian[::self._NOISE_STRIDE, ::self._NOISE_STRIDE], dtype=np.float32,
+        )
+        if sample.size < 64:
+            sample = laplacian.astype(np.float32)
+
+        median = float(np.median(sample))
+        mad = float(np.median(np.abs(sample - median)))
         sigma = 1.4826 * mad / self._LAPLACIAN_GAIN
 
         return float(np.clip(sigma, 0.0, self._GRAIN_MAX))

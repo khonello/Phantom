@@ -107,7 +107,7 @@ def parse_args() -> None:
                         dest='enhancer_weight', type=float, default=_env_float('ENHANCER_WEIGHT'))
     program.add_argument('--enhance-strength', help='how much of the restored face to keep (0.0-1.0)',
                         dest='enhance_strength', type=float, default=_env_float('ENHANCE_STRENGTH'))
-    program.add_argument('--aligned-size', help='compositing working resolution (128-512)',
+    program.add_argument('--aligned-size', help='ceiling on compositing resolution (128-512); actual size follows face size',
                         dest='aligned_size', type=int, default=_env_int('ALIGNED_SIZE'))
     program.add_argument('--temporal-alpha', help='EMA on composited pixels (1.0=off)',
                         dest='temporal_alpha', type=float, default=_env_float('TEMPORAL_ALPHA'))
