@@ -24,17 +24,47 @@ onto it looks like it worked.
 
 Three behaviours, all verified against the code, all silent.
 
-**A source photo with several people contributes an arbitrary one.**
-`FaceDatabase._extract_from_image()` calls `detector.detect_one()`, which
-returns the **leftmost** face in the image:
+### The single-face rule is "leftmost", and it is not a rule
+
+Everywhere the pipeline needs one face, it takes the one with the smallest x
+coordinate:
 
 ```python
-# pipeline/services/face_detection.py
+# pipeline/services/face_detection.py — detect_one()
 return min(detections, key=lambda d: d.bbox.x)
 ```
 
-Upload a photo of yourself with a friend on your left, and you have just built
-an embedding of your friend. Nothing reports this.
+This is not a heuristic that sometimes fails. It is an arbitrary tie-break
+standing in for a decision that was never made. Nothing about how images are
+composed makes the leftmost face the subject, and it selects the wrong person
+whenever there is more than one candidate: a friend beside you, someone walking
+behind you, a face on a poster or a television, a reflection, a photograph on
+the wall.
+
+It came in with the original scaffolding (`98892d6`, "Phase 0 & 1") and was
+never revisited. Its only virtue is determinism — it is reproducibly wrong
+rather than randomly wrong.
+
+It is used in exactly two places, and it fails differently in each.
+
+**In source images, one wrong pick poisons the whole session.**
+`FaceDatabase._extract_from_image()` builds the embedding from whatever
+`detect_one` returned. Upload a photo with a friend on your left and every
+subsequent frame swaps in your friend. The choice is made once, silently, and
+never re-examined.
+
+**At runtime, the failure is instability rather than arbitrariness.**
+`DetectionProcessor.process()` calls `detect_one` on **every frame** when
+`many_faces` is off. As people move, the leftmost face can change from one frame
+to the next — so the swap jumps between subjects mid-stream, and the
+`LandmarkStabilizer`, which exists on the assumption of one continuous subject,
+is fed alternating identities and thrashes. Nothing detects that the target
+changed.
+
+> An earlier draft of this document claimed the pipeline swapped *every*
+> detected face regardless of `many_faces`. That was wrong: `DetectionProcessor`
+> does restrict to one. The stabilizer thrashing is real, but it is caused by
+> the selection flipping between frames, not by multiple faces being swapped.
 
 **A batch of source images is averaged without any consistency check.**
 `_average_faces()` takes the mean of every embedding it was given and normalises
@@ -42,22 +72,19 @@ it. One photo of a different person pulls the identity toward a blend of two
 people, which is an identity that does not exist and will not resemble anyone.
 Nothing reports this either.
 
-**At runtime every detected face is swapped, regardless of `many_faces`.**
+### Why guessing better is not the fix
 
-```python
-# pipeline/processing/pipeline.py
-for detection in detections:
-    face = detection.face
-    if not self.config.many_faces:
-        face = self._stabilizer.stabilize(face)
-    frame = self._swap_face(frame, face)
-```
+Largest face is a much better heuristic than leftmost — the subject is usually
+nearest the camera — and most-central is defensible too. Both still fail, and
+they fail silently in the same way.
 
-`many_faces` only decides whether landmarks are smoothed — it does not restrict
-*which* faces are swapped. So with `many_faces = False` and two people in shot,
-both get swapped, and both are pushed through the **same** `LandmarkStabilizer`,
-whose EMA state then thrashes between two different people every frame. That is
-a bug independent of this feature.
+The distinction that matters is whether there is a human available to ask:
+
+- **Source images are an upload flow.** The operator is right there, choosing
+  files. There is no reason to guess: refuse the ambiguous image and say why.
+- **Runtime has nobody to ask.** A rule is unavoidable, so use **largest** as
+  the primary-face rule, and guard the frame when the situation is ambiguous
+  rather than resolving it by fiat.
 
 ---
 
@@ -213,18 +240,22 @@ guard_outlier_sim       …         cosine floor for source consistency, needs c
 | Operator display | `desktop/bridge.py`, `desktop/main.qml` |
 | Thresholds | `pipeline/config.py`, `pipeline/api/handlers.py` |
 
-The `many_faces` bug is worth fixing in the same pass: with it off, the pipeline
-should swap only the primary face and never push several people through one
-stabilizer.
+Two fixes belong in the same pass, independent of the guards themselves:
+replacing `detect_one`'s leftmost rule with largest-face, and resetting the
+`LandmarkStabilizer` whenever the selected face changes identity — a large
+centroid jump between frames already triggers a reset, but a genuine switch
+between two people standing still does not.
 
 ---
 
 ## Open questions
 
-**What counts as "primary" when `many_faces` is off but guarding is disabled?**
-Largest face is the usual answer and is more defensible than the current
-leftmost. Closest to the previous frame's position would be steadier still, but
-that is a tracker, and per-frame detection exists partly to avoid one.
+**Is largest-face enough at runtime, or does selection need continuity?**
+Largest is a clear improvement on leftmost, but it can still flip if two people
+are of similar apparent size. Preferring the face nearest the previous frame's
+position would be steadier — though that is a tracker by another name, and
+per-frame detection exists partly to avoid one. Guarding may make the question
+moot: if two comparable faces are in shot, the frame is guarded anyway.
 
 **Should a guarded frame still update the temporal state?**
 It should not — feeding a guarded frame into the pixel EMA would blend a
