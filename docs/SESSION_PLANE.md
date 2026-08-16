@@ -63,9 +63,9 @@ Settled, and it removes two of the original open questions:
 - **The client is our desktop app.** Customers do not integrate against a
   protocol. `desktop.py` is the product surface; the WebSocket API stays an
   internal detail between our app and our workers.
-- **A session is time, not a mode.** A customer buys a block — five minutes, an
-  hour — connects, and within that block uses either live video call *or* batch
-  processing, switching freely.
+- **A session is time, not a mode.** A customer buys a block — an hour PAYG, a
+  4- or 10-hour pack, a 24-hour Day Pass — connects, and within that block uses
+  either live video call *or* batch processing, switching freely.
 
 Both have consequences the original proposal does not cover, because it assumes
 a session is one kind of work.
@@ -91,54 +91,108 @@ time unless it is deliberately excluded.
 
 ---
 
-## The economics, corrected for session length
+## The economics
 
-My first pass assumed the five-minute minimum was typical. At hour-long sessions
-the picture changes enough to restate.
-
-```
-Assuming $2.00/min ($10 per 5 minutes) holds at all durations, GPU at $1.00/hr
-
-                              5-min session      60-min session
-  revenue                          $10.00             $120.00
-  GPU cost, 1 session/card          $0.083              $1.000
-  GPU cost, 2 sessions/card         $0.042              $0.500
-  packing saves                     $0.042              $0.500
-  90s cold start, unbilled          $3.00               $3.00
-    as % of the purchase             30.0%                2.5%
-  ─────────────────────────────────────────────────────────────
-  cold start : packing                72x                  6x
-```
-
-Cold start still wins, but by **6×, not 72×**. The absolute loss is identical —
-90 seconds at $2/min is $3 whatever the session length — but as a share of the
-purchase it collapses from 30% to 2.5%. Long sessions amortise startup; short
-ones are dominated by it.
-
-### I under-valued packing
-
-Reading packing as a cost saving was the wrong lens. Four cents, or fifty, is
-noise either way. The right lens is capacity:
+> **Revised for the tiered pricing.** Earlier drafts assumed $10 per 5 minutes —
+> $120/hour. The proposed tiers run $10/hour down to $4.17/hour. That is a **12×
+> to 29× drop in revenue per hour**, and it inverts the central conclusion.
+> Everything in this section replaces what was here before.
 
 ```
-  revenue per GPU-hour, 1 session   $120
-  revenue per GPU-hour, 2 sessions  $240      ← this is the argument
+Tiers, against a $1.00/hr GPU
+
+  tier             price     $/hr   disc   GPU 1x   GPU 2x   margin 1x  2x
+  ──────────────────────────────────────────────────────────────────────────
+  PAYG            $10.00   $10.00     0%    $1.00    $0.50        90%  95%
+  4-Hour Pack     $35.00    $8.75    12%    $4.00    $2.00        89%  94%
+  10-Hour Pack    $70.00    $7.00    30%   $10.00    $5.00        86%  93%
+  Day Pass       $100.00    $4.17    58%   $24.00   $12.00        76%  88%
 ```
 
-The proposal's own central worry is that GPU availability fluctuates between
-regions — that supply, not price, is the constraint. If that is true, packing is
-not a 50-cent saving. It **doubles the demand you can serve with the cards you
-can actually get.**
+Margins are healthy — 76% to 95% — but they are *margins* now, not rounding
+errors. GPU cost was a 240th of revenue under the old pricing. On a fully-used
+Day Pass it is nearly a quarter.
 
-That does not move it earlier in the plan, because it stays blocked behind the
-largest refactor here. But it changes why it matters, and it should be
-re-elevated the moment availability rather than cost becomes the limiter.
+### This reverses the priority I recommended
 
-### Cold start, drawn against the short session
+The previous conclusion was that cold start beats packing by 72×. At these
+prices the comparison flips, and not marginally:
 
-Where startup hurts most is the five-minute purchase, so that is the case worth
-picturing. The same 90 seconds against an hour is a thin sliver at the left
-edge — real money, but no longer the shape of the product.
+```
+  tier            $/min   90s cold start   packing saves      winner
+  ─────────────────────────────────────────────────────────────────────
+  PAYG            0.167            $0.25           $0.50   packing   2x
+  4-Hour Pack     0.146            $0.22           $2.00   packing   9x
+  10-Hour Pack    0.117            $0.17           $5.00   packing  29x
+  Day Pass        0.069            $0.10          $12.00   packing 115x
+```
+
+**Packing is now the dominant financial lever, by up to two orders of
+magnitude.** Cold start's financial argument has collapsed — 90 seconds costs
+between 10 and 25 cents, against $3.00 before.
+
+Cold start still matters, but as a **user-experience** problem rather than a
+revenue one, and it arguably matters more than it did: a Day Pass holder
+connects and disconnects repeatedly across a day, so they meet the cold start
+many times rather than once.
+
+### Two consequences worth acting on
+
+**Payment fees now exceed GPU cost on PAYG.** At Stripe's 2.9% + $0.30, a $10
+PAYG charge costs $0.59 to collect against $0.50 of packed GPU.
+
+```
+  tier              fee   fee %    GPU 2x
+  ────────────────────────────────────────
+  PAYG            $0.59    5.9%     $0.50    ← fee > compute
+  4-Hour Pack     $1.32    3.8%     $2.00
+  10-Hour Pack    $2.33    3.3%     $5.00
+  Day Pass        $3.20    3.2%    $12.00
+```
+
+This validates the tier structure independently of the discounts: moving
+customers up the ladder cuts payment overhead from 5.9% to 3.2%. It also argues
+against ever going below $10 as a minimum purchase.
+
+**PAYG's "full hour deducted at session start" is a gift to the architecture.**
+Once the hour is paid, holding that customer's worker for the remainder of it
+costs at most $1 against $10 collected — and it eliminates reconnect cold starts
+entirely inside the paid window. The grace period for a PAYG session should
+therefore be *the remainder of the paid hour*, not five minutes.
+
+That does not generalise to a Day Pass: holding a worker for 24 hours costs $24
+of $100. **Grace period policy should differ by tier**, which the architecture
+currently treats as a single global constant.
+
+### The Day Pass is the tier to model
+
+It is the only tier where the answer depends on a question nobody has settled:
+does "24 Hours" mean a day of *access*, or 24 hours of *accumulated session
+time*?
+
+```
+  GPU-hours actually held    cost 1x   cost 2x   margin 1x   margin 2x
+  ──────────────────────────────────────────────────────────────────────
+                        4      $4.00     $2.00         96%         98%
+                        8      $8.00     $4.00         92%         96%
+                       12     $12.00     $6.00         88%         94%
+                       24     $24.00    $12.00         76%         88%
+```
+
+Not loss-making at any point, but on a $2/hr GPU held unpacked for a full 24
+hours it is a **52% margin** — and that is before bandwidth, storage,
+orchestration and failed sessions.
+
+Two things follow. `max_sessions` is no longer just a capacity number, it is a
+**pricing input**: at 1 session per card a fully-used Day Pass yields 76%, at 2
+it yields 88%. And the Day Pass wants either a fair-use position or an explicit
+statement that idle time is not charged against the pass.
+
+### Cold start, drawn
+
+Still worth picturing, now as a UX cost rather than a revenue one. The timeline
+below uses the old five-minute session because that is where startup is most
+visually dominant; at $10/hour the same 90 seconds is 2.5% of the purchase.
 
 ```
                 0:00                                              5:00
@@ -417,20 +471,7 @@ capacity and pricing decision depends on them.
 Define the ceiling by a **latency budget**, not by absence of crashes — the
 session is unusable long before it OOMs.
 
-### 2. Attack cold start
-
-*Ships: a session that starts in seconds. Largest revenue impact in the plan.*
-
-- Bake a Docker image with dependencies and model weights inside, so `apt-get`,
-  `git pull` and `pip install` leave the critical path. `orchestrator.py`
-  already has a docker deploy mode.
-- Keep a small **warm pool**: workers provisioned with models loaded and no
-  session assigned. Same mechanism as the five-minute grace period, generalised
-  — hold capacity ahead of demand, not only behind it.
-- Pre-seed both regional volumes, so a fallback region is not silently the slow
-  path.
-
-### 3. Close the product gap: batch video and file transfer
+### 2. Close the product gap: batch video and file transfer
 
 *Ships: the other half of what a session is sold as. Launch prerequisite.*
 
@@ -446,7 +487,7 @@ Not control-plane work, but nothing above can be sold without it.
 - Fixes the CI end-to-end test and desktop VIDEO mode as a side effect; both are
   currently broken against this gap.
 
-### 4. Control plane, one session per GPU
+### 3. Control plane, one session per GPU
 
 *Ships: the product. Customers can buy and run sessions.*
 
@@ -460,7 +501,37 @@ Not control-plane work, but nothing above can be sold without it.
   live and batch inside one session.
 - Deliberately **no packing yet**. One session per worker is correct and safe.
 
-### 5. Resilience
+### 4. Multi-tenancy and packing
+
+*Ships: the dominant margin lever under the tiered pricing.*
+
+- Remove the `CONFIG` and `BUS` singletons in favour of per-session context
+  objects — the largest single change to existing code in this plan.
+- Route frames by `session_id` instead of broadcasting to a client set.
+- Share one set of loaded models across sessions; ONNX Runtime sessions are
+  already safe to call from multiple threads.
+- Enforce the measured `max_sessions` in the scheduler's slot accounting.
+
+Under the earlier $120/hour assumption this was a rounding error. At $10/hour
+PAYG and $4.17/hour on a Day Pass it is worth between 2x and 115x more than
+fixing cold start, and `max_sessions` becomes a pricing input rather than just a
+capacity number. It sits fourth only because it is blocked behind the control
+plane and the singleton refactor — start that refactor early, in parallel.
+
+### 5. Attack cold start
+
+*Ships: a session that starts in seconds. A UX win, no longer a revenue one.*
+
+- Bake a Docker image with dependencies and model weights inside, so `apt-get`,
+  `git pull` and `pip install` leave the critical path. `orchestrator.py`
+  already has a docker deploy mode.
+- Keep a small **warm pool**: workers provisioned with models loaded and no
+  session assigned. Same mechanism as the five-minute grace period, generalised
+  — hold capacity ahead of demand, not only behind it.
+- Pre-seed both regional volumes, so a fallback region is not silently the slow
+  path.
+
+### 6. Resilience
 
 *Ships: sessions that survive infrastructure failure, or refund themselves.*
 
@@ -470,20 +541,6 @@ Not control-plane work, but nothing above can be sold without it.
   liveness-based**, because the CUDA-hang case leaves the process responsive.
 - Retry classification and bounded attempts, as proposed.
 - Automatic credit for interrupted minutes.
-
-### 6. Multi-tenancy and packing
-
-*Ships: margin improvement. Only worth doing at volume.*
-
-- Remove the `CONFIG` and `BUS` singletons in favour of per-session context
-  objects — the largest single change to existing code in this plan.
-- Route frames by `session_id` instead of broadcasting to a client set.
-- Share one set of loaded models across sessions; ONNX Runtime sessions are
-  already safe to call from multiple threads.
-- Enforce the measured `max_sessions` in the scheduler's slot accounting.
-
-At $10 per five minutes this stage is a rounding error until many sessions run
-concurrently. It is listed fifth because it earns fifth place.
 
 ### 7. Provider abstraction
 
@@ -529,16 +586,22 @@ per-process. If a customer switches source faces mid-session, that is per-sessio
 state; if a session is one identity throughout, embeddings can be cached per
 worker and reused, which meaningfully cheapens packing.
 
-**Does the price hold at length?**
-$2/min is $120/hour. Everything in the economics section assumes the five-minute
-rate scales linearly; if hour-long sessions are discounted, the GPU-cost ratios
-shrink and packing gets more important than shown here.
+**Does a Day Pass mean 24 hours of access, or 24 hours of session time?**
+The single biggest open number. Access means we may hold or repeatedly
+re-provision a worker across a day; accumulated session time is metered and
+bounded. The gap between them is a 76% margin and a 96% one, and it also decides
+whether a Day Pass needs a fair-use position.
 
 **What is the concurrency shape?**
-Many short sessions and few long ones imply different systems. Short sessions
-make cold start and the warm pool dominant; long sessions make packing and
-capacity planning dominant. This is the single biggest unknown remaining, and it
-decides whether stage 2 or stage 6 is where the leverage is.
+Many short sessions and few long ones imply different systems. The tiers hint at
+the answer — PAYG is short and bursty, a Day Pass is long and intermittent — but
+the mix is unknown, and it decides how much warm capacity is worth holding.
+
+**Does the scheduler need to know the tier?**
+Under contention a PAYG session earns $10 per GPU-hour and a Day Pass session
+$4.17. That is a legitimate admission-control input when capacity is scarce, and
+an unpleasant one to discover after the fact. Worth deciding deliberately rather
+than by omission.
 
 **Where does authentication and payment live?**
 Not addressed in the proposal or here. The desktop app currently has no concept
@@ -553,14 +616,21 @@ Build it. The proposal is sound, most of the hard thinking is already done in
 it, and it is additive to a pipeline that works.
 
 Reorder the first moves: **measure the two unknown numbers, close the batch and
-file-transfer gap, attack cold start, then build the control plane at one session
-per GPU.** Packing stays late — not because it is low value, but because it is
-blocked behind the largest refactor in the plan.
+file-transfer gap, build the control plane at one session per GPU, then pack.**
 
-Two things determine how much of the rest is right. **Whether sessions are
-typically minutes or hours** decides whether cold start or capacity is the real
-constraint; they differ by an order of magnitude and the answer is not known.
-And **batch is no longer optional** — it is half of what a session is sold as.
+The tiered pricing changed which lever matters. At $120/hour, GPU cost was a
+rounding error and cold start was the whole game. At $10/hour PAYG — and $4.17
+on a Day Pass — packing is worth between 2× and 115× more than fixing cold
+start, and `max_sessions` stops being a capacity number and becomes a pricing
+input. Cold start is still worth fixing, but as a user-experience problem.
+
+Because packing is blocked behind the singleton refactor, **that refactor should
+start early and in parallel**, even though packing itself lands fourth.
+
+Two things still decide how much of the rest is right. **What a Day Pass
+actually costs us** depends on whether "24 hours" means access or accumulated
+session time — the difference is a 76% margin or a 96% one. And **batch is no
+longer optional**; it is half of what a session is sold as.
 
 Then take the one decision that costs nothing today and is painful to retrofit:
 **start the billing clock when the session becomes usable**, not when it is

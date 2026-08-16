@@ -46,8 +46,21 @@ Facial augmentation pipeline
 
 ### What the customer buys
 
-**Time, not inference operations.** The working price is **$10 per 5 minutes**,
-with five minutes as the minimum purchase.
+**Time, not inference operations.** Three tiers, of ascending commitment and
+descending effective rate:
+
+| Tier | Price | Effective | Notes |
+|---|---|---|---|
+| **PAYG** | $10 / hour | $10.00/hr | No commitment. One hour at a time. **The full hour is deducted at session start.** For occasional and first-time users. |
+| **4-Hour Pack** | $35 | $8.75/hr | Prepaid block. |
+| **10-Hour Pack** | $70 | $7.00/hr | Prepaid block. |
+| **Day Pass** | $100 / 24 hours | $4.17/hr | Heavy users. Strongest discount. |
+
+```
+  PAYG  →  Session Packs  →  Day Pass
+   ────────────────────────────────▶
+   rising commitment, falling rate
+```
 
 A session stays active until either:
 
@@ -56,6 +69,25 @@ A session stays active until either:
 
 This is a **long-lived compute session**, deliberately not the conventional
 `upload → inference → result` API.
+
+> **Annotation — three things the tiers imply for the architecture.**
+>
+> **`max_sessions` becomes a pricing input, not just a capacity number.** A
+> fully-consumed Day Pass costs $24 of GPU against $100 at one session per card,
+> and $12 at two. That is the difference between a 76% and an 88% margin, so the
+> benchmark in §4 now feeds the price list.
+>
+> **Grace period policy should vary by tier** (§12 currently specifies one global
+> constant). PAYG deducts the full hour at session start, so holding that
+> customer's worker for the remainder of their paid hour costs at most $1 against
+> $10 collected — and removes reconnect cold starts entirely inside the window.
+> Holding a Day Pass worker for 24 hours costs $24 of $100, so the same
+> generosity does not transfer.
+>
+> **"24 Hours" is undefined and the answer moves the margin by 20 points.** A day
+> of *access* means we may hold or repeatedly re-provision a worker across 24
+> hours; 24 hours of *accumulated session time* is metered and bounded. This
+> needs settling before the Day Pass ships.
 
 ### What the customer does inside a session
 
@@ -259,12 +291,13 @@ GPU B costs twice as much per hour and delivers cheaper customer capacity. The
 selection filter therefore ranks on cost per session-hour, not on sticker price
 or VRAM.
 
-> **Annotation —** this metric is right and worth keeping. Note that at current
-> pricing it optimises a small quantity: a five-minute session consumes roughly
-> four cents of GPU against $10 of revenue. The stronger argument for packing is
-> capacity rather than cost — $240 of revenue per GPU-hour packed against $120
-> unpacked — which matters precisely because GPU *availability* fluctuates
-> (§8). See SESSION_PLANE.md for the full economics.
+> **Annotation —** this metric is right, and under the tiered pricing it matters
+> considerably more than an earlier draft of this note suggested. At $10/hour
+> PAYG a packed session costs $0.50 of GPU; on a fully-consumed Day Pass at
+> $4.17/hour it is $12 against $100. Cost per session-hour is therefore a direct
+> margin lever, not a rounding error, and it compounds with the capacity argument
+> — packing doubles the demand servable from whatever cards are actually
+> available (§8). See SESSION_PLANE.md for the full economics.
 
 ---
 
@@ -655,6 +688,14 @@ when customers arrive close together.
 > of demand. Both are "keep a GPU with models loaded and no session on it," and
 > building the second is mostly a matter of deciding when to start one
 > speculatively.
+>
+> **The five minutes should not be one global constant.** It is a bet that a
+> customer returns before the hold costs more than the cold start it saves, and
+> that bet differs sharply by tier. A PAYG customer has already paid for the full
+> hour at session start, so holding their worker until that hour expires costs at
+> most $1 against $10 collected and guarantees an instant reconnect. A Day Pass
+> customer at $4.17/hour cannot be held on the same terms. Make the grace period
+> a function of the tier and of paid-but-unused time.
 
 ---
 
