@@ -1,3 +1,26 @@
 [flake8]
 select = E3, E4, F
-per-file-ignores = pipeline/core.py:E402
+# Vendored third-party code. `desktop/.qtcreator/...` is a checked-in virtualenv,
+# so without this the documented `flake8 pipeline.py pipeline desktop` lints all
+# of PySide6 and numpy and drowns our own findings.
+extend-exclude =
+    .git,
+    __pycache__,
+    .qtcreator,
+    temp-environ,
+    venv,
+    .venv
+# E402 (imports not at top) is deliberate in these files:
+#   core.py, pipeline.py  — environment and provider setup must run before the
+#                           ML imports, or ONNX/CUDA initialise with the wrong
+#                           thread and device settings
+#   api/handlers.py       — module docstring and constants precede the imports
+#   api/schema.py         — WebSocket message types are declared in their own
+#                           section below the command tables
+#   desktop/main.py       — Qt attributes must be set before QtQuick is imported
+per-file-ignores =
+    pipeline/core.py:E402
+    pipeline.py:E402
+    pipeline/api/handlers.py:E402
+    pipeline/api/schema.py:E402
+    desktop/main.py:E402

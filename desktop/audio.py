@@ -18,7 +18,6 @@ Requires: sounddevice (pip install sounddevice)
 
 import collections
 import sys
-import threading
 import time
 from typing import Any, Deque, Dict, Optional, Tuple, TYPE_CHECKING
 

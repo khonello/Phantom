@@ -9,7 +9,6 @@ Provides OutputSink ABC and implementations for various output types:
 Allows flexible routing of processed frames.
 """
 
-import io
 import os
 import threading
 from abc import ABC, abstractmethod

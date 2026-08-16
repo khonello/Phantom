@@ -12,7 +12,6 @@ from typing import List, Optional
 import cv2
 import numpy as np
 
-from pipeline.config import FaceSwapConfig
 from pipeline.types import Face
 from pipeline.services.face_detection import FaceDetector
 

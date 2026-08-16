@@ -38,14 +38,14 @@ def start_pipeline() -> None:
         thread = threading.Thread(target=_pipeline.run_stream, daemon=True)
         thread.start()
 
-    except Exception as e:
+    except Exception:
         _running = False
         raise
 
 
 def stop_pipeline() -> None:
     """Stop the streaming pipeline."""
-    global _pipeline, _running
+    global _running
 
     if _pipeline is not None:
         _pipeline.stop()

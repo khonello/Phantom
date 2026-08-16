@@ -20,7 +20,7 @@ import subprocess
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 from tqdm import tqdm
 

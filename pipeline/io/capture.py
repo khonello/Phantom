@@ -13,7 +13,7 @@ Replaces hardcoded cv2.VideoCapture usage in stream.py.
 import glob
 import os
 from abc import ABC, abstractmethod
-from typing import List, Optional, Tuple
+from typing import Optional
 
 import cv2
 

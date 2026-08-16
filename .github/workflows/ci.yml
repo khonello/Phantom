@@ -14,8 +14,12 @@ jobs:
      python-version: 3.9
   - run: pip install flake8
   - run: pip install mypy
-  - run: flake8 pipeline.py pipeline
-  - run: mypy pipeline.py pipeline
+  - run: flake8 pipeline.py pipeline desktop
+  # `pipeline.py` and `pipeline/` are both module "pipeline", so mypy refuses to
+  # check them together ("Duplicate module named 'pipeline'") and exits before
+  # checking anything at all. The entry point is nine lines that set an env var
+  # and call core.run_headless(), so the package is what matters here.
+  - run: mypy pipeline
  test:
   runs-on: ubuntu-latest
   steps:

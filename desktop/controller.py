@@ -21,7 +21,6 @@ import json
 import os
 import subprocess
 import threading
-import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import cv2
@@ -31,7 +30,7 @@ NAME = 'DESKTOP.CONTROLLER'
 UDP_INGEST_PORT: int = 5000
 
 # Default WebSocket URL (can be overridden by PHANTOM_API_URL env var)
-_DEFAULT_WS_URL = f'ws://localhost:9000/ws'
+_DEFAULT_WS_URL = 'ws://localhost:9000/ws'
 
 
 def _get_ws_url() -> str:
