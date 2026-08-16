@@ -191,9 +191,13 @@ hand through `runpod/orchestrator.py`. The intended shape is a session platform 
 customers buy time, a scheduler places sessions on pooled GPUs across regions,
 and failures are absorbed rather than passed on.
 
-[docs/SESSION_PLANE.md](docs/SESSION_PLANE.md) assesses that architecture against
-the code as it stands: what already exists, what blocks GPU session packing, and
-a staged path. It is an assessment, not a commitment — nothing in it is built.
+Two documents cover it, and nothing in either is built yet:
+
+- [docs/SESSION_ARCHITECTURE.md](docs/SESSION_ARCHITECTURE.md) — the
+  specification. Product model, session lifecycle, capacity and slots, the
+  scheduler, regional redundancy, fault tolerance, billing rules. Standalone.
+- [docs/SESSION_PLANE.md](docs/SESSION_PLANE.md) — the assessment. What already
+  exists, what blocks GPU session packing, the economics, and a staged path.
 
 ## Development
 

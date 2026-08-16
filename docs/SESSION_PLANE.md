@@ -6,6 +6,11 @@ execution.
 
 Reviewed against `main` @ `08f252d`.
 
+**This document is the assessment** — what the design gets right, what needs
+correcting, what it costs, and the order to build it in. The design itself is
+specified in [SESSION_ARCHITECTURE.md](SESSION_ARCHITECTURE.md), which stands
+alone and is implementable without this one.
+
 > Illustrated version: published as a private artifact. This document is the
 > version-controlled copy and is the source of truth for the numbers.
 
