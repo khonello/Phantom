@@ -172,29 +172,36 @@ That does not generalise to a Day Pass: holding a worker for 24 hours costs $24
 of $100. **Grace period policy should differ by tier**, which the architecture
 currently treats as a single global constant.
 
-### The Day Pass is the tier to model
+### The Day Pass, now that consumption is settled
 
-It is the only tier where the answer depends on a question nobody has settled:
-does "24 Hours" mean a day of *access*, or 24 hours of *accumulated session
-time*?
+The session rule resolves what used to be the biggest open number here. A Day
+Pass is **24 hours of balance, drawn down one wall-clock hour at a time**, each
+deducted when a session becomes usable and consumed whether or not the customer
+does anything with it. So GPU cost is bounded by hours actually *connected*, not
+by 24 hours of standing availability — and any hour the customer buys but never
+connects is pure margin.
+
+That makes 24 the worst case rather than the expected one:
 
 ```
-  GPU-hours actually held    cost 1x   cost 2x   margin 1x   margin 2x
+  hours actually connected   cost 1x   cost 2x   margin 1x   margin 2x
   ──────────────────────────────────────────────────────────────────────
                         4      $4.00     $2.00         96%         98%
                         8      $8.00     $4.00         92%         96%
                        12     $12.00     $6.00         88%         94%
-                       24     $24.00    $12.00         76%         88%
+                       24     $24.00    $12.00         76%         88%   ← worst case
 ```
 
-Not loss-making at any point, but on a $2/hr GPU held unpacked for a full 24
-hours it is a **52% margin** — and that is before bandwidth, storage,
-orchestration and failed sessions.
+Not loss-making at any point. The remaining exposure is a $2/hr GPU held
+unpacked across a fully-consumed pass, which is a **52% margin** — and that is
+before bandwidth, storage, orchestration and failed sessions.
 
-Two things follow. `max_sessions` is no longer just a capacity number, it is a
-**pricing input**: at 1 session per card a fully-used Day Pass yields 76%, at 2
-it yields 88%. And the Day Pass wants either a fair-use position or an explicit
-statement that idle time is not charged against the pass.
+Two things still follow. `max_sessions` is a **pricing input**, not just a
+capacity number: a fully-consumed Day Pass yields 76% at one session per card
+and 88% at two. And one question survives — whether Day Pass hours **expire**.
+"Day Pass" implies they do; if they do not, it is simply a 24-hour pack under
+another name, and the tier ladder has three prepaid blocks rather than two plus
+a pass.
 
 ### Cold start, drawn
 
@@ -571,17 +578,18 @@ it can land as soon as stage 3 does.
 
 ### 6. Resilience
 
-*Ships: sessions that survive infrastructure failure, or return the time.*
+*Ships: sessions that survive infrastructure failure.*
 
 - Worker → backend heartbeat and session leases, so a dead GPU stops being
   advertised as available.
 - Watchdog around the frame loop specifically — **progress-based, not
   liveness-based**, because the CUDA-hang case leaves the process responsive.
 - Retry classification and bounded attempts, as proposed.
-- Return interrupted time to the customer's hour balance. Not a refund —
-  refunds are manual and exceptional. Returning 22 unused Day Pass hours to a
-  balance costs ~$11 of GPU against a $91.67 Bitcoin payout, and keeps the
-  customer.
+- Decide what happens to an hour consumed by an outage. Unused time is never
+  returned by design, but a GPU dying at minute five is not the customer
+  choosing not to use their hour. With no payout and no time returned, a failure
+  costs retention rather than money — which is harder to measure and probably
+  worse.
 
 ### 7. Provider abstraction
 
@@ -601,15 +609,13 @@ implementation to conform to it and its shape is already visible in
 - **Whether batch belongs in the same plane.** Yes — in the same *session*. A
   customer buys time and chooses the mode, which promotes batch video from a
   follow-up to a launch prerequisite.
+- **How a session is consumed.** One wall-clock hour, deducted when the session
+  becomes usable, spent whether used or not, no returns. An extend modal fires
+  before expiry and deducts another hour if the balance allows.
+- **Payment.** Bitcoin over Lightning. No refund system; manual payout if one is
+  genuinely demanded.
 
 ## Still open
-
-**What happens at the session boundary?**
-Hard cut, or top-up? A call ending mid-sentence is a bad experience; an
-auto-extending session is a billing surprise. This is the auto-stop warning we
-already have, pointed at the customer instead of at us — the mechanism
-transfers, the policy does not. Sharper now that sessions may be an hour: the
-sunk cost of losing a session at minute 59 is much larger.
 
 **What happens to a batch job that outlives its session?**
 Four defensible options, listed under *Two workloads, one session*. Needs a
@@ -627,11 +633,17 @@ per-process. If a customer switches source faces mid-session, that is per-sessio
 state; if a session is one identity throughout, embeddings can be cached per
 worker and reused, which meaningfully cheapens packing.
 
-**Does a Day Pass mean 24 hours of access, or 24 hours of session time?**
-The single biggest open number. Access means we may hold or repeatedly
-re-provision a worker across a day; accumulated session time is metered and
-bounded. The gap between them is a 76% margin and a 96% one, and it also decides
-whether a Day Pass needs a fair-use position.
+**Do Day Pass hours expire?**
+The consumption rule settles how hours are *spent* — one wall-clock hour per
+connection, no returns — but not whether unspent ones lapse. "Day Pass" implies
+they do. If they do not, it is a 24-hour pack under another name and the ladder
+is three prepaid blocks rather than two plus a pass.
+
+**What happens to an hour consumed by an outage?**
+Unused time is never returned by design, and that is the right answer for a
+customer who chose not to use it. A GPU dying at minute five is a different
+case, and with no payout and no time returned it costs retention rather than
+money — harder to measure and probably worse.
 
 **What is the concurrency shape?**
 Many short sessions and few long ones imply different systems. The tiers hint at

@@ -84,6 +84,7 @@ Three consequences the architecture has to absorb:
   to fear, which suits a face-swapping product. Refunds are not a product
   feature: if one is genuinely demanded, Bitcoin is sent manually to the
   customer's address. That is an exception handled by a person, not a code path.
+  Nor is unused time returned — see §11.
 - **Invoices are USD-denominated and short-lived.** Quote in sats against a USD
   price with a expiry of roughly fifteen minutes, and decide explicitly whether
   revenue is auto-converted or held. Holding is an unhedged position on the
@@ -93,26 +94,9 @@ Three consequences the architecture has to absorb:
   removes that; self-hosting via BTCPay costs about 0.2% and adds channel
   management. Start managed, move in-house if volume justifies it.
 
-> **Annotation — a balance of hours is the right model, and it is not a refund
-> mechanism.** Two distinct things are easy to conflate here:
->
-> - **Paying money out** — not supported. Manual, exceptional, handled by a
->   person.
-> - **Returning unused time** — putting hours back on a balance the customer
->   already holds. No payment rail, no payout, no reversal.
->
-> Purchases should top up a per-customer balance of hours, and sessions draw it
-> down. PAYG's "full hour deducted at session start" becomes a balance
-> deduction; packs are larger top-ups. This is simpler than per-purchase
-> accounting regardless of the refund position.
->
-> It also makes the compensation question cheap to answer. A Day Pass that dies
-> at hour 2 of 24 leaves 22 hours owed. Sending that back as Bitcoin is a
-> **$91.67 payout**; returning it to the balance costs the GPU time to serve it
-> — about **$11 at two sessions per card**, eight times less, and the customer
-> stays rather than leaves. Whether to do that automatically is a policy
-> decision, but the mechanism should exist because it is far cheaper than the
-> alternative it replaces.
+> **Annotation — purchases top up a balance; sessions draw it down.** Nothing
+> ever flows back. See §11 for the consumption rule and for why the balance is
+> denominated in hours rather than currency.
 
 > **Annotation — three things the tiers imply for the architecture.**
 >
@@ -459,8 +443,9 @@ paths, and the venv lives on the network volume so it survives pod restarts.
 > come back. The machinery is still what *detects* the failure; what it should
 > drive is (a) a warm pre-loaded standby slot, since recovery time is dominated
 > by model loading, (b) scheduler bias toward stability over price, and
-> (c) returning interrupted time to the customer's hour balance — not a
-> payout, and roughly eight times cheaper than one (see §1).
+> (c) a decision about the customer whose hour was consumed by an outage —
+> unused time is never returned by design, but a failure is not the same as a
+> choice not to use (see §11).
 
 ---
 
@@ -682,26 +667,63 @@ SESSION #ABC123 — one purchase, one identity
 **The customer must not pay three times because our infrastructure had to
 recover.** Attempts are an infrastructure concern; the session is the customer's.
 
-### When the billing clock starts
+### The session clock
 
-The clock starts when the **session becomes usable**: worker ready, models
-loaded, client attached.
+**Settled.** An hour is deducted the moment the session becomes usable — worker
+running, models loaded, client connected — and then runs as **wall clock**.
 
-Before that point the customer can do nothing, so the time is our cost. After
-it, their time is their own — whether they are streaming, choosing a source
-face, or between calls.
+```
+  balance >= 1 hour?  ──no──▶  cannot connect
+        │ yes
+        ▼
+  connect · worker ready · models loaded
+        │
+        ▼  DEDUCT 1 HOUR, countdown starts
+  12:00 ────────────────────────────────────▶ 13:00
+        │                                    │
+        │  used for live, batch, or not      │  hour exhausted
+        │  at all — the customer's choice    │
+        │                                    ▼
+        │                          extend modal fires before this
+        │                          point; extend if balance allows
+```
 
-This places cold start on our side of the ledger, which is deliberate: it makes
-the scheduler, the warm pool and the retry policy all optimise for the thing the
-customer experiences. If the clock started at session creation instead, every one
-of those systems would be free to be slow at the customer's expense.
+Two rules follow, and they are deliberate:
 
-> **Annotation —** an earlier draft proposed starting at the first delivered
-> frame. That assumed live-only; a batch session has no first frame, and setup
-> time is use rather than idleness. Two related questions remain open: whether
-> upload time is billed (a 2 GB transfer is minutes with the GPU idle —
-> overlapping it with worker startup is the likely answer), and what happens to a
-> batch job that outlives its session. See SESSION_PLANE.md.
+- **Before the session is usable, nothing is charged.** The customer cannot do
+  anything yet, so provisioning and model loading are our cost. This is what
+  keeps the scheduler, the warm pool and the retry policy all optimising for the
+  thing the customer actually experiences.
+- **After that, the hour is consumed whether it is used or not.** Idle time
+  inside a paid hour belongs to the customer. There is no metering, no partial
+  consumption, and **no return of unused time**.
+
+Before the hour expires, a modal offers to extend. Extending deducts another
+hour if the balance can sustain it.
+
+> **Annotation — this already exists in prototype.** The `auto_stop_warning`
+> event, the `keep_alive` command, and the desktop's countdown dialog with
+> Extend and Dismiss were built for pod uptime. The mechanism transfers directly
+> to session time; what changes is what it counts down and that Extend must
+> check and deduct balance.
+
+> **Annotation — balance should be denominated in hours, not currency.** Packs
+> sell hours at a discount, so a dollar balance cannot represent them: $35 of
+> balance against a $10 hourly price yields 3.5 hours, not the 4 that were
+> bought. Purchases convert money to hours at the tier's rate; sessions deduct
+> one hour. A Day Pass is then 24 hours of balance drawn down in hour blocks,
+> which keeps one consumption rule for every tier.
+
+> **Annotation — infrastructure failure is a different case and is not yet
+> covered.** "No return of unused time" answers the customer who chooses not to
+> use their hour. It does not obviously answer the customer whose GPU died at
+> minute five. Deciding this deliberately is worth more than it costs, because
+> it is the difference between an outage and a grievance.
+
+Two related questions remain open: whether upload time is billed (a 2 GB
+transfer is minutes with the GPU idle — overlapping it with worker startup is
+the likely answer), and what happens to a batch job that outlives its session.
+See SESSION_PLANE.md.
 
 ---
 
@@ -740,13 +762,16 @@ when customers arrive close together.
 > building the second is mostly a matter of deciding when to start one
 > speculatively.
 >
-> **The five minutes should not be one global constant.** It is a bet that a
-> customer returns before the hold costs more than the cold start it saves, and
-> that bet differs sharply by tier. A PAYG customer has already paid for the full
-> hour at session start, so holding their worker until that hour expires costs at
-> most $1 against $10 collected and guarantees an instant reconnect. A Day Pass
-> customer at $4.17/hour cannot be held on the same terms. Make the grace period
-> a function of the tier and of paid-but-unused time.
+> **For an in-progress session there is no bet to make.** The consumption rule
+> in §11 settles it: the customer has already paid for the whole wall-clock hour
+> and may reconnect at any point inside it, so the worker is **held until their
+> hour expires** — not for five minutes. Releasing it early only buys a cold
+> start we would then have to pay for, on time the customer already owns.
+>
+> The five-minute timer therefore applies to a genuinely different case: a GPU
+> whose sessions have all *expired*, being kept warm on the chance a new customer
+> arrives. That is speculative capacity, and it is the same mechanism as a warm
+> pool — the grace period holds it behind demand, a warm pool holds it ahead.
 
 ---
 
