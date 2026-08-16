@@ -51,30 +51,89 @@ And one priority inverted — see below.
 
 ---
 
-## The economics say cold start, not packing
+## What the product is
 
-Run the proposal's pricing through its own infrastructure numbers.
+Settled, and it removes two of the original open questions:
+
+- **The client is our desktop app.** Customers do not integrate against a
+  protocol. `desktop.py` is the product surface; the WebSocket API stays an
+  internal detail between our app and our workers.
+- **A session is time, not a mode.** A customer buys a block — five minutes, an
+  hour — connects, and within that block uses either live video call *or* batch
+  processing, switching freely.
+
+Both have consequences the original proposal does not cover, because it assumes
+a session is one kind of work.
+
+The first is uncomfortable: **batch video is a launch prerequisite, not a
+follow-up.** It is currently unimplemented
+(`ProcessingPipeline._process_target_batch()` handles images only). You cannot
+sell "an hour of the platform, live or batch" while half of that sentence
+returns an error.
+
+The second is that **the desktop app now needs to become a client of a service**
+rather than of a pod. Today `PHANTOM_API_URL` points at a specific pod, set by
+hand in `.env`. It needs identity, session purchase and remaining-time state,
+worker assignment, and reconnection.
+
+The third is file transfer, and it is bigger than it looks. Batch on a remote
+GPU means getting the target video *to* that GPU and the result back.
+`handle_upload_source` exists but is base64 inside a single JSON WebSocket
+message — fine for a 200 KB source face, unusable for a 2 GB video: 33% inflation,
+held entirely in memory at both ends, no chunking, no resume, no progress. A
+real transfer path is required work, and every second of it is billed session
+time unless it is deliberately excluded.
+
+---
+
+## The economics, corrected for session length
+
+My first pass assumed the five-minute minimum was typical. At hour-long sessions
+the picture changes enough to restate.
 
 ```
-Session price          $10.00 per 5 minutes
-GPU                    $1.00 / hour
+Assuming $2.00/min ($10 per 5 minutes) holds at all durations, GPU at $1.00/hr
 
-GPU cost per session   1 session/GPU   →  $0.083   (120x revenue)
-                       2 sessions/GPU  →  $0.042   (240x revenue)
-
-Saving from packing 1 → 2               =  $0.042  per session
-90s of cold start (30% of the purchase) =  $3.00   per session
-                                           ─────────────────────
-                                           ~72x more valuable
+                              5-min session      60-min session
+  revenue                          $10.00             $120.00
+  GPU cost, 1 session/card          $0.083              $1.000
+  GPU cost, 2 sessions/card         $0.042              $0.500
+  packing saves                     $0.042              $0.500
+  90s cold start, unbilled          $3.00               $3.00
+    as % of the purchase             30.0%                2.5%
+  ─────────────────────────────────────────────────────────────
+  cold start : packing                72x                  6x
 ```
 
-Compute is between a 120th and a 240th of revenue. The headline infrastructure
-idea — packing two sessions onto one card — is worth about **four cents** per
-session. Meanwhile the pod must be provisioned, the repo pulled, dependencies
-checked, and four ONNX models loaded before the customer sees a single frame.
+Cold start still wins, but by **6×, not 72×**. The absolute loss is identical —
+90 seconds at $2/min is $3 whatever the session length — but as a share of the
+purchase it collapses from 30% to 2.5%. Long sessions amortise startup; short
+ones are dominated by it.
 
-On a five-minute minimum purchase, that startup is not overhead. It is the
-product.
+### I under-valued packing
+
+Reading packing as a cost saving was the wrong lens. Four cents, or fifty, is
+noise either way. The right lens is capacity:
+
+```
+  revenue per GPU-hour, 1 session   $120
+  revenue per GPU-hour, 2 sessions  $240      ← this is the argument
+```
+
+The proposal's own central worry is that GPU availability fluctuates between
+regions — that supply, not price, is the constraint. If that is true, packing is
+not a 50-cent saving. It **doubles the demand you can serve with the cards you
+can actually get.**
+
+That does not move it earlier in the plan, because it stays blocked behind the
+largest refactor here. But it changes why it matters, and it should be
+re-elevated the moment availability rather than cost becomes the limiter.
+
+### Cold start, drawn against the short session
+
+Where startup hurts most is the five-minute purchase, so that is the case worth
+picturing. The same 90 seconds against an hour is a thin sliver at the left
+edge — real money, but no longer the shape of the product.
 
 ```
                 0:00                                              5:00
@@ -96,6 +155,51 @@ WARM SLOT        ├┬───────────────────
 > models, two of which download on first use. It has never been timed end to
 > end. On a cold volume it is considerably worse. Measuring it is stage 1 for
 > exactly this reason.
+
+---
+
+## Two workloads, one session
+
+A session that can be either live or batch is really a lease on capacity that
+runs two workloads with opposite profiles. The scheduler has to know the
+difference.
+
+```
+                 LIVE                         BATCH
+  latency        hard budget (33ms/frame)     irrelevant
+  duration       holds the slot throughout    bursty: saturate, then idle
+  interruption   visible failure              retryable, resumable
+  scaling        bounded by worst frame       bounded by throughput
+  preemptible    no                           yes
+```
+
+Three consequences:
+
+- **Do not co-schedule batch onto a card serving live** until measurement says
+  it is safe. A batch job saturating the GPU is exactly the spike that blows a
+  live session's frame budget. Batch is preemptible; live is not.
+- **Batch is where the fault tolerance actually pays.** Everything the proposal
+  describes — queue, retry, recover on another GPU — works properly for a file
+  job and only partially for a call. The machinery is not wasted; it is simply
+  better matched to the half of the product that was going to be built second.
+- **An idle live session is not idle capacity.** A customer who has paid for an
+  hour and is between calls still holds their slot. Slot accounting must track
+  purchased time, not activity.
+
+### Jobs that outlive the session
+
+Customer buys an hour, starts a 90-minute export at minute 55. This needs a
+decided policy, and all four options are defensible:
+
+1. Refuse jobs that cannot finish in the remaining time (needs a duration
+   estimate, and a wrong estimate is worse than no estimate).
+2. Run it, bill the overflow.
+3. Run to completion as a courtesy, absorb the cost.
+4. Detach the job from the session — finish it, hold the result for download.
+
+Option 4 is the most generous and the most work, and it is the one that makes
+batch genuinely different from live rather than an awkward guest inside a
+live-shaped session.
 
 ---
 
@@ -260,13 +364,30 @@ SESSION #ABC123 — one purchase, one identity
  two failed attempts — not billed, not the customer's problem
 ```
 
-Starting the clock at first frame is the decision that ties the architecture
-together. It puts cold start on **our** side of the ledger, which means the
-scheduler, the warm pool and the retry policy all optimise for the same thing
-the customer cares about.
+**Revision:** I originally proposed starting the clock at the first delivered
+frame. That was written assuming live-only. A session that may open in batch
+mode has no first frame to wait for, and a customer who attaches and then spends
+two minutes choosing a source image has not been idle — they have been using the
+product.
+
+The rule that generalises is **the clock starts when the session becomes
+usable**: worker ready, models loaded, client attached. Before that point the
+customer cannot do anything, so it is our cost. After it, their time is their
+own regardless of which mode they pick or whether they are actively streaming.
+
+That preserves the property that matters — cold start sits on **our** side of the
+ledger, so the scheduler, the warm pool and the retry policy all optimise for the
+same thing the customer cares about — while covering both workloads.
 
 If the clock instead starts at session creation, every one of those systems is
-free to be slow at the customer's expense — and eventually will be.
+free to be slow at the customer's expense, and eventually will be.
+
+Upload time is the one case that needs an explicit decision rather than a
+default. A 2 GB video transfer is minutes of wall clock during which the GPU is
+doing nothing. Billing it is defensible and will feel like theft; excluding it
+invites abuse. The middle position — bill it, but transfer while the worker is
+still cold, so it overlaps startup rather than eating session time — is probably
+right and needs the transfer path designed for it from the start.
 
 ---
 
@@ -304,7 +425,23 @@ session is unusable long before it OOMs.
 - Pre-seed both regional volumes, so a fallback region is not silently the slow
   path.
 
-### 3. Control plane, one session per GPU
+### 3. Close the product gap: batch video and file transfer
+
+*Ships: the other half of what a session is sold as. Launch prerequisite.*
+
+Not control-plane work, but nothing above can be sold without it.
+
+- Wire `_process_target_batch()` for video. The FFmpeg building blocks already
+  exist in `pipeline/io/ffmpeg.py` — `extract_frames`, `create_video`,
+  `restore_audio`, `clean_temp` — and batch reuses the same compositor as live,
+  so most of the work is frame iteration plus audio and FPS restoration.
+- Build a real file transfer path: chunked, resumable, progress-reporting, in
+  both directions. `upload_source`'s base64-in-a-JSON-message approach does not
+  extend to video.
+- Fixes the CI end-to-end test and desktop VIDEO mode as a side effect; both are
+  currently broken against this gap.
+
+### 4. Control plane, one session per GPU
 
 *Ships: the product. Customers can buy and run sessions.*
 
@@ -314,10 +451,11 @@ session is unusable long before it OOMs.
 - Promote `orchestrator.py`'s discovery and multi-datacenter fallback into a
   scheduler service. A port, not a rewrite — and it brings regional redundancy
   along for free.
-- Deliberately **no packing yet**. One session per worker is correct, safe, and
-  costs eight cents.
+- Session state must carry the active mode, since a customer switches between
+  live and batch inside one session.
+- Deliberately **no packing yet**. One session per worker is correct and safe.
 
-### 4. Resilience
+### 5. Resilience
 
 *Ships: sessions that survive infrastructure failure, or refund themselves.*
 
@@ -328,7 +466,7 @@ session is unusable long before it OOMs.
 - Retry classification and bounded attempts, as proposed.
 - Automatic credit for interrupted minutes.
 
-### 5. Multi-tenancy and packing
+### 6. Multi-tenancy and packing
 
 *Ships: margin improvement. Only worth doing at volume.*
 
@@ -342,7 +480,7 @@ session is unusable long before it OOMs.
 At $10 per five minutes this stage is a rounding error until many sessions run
 concurrently. It is listed fifth because it earns fifth place.
 
-### 6. Provider abstraction
+### 7. Provider abstraction
 
 *Ships: insurance against a single vendor's availability and pricing.*
 
@@ -353,31 +491,54 @@ implementation to conform to it and its shape is already visible in
 
 ---
 
-## Open questions
+## Settled
 
-**Who runs the client, and where do frames come from?**
-Today `desktop.py` captures the webcam and pushes JPEG frames to the pod. If
-customers use their own application, the frame source and virtual-camera output
-move into their environment, and what we sell becomes a protocol rather than an
-app. This shapes the session API more than anything else in the proposal.
+- **Who runs the client.** Our desktop app. No public protocol, no third-party
+  integration surface. The WebSocket API stays internal.
+- **Whether batch belongs in the same plane.** Yes — in the same *session*. A
+  customer buys time and chooses the mode, which promotes batch video from a
+  follow-up to a launch prerequisite.
 
-**Is a session one face, or one seat?**
-Source embedding, quality preset and realism settings are currently
-per-process. If a customer expects to switch source faces mid-session, that is
-per-session state; if a session is one identity for its duration, embeddings can
-be cached per worker and reused, which meaningfully cheapens packing.
+## Still open
 
-**What happens at the five-minute boundary?**
+**What happens at the session boundary?**
 Hard cut, or top-up? A call ending mid-sentence is a bad experience; an
 auto-extending session is a billing surprise. This is the auto-stop warning we
 already have, pointed at the customer instead of at us — the mechanism
-transfers, the policy does not.
+transfers, the policy does not. Sharper now that sessions may be an hour: the
+sunk cost of losing a session at minute 59 is much larger.
 
-**Does batch belong in the same plane?**
-Batch video is still unimplemented, and it is genuinely well-suited to
-everything in the proposal — queueing, retrying and recovering a file job is
-what that machinery is good at, without the live-session caveats. Possibly worth
-treating batch as a second session type rather than a separate product.
+**What happens to a batch job that outlives its session?**
+Four defensible options, listed under *Two workloads, one session*. Needs a
+decision before batch ships, because it determines whether a job is owned by the
+session or merely started by it.
+
+**Is upload time billed?**
+A 2 GB transfer is minutes during which the GPU does nothing. Billing it feels
+like theft; excluding it invites abuse. Overlapping transfer with worker startup
+is probably the answer, but it has to be designed in from the start.
+
+**Is a session one face, or one seat?**
+Source embedding, quality preset and realism settings are currently
+per-process. If a customer switches source faces mid-session, that is per-session
+state; if a session is one identity throughout, embeddings can be cached per
+worker and reused, which meaningfully cheapens packing.
+
+**Does the price hold at length?**
+$2/min is $120/hour. Everything in the economics section assumes the five-minute
+rate scales linearly; if hour-long sessions are discounted, the GPU-cost ratios
+shrink and packing gets more important than shown here.
+
+**What is the concurrency shape?**
+Many short sessions and few long ones imply different systems. Short sessions
+make cold start and the warm pool dominant; long sessions make packing and
+capacity planning dominant. This is the single biggest unknown remaining, and it
+decides whether stage 2 or stage 6 is where the leverage is.
+
+**Where does authentication and payment live?**
+Not addressed in the proposal or here. The desktop app currently has no concept
+of a user. Purchase, entitlement and remaining-time state all have to originate
+somewhere before the session API means anything.
 
 ---
 
@@ -386,11 +547,16 @@ treating batch as a second session type rather than a separate product.
 Build it. The proposal is sound, most of the hard thinking is already done in
 it, and it is additive to a pipeline that works.
 
-But reorder the first moves: **measure the two unknown numbers, then attack cold
-start, then build the control plane at one session per GPU.** Packing — the idea
-the proposal is organised around — is worth roughly four cents a session and is
-blocked behind the largest refactor in the plan. It belongs fifth, not first.
+Reorder the first moves: **measure the two unknown numbers, close the batch and
+file-transfer gap, attack cold start, then build the control plane at one session
+per GPU.** Packing stays late — not because it is low value, but because it is
+blocked behind the largest refactor in the plan.
 
-And take the one decision that costs nothing today and is painful to retrofit:
-**start the billing clock at the first delivered frame.** Everything else then
-optimises in the customer's direction by default.
+Two things determine how much of the rest is right. **Whether sessions are
+typically minutes or hours** decides whether cold start or capacity is the real
+constraint; they differ by an order of magnitude and the answer is not known.
+And **batch is no longer optional** — it is half of what a session is sold as.
+
+Then take the one decision that costs nothing today and is painful to retrofit:
+**start the billing clock when the session becomes usable**, not when it is
+created. Everything else then optimises in the customer's direction by default.
