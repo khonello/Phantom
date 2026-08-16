@@ -199,6 +199,12 @@ Two documents cover it, and nothing in either is built yet:
 - [docs/SESSION_PLANE.md](docs/SESSION_PLANE.md) — the assessment. What already
   exists, what blocks GPU session packing, the economics, and a staged path.
 
+Planned pipeline work is tracked alongside it:
+
+- [docs/INPUT_GUARDS.md](docs/INPUT_GUARDS.md) — refusing inputs that would
+  produce a confidently wrong swap: multi-face sources and frames, unusable
+  photos, and the wrong person hidden in a batch of source images.
+
 ## Development
 
 ### Project Structure
