@@ -257,12 +257,18 @@ the card and the pipeline.
 > **Define the ceiling by a latency budget, not by absence of crashes.** A live
 > session is unusable long before it OOMs.
 >
-> **Packing is blocked in the pipeline, not the control plane.** `CONFIG`
-> (`pipeline/config.py:205`) and `BUS` (`pipeline/events.py:122`) are
-> module-level singletons, and the API server broadcasts every encoded frame to
-> one shared client set. Two customers on one worker would see each other's
-> video and mutate each other's settings. Packing requires per-session context
-> and session-routed frames first — see SESSION_PLANE.md stage 6.
+> **Packing itself is available now.** Two sessions on one GPU means two
+> pipeline processes, each with its own config, event bus, port and client set —
+> isolated by construction. Three shared paths need session-scoping first:
+> `_UPLOAD_DIR`, the batch temp directories, and — most importantly —
+> `runpod.stop_pod()` in the auto-stop timer, since whichever process fires
+> first would kill the pod and every session on it. Pod lifecycle belongs to the
+> scheduler (§6), not the worker.
+>
+> What *is* blocked is sharing one set of loaded models between sessions, which
+> `CONFIG` (`pipeline/config.py:205`), `BUS` (`pipeline/events.py:122`) and the
+> shared client set prevent. That is an optimisation — it buys VRAM headroom and
+> a near-instant second session on a warm pod — not a prerequisite for packing.
 
 ---
 

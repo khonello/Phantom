@@ -45,8 +45,9 @@ a service, not to invent it.
 
 ### Needs correcting
 
-- **Session packing cannot be built yet.** Two customers on one worker process
-  would currently see each other's video. Hard blocker, and it is in our code.
+- **Packing is not blocked.** Two sessions on one GPU means two pipeline
+  processes, isolated by construction, and that works today. What is blocked is
+  *sharing loaded models* between them — an optimisation, not a prerequisite.
 - **VRAM is the wrong capacity metric.** For this workload the binding
   constraint is compute and host CPU.
 - **Live sessions cannot be "recovered" the way batch jobs can.** The machinery
@@ -275,7 +276,8 @@ live-shaped session.
 | Scheduler as a service | **missing** | Logic exists; runs once, in a CLI, on a developer's laptop |
 | Session manager, queue, state machine | **missing** | — |
 | Leases, watchdog, retry classification | **missing** | — |
-| Multi-tenant worker | **blocked** | Prevented by module-level singletons |
+| Two sessions per GPU | **have** | Two pipeline processes, isolated by construction. Needs three shared paths fixed — see below |
+| Shared models across sessions | **missing** | Prevented by module-level singletons. An optimisation of packing, not a prerequisite for it |
 
 ```
                                               ┌─ status ─────────────┐
@@ -300,56 +302,78 @@ live-shaped session.
 
 ## Three assumptions that need correcting
 
-### 1. Packing is blocked in our code, not the control plane
+### 1. Packing works today; only *shared models* are blocked
 
-The worker process is single-tenant by construction, in three separate ways:
+> **Correction.** An earlier draft claimed packing was blocked and that two
+> customers would see each other's video. That was wrong, and wrong in a way
+> worth recording: it took a property of one implementation and stated it as a
+> property of the idea.
 
-- `CONFIG` is a module-level singleton — `pipeline/config.py:205`
-- `BUS` is a module-level singleton — `pipeline/events.py:122`
-- The API server holds one `Set` of clients and broadcasts every encoded frame
-  to all of them — `pipeline/api/server.py`
-
-That last one is not a performance problem. It is a privacy incident.
+Two sessions on one GPU means **two pipeline processes**. Each gets its own
+`CONFIG`, its own `BUS`, its own WebSocket server on its own port, its own
+client set. They are isolated by construction and need no refactor.
 
 ```
-TODAY — ONE PROCESS                    TARGET — SAME PROCESS
-┌────────────────────────────┐         ┌────────────────────────────┐
-│ worker process             │         │ worker process             │
-│  ┌────────┐  ┌────────┐    │         │  ┌──────────────────────┐  │
-│  │ CONFIG │  │  BUS   │    │         │  │ shared models (once) │  │
-│  └────────┘  └────────┘    │         │  └──────────────────────┘  │
-│  ┌──────────────────────┐  │         │  ┌───────────┐┌─────────┐  │
-│  │ _clients: Set        │  │         │  │ Session A ││Session B│  │
-│  │   → broadcast to all │  │         │  │    ctx    ││   ctx   │  │
-│  └──────────┬───────────┘  │         │  └─────┬─────┘└────┬────┘  │
-└─────────────┼──────────────┘         └────────┼───────────┼───────┘
-        ┌─────┴─────┐                           │           │
-        │  ╳ crossed│                           │           │
-        ▼           ▼                           ▼           ▼
-      ( A )       ( B )                       ( A )       ( B )
+  PACKING — available now              SHARED MODELS — needs the refactor
+┌──────────────────────────────┐     ┌──────────────────────────────────┐
+│ GPU                          │     │ GPU                              │
+│ ┌────────────┐┌────────────┐ │     │ ┌──────────────────────────────┐ │
+│ │ process A  ││ process B  │ │     │ │ one process                  │ │
+│ │ :9000      ││ :9001      │ │     │ │ ┌──────────────────────────┐ │ │
+│ │ own CONFIG ││ own CONFIG │ │     │ │ │ models — loaded ONCE     │ │ │
+│ │ own BUS    ││ own BUS    │ │     │ │ └──────────────────────────┘ │ │
+│ │ own models ││ own models │ │     │ │ ┌─────────┐  ┌─────────┐     │ │
+│ │  ~1 GB     ││  ~1 GB     │ │     │ │ │ ctx A   │  │ ctx B   │     │ │
+│ └─────┬──────┘└──────┬─────┘ │     │ │ └────┬────┘  └────┬────┘     │ │
+└───────┼──────────────┼───────┘     └──────┼─────────────┼───────────┘ │
+        ▼              ▼                     ▼             ▼
+      ( A )          ( B )                 ( A )         ( B )
 
-  each receives the other's             routed by session_id,
-  video and mutates the                 models still shared
-  other's config
+  isolated, ~1 GB VRAM each,          isolated, ~1 GB total,
+  N model loads                       one model load
 ```
 
-The tempting shortcut is one OS process per session. That works and it is safe,
-but it throws away the reason to pack: each process loads its own copy of all
-four models — roughly a gigabyte of VRAM duplicated per session, for no benefit.
+What the singleton state (`pipeline/config.py:205`, `pipeline/events.py:122`,
+and the shared client `Set` in `pipeline/api/server.py`) actually prevents is
+running two customers **inside one process** — which is the model-sharing
+optimisation, not packing.
 
-The version worth building keeps one set of loaded models and gives each session
-its own config, event bus and frame route.
+#### Three shared paths to fix first
 
-The concurrency works out: OpenCV, NumPy and ONNX Runtime all release the GIL
-during their heavy calls, so sessions running as threads in one process
-genuinely execute in parallel rather than queueing behind the interpreter.
+Two-process packing is safe except where the processes touch the same
+filesystem or the same pod:
+
+| Collision | Consequence | Fix |
+|---|---|---|
+| `_UPLOAD_DIR = '/tmp/phantom_uploads'` | Two customers upload `face.jpg`; one overwrites the other | Scope by session id |
+| Batch temp dirs derived from the target filename | Same-named targets collide | Scope by session id |
+| Auto-stop calls `runpod.stop_pod()` (`api/server.py`) | Whichever process's timer fires first kills the pod **and every session on it** | Move pod lifecycle to the control plane; workers must not stop pods |
+
+The third is architectural rather than a bug. In the target design the scheduler
+owns the GPU, so that code leaves the worker entirely.
+
+#### What the refactor is actually worth
+
+Not packing. Two narrower things:
+
+- **VRAM per session.** Two processes duplicate all four models — roughly 1 GB
+  each, plus a CUDA context. Sharing frees that, which raises how many sessions
+  fit per card *once compute allows it*.
+- **Second-session start time.** A second process on a warm pod still loads
+  models from scratch: another 10–30 seconds. Shared models make the second
+  session on an existing GPU near-instant. This is really a cold-start win.
+
+If the refactor is done, the concurrency works out: OpenCV, NumPy and ONNX
+Runtime all release the GIL during their heavy calls, so sessions running as
+threads in one process genuinely execute in parallel.
 
 ### 2. Compute and CPU bind before VRAM does
 
 The proposal reasons at length about high-VRAM cards and sketches four sessions
-inside 128 GB. For this pipeline that framing is backwards. Once models are
-shared, the resident set is roughly a gigabyte total — detection, swap,
-restoration, occluder — and each additional session adds only working buffers.
+inside 128 GB. For this pipeline that framing is backwards. Even duplicating all
+four models per process, a session costs about a gigabyte; with sharing it is a
+few megabytes on top of a single ~1 GB resident set. Neither figure makes VRAM
+the limit on a 16 GB card.
 
 What actually binds, in order:
 
@@ -357,7 +381,7 @@ What actually binds, in order:
 |---|---|---|
 | GPU compute | ~80 inferences/s | Four models per frame at 20 fps. Detection runs every frame and is the most expensive of the four. |
 | Host CPU | 0.26–1.14 cores | Compositing is pure OpenCV — measured at ~13 ms/frame at 256, ~38 ms for a close-up at 320. The GPU does not help with any of it. |
-| VRAM | a few MB | Only if models are shared. Without sharing, ~1 GB per session and this moves to the top. |
+| VRAM | ~1 GB, or a few MB | Two processes duplicate all four models, so ~1 GB per session. With the sharing refactor, a few MB. On the 16 GB+ cards `RUNPOD_MIN_VRAM` already selects, duplication is affordable for several sessions — compute and CPU still bind first. |
 
 The CPU line is the one to watch, and the proposal does not mention CPU at all.
 A pod is rented with a fixed vCPU allocation attached to the GPU, and it is
@@ -501,22 +525,29 @@ Not control-plane work, but nothing above can be sold without it.
   live and batch inside one session.
 - Deliberately **no packing yet**. One session per worker is correct and safe.
 
-### 4. Multi-tenancy and packing
+### 4. Packing, then shared models
 
-*Ships: the dominant margin lever under the tiered pricing.*
+*Ships: the dominant margin lever under the tiered pricing. Cheaper than it looks.*
 
-- Remove the `CONFIG` and `BUS` singletons in favour of per-session context
-  objects — the largest single change to existing code in this plan.
-- Route frames by `session_id` instead of broadcasting to a client set.
-- Share one set of loaded models across sessions; ONNX Runtime sessions are
-  already safe to call from multiple threads.
-- Enforce the measured `max_sessions` in the scheduler's slot accounting.
+Split in two, because the first half is nearly free:
+
+**4a — packing (small).** Run *N* pipeline processes per pod, isolated as they
+already are. Fix the three shared paths: session-scope `_UPLOAD_DIR`,
+session-scope batch temp dirs, and move `runpod.stop_pod()` out of the worker
+into the control plane. Enforce the measured `max_sessions` in slot accounting.
+
+**4b — shared models (larger, optional).** Remove the `CONFIG` and `BUS`
+singletons in favour of per-session context, and route frames by `session_id`
+instead of broadcasting to a client set. Buys VRAM headroom and a near-instant
+second session on a warm pod; ONNX Runtime sessions are already safe to call
+from multiple threads. Worth doing when VRAM or second-session latency actually
+binds — not before.
 
 Under the earlier $120/hour assumption this was a rounding error. At $10/hour
 PAYG and $4.17/hour on a Day Pass it is worth between 2x and 115x more than
 fixing cold start, and `max_sessions` becomes a pricing input rather than just a
-capacity number. It sits fourth only because it is blocked behind the control
-plane and the singleton refactor — start that refactor early, in parallel.
+capacity number. Stage 4a only needs the control plane to know about slots, so
+it can land as soon as stage 3 does.
 
 ### 5. Attack cold start
 
@@ -624,8 +655,9 @@ on a Day Pass — packing is worth between 2× and 115× more than fixing cold
 start, and `max_sessions` stops being a capacity number and becomes a pricing
 input. Cold start is still worth fixing, but as a user-experience problem.
 
-Because packing is blocked behind the singleton refactor, **that refactor should
-start early and in parallel**, even though packing itself lands fourth.
+And packing turns out to be cheap: two isolated processes per pod plus three
+shared-path fixes. The singleton refactor is a later optimisation for VRAM
+headroom and second-session latency, not the gate it was described as.
 
 Two things still decide how much of the rest is right. **What a Day Pass
 actually costs us** depends on whether "24 hours" means access or accumulated
