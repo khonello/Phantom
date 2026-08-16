@@ -141,7 +141,7 @@ options:
   --enhancer-model          Restoration backend: codeformer (default), gfpgan
   --enhancer-weight         CodeFormer fidelity: 0=most restoration, 1=closest to input
   --enhance-strength        How much of the restored face to keep (0.0-1.0)
-  --aligned-size            Compositing working resolution (128-512)
+  --aligned-size            Ceiling on compositing resolution (128-512)
   --temporal-alpha          EMA on composited pixels (1.0=off)
   --color-strength          Scales the LAB colour transfer (0.0-1.0)
   --no-enhance              Disable face restoration
@@ -204,7 +204,7 @@ See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for:
 
 ```bash
 # Type checking (strict mode)
-mypy pipeline.py pipeline desktop
+mypy pipeline desktop
 
 # Linting
 flake8 pipeline.py pipeline desktop

@@ -236,10 +236,11 @@ vastai show instance <ID> | grep ports
 
 Start with `optimal`. Switch to `production` if you have headroom.
 
-Note `production` is not simply "better": it composites at 320px and restores
-harder, which on a video call can push the face past believable and into
-noticeably-cleaner-than-the-room. Judge it on real footage rather than assuming
-the highest preset wins — see [ENHANCEMENT.md](ENHANCEMENT.md).
+A preset buys compute, not a different look: capture resolution, detector input,
+compositing ceiling and the occlusion pass scale with it, while the restoration
+knobs that decide whether the face reads as real are identical across all three.
+Picking a preset to fit your GPU therefore cannot change how the output looks —
+see [ENHANCEMENT.md](ENHANCEMENT.md) for the knobs that do.
 
 ---
 

@@ -70,7 +70,10 @@ They do different things and both matter:
   the unrestored swap. At `0.7`, 30% of the original imperfection survives.
 
 Turning either one down makes the face less impressive and more believable.
-Defaults are `0.7` / `0.7`; `production` uses `0.6` / `0.8`.
+Both default to `0.7`, and are **the same in every quality preset** — a preset
+buys compute, not a different look. Change them globally in `_LOOK`
+(`pipeline/api/schema.py`), or per run with `--enhancer-weight` /
+`--enhance-strength` or `set_realism`.
 
 ### FFHQ framing
 
@@ -132,16 +135,35 @@ it.
 
 ### Colour
 
-LAB transfer, sampled **inside the mask only**. Sampling a bounding box instead
+Two passes, sampled **inside the mask only**. Sampling a bounding box instead
 pulls in hair and background, which is how a bright window behind someone ends up
 shifting their skin tone.
 
-Correction ramps continuously with measured colour distance rather than
-triggering on a threshold, so it can never snap on and off between frames. The
-L-channel standard deviation is damped to 50%: matching L *mean* fixes brightness
-and matters; forcing L *std* flattens facial contrast.
+**Global** — a mean/std transfer in LAB. Ramps continuously with measured colour
+distance rather than triggering on a threshold, so it can never snap on and off
+between frames. The L-channel standard deviation is damped to 50%: matching L
+*mean* fixes brightness and matters; forcing L *std* flattens facial contrast.
 
-Controlled by `color_correction` (on/off) and `color_strength` (scale).
+**Illumination** — a global shift is only correct when the light is flat, and a
+video call almost never is; there is a window or a lamp on one side. Under
+directional light the real face carries a brightness gradient the swap does not,
+and no single shift can match both ends of it, so it lands correct on average and
+visibly wrong at one edge — which is a seam. This second pass corrects the
+low-frequency difference that survives the global match.
+
+It is computed on a residual reduced to 1/8 resolution, which is what stops it
+copying the target's face onto the swap: facial features cannot survive an 8×
+reduction, only illumination can. The blur is normalized by the mask, so
+out-of-mask pixels contribute nothing, and the correction is clamped to ±12 LAB
+units and faded out with the mask so it cannot introduce an edge of its own.
+
+Note the two are gated differently on purpose. The global pass engages only once
+the colours actually differ, since correcting a match is pure risk. The
+illumination pass always runs, because the case it exists for is one where the
+global means already agree and only their distribution across the face differs —
+gating it on the same distance would switch it off exactly when it is needed.
+
+Both controlled by `color_correction` (on/off) and `color_strength` (scale).
 
 ### Detail
 
@@ -189,10 +211,29 @@ Smoothing kills the latter, which is the shimmer that reads as fake.
 
 Both release under motion. The pixel EMA's gate is measured on the **real** crops
 rather than the fakes — the question is whether the subject actually moved, and
-the fakes carry generator noise that would confuse that signal. Below a mean
-absolute difference of 2.0 the subject is effectively still and smoothing is
-full; above 8.0 they are talking or turning and smoothing is fully released, so
-it cannot ghost.
+the fakes carry generator noise that would confuse that signal.
+
+The gate is **per region, not per frame**, and this matters more than it sounds.
+Someone talking with a still head changes only their mouth, maybe 15% of the
+crop. Averaged over the whole crop that lands below any sensible motion floor,
+so a frame-wide gate reads "still", leaves smoothing fully on, and blends lips
+across frames — smearing the exact thing a viewer on a call is watching. Two
+measures are taken and whichever releases more wins:
+
+- **Whole-crop** — did the subject turn or move? Absolute, floor 1.0 to ceiling 6.0.
+- **Per-region** — did *this* part move more than the rest? Measured as excess
+  over the crop's own median, so it self-calibrates to however noisy the camera
+  is instead of assuming a noise level.
+
+Taking the maximum means the gate can only ever smooth *less* than a frame-wide
+one, never more. That is the safe direction: under-smoothing costs a little
+shimmer, over-smoothing ghosts the mouth.
+
+The change map is built at quarter resolution first. That is not only for speed —
+area-averaging suppresses sensor noise, which is spatially incoherent, while
+leaving real motion, which is not. The measure therefore reports motion rather
+than grain, and a genuinely still subject gets smoothed properly instead of being
+held part-way open by whatever noise the camera has.
 
 Both reset on face loss and on source change. Both are bypassed when
 `many_faces` is set, since per-frame detection order is not stable and smoothing
@@ -219,13 +260,24 @@ own alignment, so the two agree by construction.
 
 ## Resolution
 
-`aligned_size` sets the working resolution for everything above (default 256,
-clamped 128–512). It is not an output resolution — the composited face is warped
-back to whatever size the face occupies in the frame.
+`aligned_size` sets a **ceiling** on the working resolution (default 256, clamped
+128–512). It is not an output resolution — the composited face is warped back to
+whatever size the face occupies in the frame.
 
-Higher is not automatically better. It costs latency, and beyond the point where
-the face in frame is smaller than the aligned crop it buys nothing. The presets
-use 192 / 256 / 320.
+Within that ceiling the size is chosen per face from how many frame pixels it
+actually covers, snapped to steps of 128/192/256/320/384/448/512. Someone sitting
+back from the camera is composited at 128 rather than 320: the swapper only
+produces 128px, so compositing a small face at 320 upsamples it more than twice
+over and then runs every downstream stage on six times the pixels, manufacturing
+detail their webcam never captured. Sitting near the face's own resolution is
+both cheaper and more honest.
+
+Step changes carry 18% hysteresis, because each change discards the temporal
+state — the smoothed buffer is the wrong shape — so a face hovering on a boundary
+must not flip back and forth.
+
+Higher ceilings are not automatically better. They cost latency and, past the
+face's own resolution, buy nothing. The presets use 192 / 256 / 320.
 
 Capture resolution is separately modest by design (480×270 / 640×360 / 960×540).
 A 1080p-sharp face on a video call is itself a tell.

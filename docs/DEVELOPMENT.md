@@ -60,7 +60,7 @@ python pipeline.py -s .github/examples/source.jpg -t .github/examples/target.mp4
 Strict type checking is enforced. Run before committing:
 
 ```bash
-mypy pipeline.py pipeline desktop
+mypy pipeline desktop
 ```
 
 All functions and methods must have complete type annotations. No `# type: ignore` without justification.

@@ -46,7 +46,7 @@ same compositor.
 
 ### Development
 - **Lint**: `flake8 pipeline.py pipeline desktop`
-- **Type check**: `mypy pipeline.py pipeline desktop`
+- **Type check**: `mypy pipeline desktop`
 - **Test**: `python pipeline.py -s=.github/examples/source.jpg -t=.github/examples/target.mp4 -o=.github/examples/output.mp4`
 
 ### Install Dependencies
@@ -139,20 +139,34 @@ Desktop quality dropdown controls capture resolution, frame rate, and processing
 Presets trade latency against realism. Defined once in
 `pipeline/api/schema.py::PRESETS`, applied via `FaceSwapConfig.apply_preset()`.
 
+A preset picks **how much compute to spend. It does not change how the face
+looks.** `enhancer_weight` and `enhance_strength` decide whether the output reads
+as a real call or as AI, and neither costs anything to compute — so varying them
+per preset only meant "production" restored hardest and therefore looked most
+synthetic, while presenting itself as the best option. They are identical in
+every preset now.
+
 |                         | Fast      | Optimal (default) | Production |
 |-------------------------|-----------|-------------------|------------|
 | **Capture resolution**  | 480x270   | 640x360           | 960x540    |
 | **Frame rate**          | 15 fps    | 20 fps            | 30 fps     |
 | **JPEG quality**        | 60        | 70                | 85         |
-| **Landmark EMA**        | 0.7       | 0.6               | 0.5        |
-| **Compositing size**    | 192       | 256               | 320        |
-| **Restore strength**    | 0.5       | 0.7               | 0.8        |
-| **Fidelity weight**     | 0.8       | 0.7               | 0.6        |
-| **Temporal EMA**        | 0.7       | 0.6               | 0.5        |
+| **Detector input**      | 320       | 448               | 640        |
+| **Compositing ceiling** | 192       | 256               | 320        |
 | **Occlusion masking**   | Off       | On                | On         |
+| **Landmark EMA**        | 0.7       | 0.6               | 0.5        |
+| **Temporal EMA**        | 0.7       | 0.6               | 0.5        |
+| **Restore strength**    | 0.7       | 0.7               | 0.7        |
+| **Fidelity weight**     | 0.7       | 0.7               | 0.7        |
 | **Grain matching**      | On        | On                | On         |
 
-Changing quality restarts the webcam capture device to apply new resolution/fps.
+The EMA factors vary with frame rate rather than with quality: smoothing across
+frames is smoothing across time, so the same factor reaches twice as far back at
+15fps as it does at 30.
+
+Capture settings live in `PRESETS` and are read by both the pipeline's own
+`VideoCapture` loop and the desktop's webcam thread, so local and push mode
+cannot diverge. Changing quality restarts the capture device to apply them.
 
 Presets deliberately **do not** set `enhance` or `color_correction`: both have
 explicit toggles in the desktop header, and a preset must not silently undo
@@ -211,7 +225,7 @@ that varies frame to frame feeds straight back into shimmer.
 | `enhancer_model` | `codeformer` | Restoration backend (`codeformer` or `gfpgan`) |
 | `enhancer_weight` | `0.7` | CodeFormer fidelity: `0`=most restoration, `1`=closest to input |
 | `enhance_strength` | `0.7` | How much of the restored face to keep. Full strength reads as AI; partial keeps believable imperfection |
-| `aligned_size` | `256` | Compositing working resolution (clamped 128–512) |
+| `aligned_size` | `256` | **Ceiling** on compositing resolution (clamped 128–512). The size actually used follows the face's own size in frame, in steps, with hysteresis — a distant face is not upsampled to detail its webcam never captured, and costs proportionally less |
 | `temporal_alpha` | `0.6` | EMA on aligned pixels, kills shimmer (`1.0` disables) |
 | `color_correction` | `True` | LAB transfer, sampled inside the mask, ramped by colour distance |
 | `color_strength` | `1.0` | Scales that transfer |
@@ -261,7 +275,7 @@ back to the other backend or off — rather than failing.
 ### Linting & Testing
 - flake8 checks: E3, E4, F
 - Exception: `pipeline/core.py` ignores E402 (imports after code) for performance-critical initialization
-- Run before commit: `mypy pipeline.py pipeline desktop` and `flake8 pipeline.py pipeline desktop`
+- Run before commit: `mypy pipeline desktop` and `flake8 pipeline.py pipeline desktop`
 
 ## Dependencies & Environment
 
@@ -294,7 +308,7 @@ back to the other backend or off — rather than failing.
 
 ### During Development
 - Keep PRs focused: one feature or bug fix per PR
-- Write complete type annotations; run `mypy pipeline.py pipeline desktop` locally
+- Write complete type annotations; run `mypy pipeline desktop` locally
 - Run linting: `flake8 pipeline.py pipeline desktop`
 - Test with example files: `python pipeline.py -s=.github/examples/source.jpg -t=.github/examples/target.mp4 -o=/tmp/test.mp4`
 - Use `.on_change()` for config updates, `BUS.emit()` for events, not global state mutations

@@ -132,29 +132,44 @@ selection (libx264, libx265, libvpx-vp9), CRF quality (0–51, default 18).
 Three presets trade latency against realism. Defined once in
 `pipeline/api/schema.py::PRESETS`, applied via `FaceSwapConfig.apply_preset()`.
 
-| Setting              | Fast  | Optimal (default) | Production |
-|----------------------|-------|-------------------|------------|
-| Landmark EMA (alpha) | 0.7   | 0.6               | 0.5        |
-| Compositing size     | 192   | 256               | 320        |
-| Fidelity weight      | 0.8   | 0.7               | 0.6        |
-| Restore strength     | 0.5   | 0.7               | 0.8        |
-| Temporal EMA         | 0.7   | 0.6               | 0.5        |
-| Occlusion masking    | Off   | On                | On         |
-| Grain matching       | On    | On                | On         |
-| Buffer size          | 3     | 4                 | 5          |
-| Warmup frames        | 3     | 5                 | 5          |
+A preset picks **how much compute to spend. It does not change how the face
+looks.** `enhancer_weight` and `enhance_strength` are what decide whether the
+output reads as a real call or as AI, and neither costs anything to compute —
+the weight is a scalar model input, the strength is one blend. Varying them per
+preset only meant "production" restored hardest and so looked *most* synthetic
+while presenting itself as the best option. They are identical everywhere now,
+and an operator choosing a preset for their GPU cannot change the look by
+accident.
 
-Desktop capture settings paired with each preset (`desktop/bridge.py::_QUALITY_CAPTURE`):
+| Cost                 | Fast    | Optimal (default) | Production |
+|----------------------|---------|-------------------|------------|
+| Capture resolution   | 480×270 | 640×360           | 960×540    |
+| Frame rate           | 15 fps  | 20 fps            | 30 fps     |
+| JPEG quality         | 60      | 70                | 85         |
+| Detector input       | 320     | 448               | 640        |
+| Compositing ceiling  | 192     | 256               | 320        |
+| Occlusion masking    | Off     | On                | On         |
 
-| Setting            | Fast    | Optimal | Production |
-|--------------------|---------|---------|------------|
-| Capture resolution | 480×270 | 640×360 | 960×540    |
-| Frame rate         | 15 fps  | 20 fps  | 30 fps     |
-| JPEG quality       | 60      | 70      | 85         |
+| Stability (scales with frame rate) | Fast | Optimal | Production |
+|------------------------------------|------|---------|------------|
+| Landmark EMA (alpha)               | 0.7  | 0.6     | 0.5        |
+| Temporal EMA                       | 0.7  | 0.6     | 0.5        |
+| Buffer size                        | 3    | 4       | 5          |
+| Warmup frames                      | 3    | 5       | 5          |
 
-**Fast**: Lower latency, cheaper compositing, no occlusion pass. Best for testing or low-powered GPUs.
-**Optimal**: Balanced. Default for most use cases.
-**Production**: Largest working resolution, heaviest smoothing and restoration.
+| Look (identical by design) | all presets |
+|----------------------------|-------------|
+| Fidelity weight            | 0.7         |
+| Restore strength           | 0.7         |
+| Grain matching             | On          |
+
+**Fast**: quarter the detector pixels, cheaper compositing, no occlusion pass. For low-powered GPUs.
+**Optimal**: balanced. Default.
+**Production**: largest detector and compositing ceiling, heaviest smoothing.
+
+Capture settings live in `pipeline/api/schema.py::PRESETS` and are read by both
+the pipeline's own `VideoCapture` loop and the desktop's webcam thread, so local
+and push mode capture identically.
 
 Note the capture resolutions are deliberately modest. The target is a normal
 video call, and a 1080p-sharp face on a call is itself a tell.
@@ -176,7 +191,7 @@ resolution/fps.
 | `enhancer_model` | `codeformer` | Backend (`codeformer` or `gfpgan`) |
 | `enhancer_weight` | `0.7` | CodeFormer fidelity: `0`=most restoration, `1`=closest to input |
 | `enhance_strength` | `0.7` | How much of the restored face to keep |
-| `aligned_size` | `256` | Compositing working resolution (clamped 128–512) |
+| `aligned_size` | `256` | **Ceiling** on compositing resolution (clamped 128–512); actual size follows the face's size in frame |
 | `temporal_alpha` | `0.6` | EMA on aligned pixels, kills shimmer (`1.0` disables) |
 | `color_correction` | `True` | LAB transfer, sampled inside the mask |
 | `color_strength` | `1.0` | Scales that transfer |
