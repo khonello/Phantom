@@ -94,9 +94,10 @@ Three consequences the architecture has to absorb:
   removes that; self-hosting via BTCPay costs about 0.2% and adds channel
   management. Start managed, move in-house if volume justifies it.
 
-> **Annotation — purchases top up a balance; sessions draw it down.** Nothing
-> ever flows back. See §11 for the consumption rule and for why the balance is
-> denominated in hours rather than currency.
+> **Annotation — purchases top up a balance; sessions draw it down.** Money
+> never flows back out. Hours do, but only in one case: a session we broke
+> ourselves. See §11 for the consumption rule, the reversal rule, and why the
+> balance is denominated in hours rather than currency.
 
 > **Annotation — three things the tiers imply for the architecture.**
 >
@@ -105,17 +106,13 @@ Three consequences the architecture has to absorb:
 > and $12 at two. That is the difference between a 76% and an 88% margin, so the
 > benchmark in §4 now feeds the price list.
 >
-> **Grace period policy should vary by tier** (§12 currently specifies one global
-> constant). PAYG deducts the full hour at session start, so holding that
-> customer's worker for the remainder of their paid hour costs at most $1 against
-> $10 collected — and removes reconnect cold starts entirely inside the window.
-> Holding a Day Pass worker for 24 hours costs $24 of $100, so the same
-> generosity does not transfer.
->
-> **"24 Hours" is undefined and the answer moves the margin by 20 points.** A day
-> of *access* means we may hold or repeatedly re-provision a worker across 24
-> hours; 24 hours of *accumulated session time* is metered and bounded. This
-> needs settling before the Day Pass ships.
+> **The Day Pass is bounded by hours connected, not by standing availability.**
+> Since every tier draws down the same hour blocks (§11), a Day Pass costs us GPU
+> only for the hours a customer actually connects. Twenty-four is the worst case
+> — $24 of GPU against $100 at one session per card, $12 at two — rather than the
+> expected one, and hours bought but never connected are pure margin. What
+> remains undecided is whether unspent Day Pass hours **expire**; if they do not,
+> the tier is a 24-hour pack under another name.
 
 ### What the customer does inside a session
 
@@ -187,15 +184,24 @@ A session has explicit states. Nothing is implicit.
                               ▼                            │
                      ┌──────────────────┐                  ▼
                      │     RUNNING      │          ┌───────────────┐
-                     │  live │ batch    │───────▶  │ next attempt  │
-                     └────┬────────┬────┘  fault   └───────┬───────┘
-                          │        │                       │
-              user ends / │        │ unrecoverable         │ attempts
-              time expiry │        │ or attempts exhausted │ remaining
-                          ▼        ▼                       │
-                   ┌───────────┐ ┌────────┐                │
-                   │ COMPLETED │ │ FAILED │                └──▶ ALLOCATING_GPU
-                   └───────────┘ └────────┘
+                     │  live │ batch    │──fault──▶│ next attempt  │
+                     └────┬────────┬────┘          └───────┬───────┘
+                          │        │                       │ attempts
+          user ends /     │        │ attempts              │ remaining
+          hour expires    │        │ exhausted             │
+                          │        │                       └──▶ ALLOCATING_GPU
+                          ▼        ▼
+                 ┌───────────┐   ┌──────────────────┐
+                 │ COMPLETED │   │    ATTRIBUTE     │
+                 │hour spent │   │   whose fault?   │
+                 └───────────┘   └────┬────────┬────┘
+                                 ours │        │ theirs
+                                      ▼        ▼
+                            ┌────────────┐  ┌───────────┐
+                            │  ABORTED   │  │ COMPLETED │
+                            │ hour       │  │hour spent │
+                            │ REVERTED   │  └───────────┘
+                            └────────────┘
 ```
 
 **A GPU provisioning attempt is not a customer session.** Failure paths out of
@@ -435,8 +441,16 @@ Recover session
 This already holds in part: models resolve to `/workspace/models` before local
 paths, and the venv lives on the network volume so it survives pod restarts.
 
-> **Annotation — recovery means something weaker for live sessions than this
-> diagram implies.** Restoring execution requires provisioning, loading four
+> **Annotation — standby capacity is a requirement, not an optimisation.**
+> Hour reversal (§11) makes every slow recovery cost real revenue, so the system
+> needs somewhere to put a displaced session *now*. That means keeping at least
+> one worker provisioned with models already loaded and no session on it, and
+> the scheduler treating it as reserved rather than available. Without it,
+> "recover the session" means a cold provision, which is far past any sane
+> interruption threshold and therefore reverts the hour by definition.
+>
+> **Recovery still means something weaker for live sessions than this diagram
+> implies.** Restoring execution requires provisioning, loading four
 > ONNX models, and reconnecting the client. Warm that is seconds; cold it is
 > a minute and a half or worse. A batch job genuinely recovers — the customer
 > sees a slower result. A live customer sees their face fall off mid-call and
@@ -724,6 +738,69 @@ Two related questions remain open: whether upload time is billed (a 2 GB
 transfer is minutes with the GPU idle — overlapping it with worker startup is
 the likely answer), and what happens to a batch job that outlives its session.
 See SESSION_PLANE.md.
+
+### Outages are our cost, not the customer's
+
+Unused time is never returned when the customer simply chose not to use it. An
+outage is the opposite case, and it is handled explicitly: **if the session
+failed because of us, the hour is reverted to the customer's balance.**
+
+The hour is atomic. It is not pro-rated against how much of it elapsed before
+the failure — that would reintroduce the metering the consumption rule
+deliberately avoids. Either the customer got a usable hour or they did not.
+
+#### Attributing the fault
+
+The heartbeat and lease machinery in §9 already produces the discriminator, and
+this is a second reason to build it:
+
+```
+  worker heartbeat   client connection   verdict
+  ─────────────────────────────────────────────────────────────
+  stopped            —                   OURS    → revert hour
+  alive              dropped             THEIRS  → hour stands
+  alive              alive               not a failure
+  stopped            dropped             OURS    → revert hour
+```
+
+| Cause | Attribution |
+|---|---|
+| GPU reclaimed, unresponsive, or OOM | ours |
+| Worker crash, pipeline crash or hang | ours |
+| Provider API failure, provisioning failure | ours |
+| Watchdog fired on a frozen pipeline | ours |
+| Client closed the app, or ended the session | theirs |
+| Client network dropped, worker still healthy | theirs |
+| Customer idle for the whole hour | theirs — nothing failed |
+
+Ambiguity resolves in the customer's favour. On an irreversible payment rail the
+cost of being wrong in their favour is one hour of GPU; the cost of being wrong
+against them is a customer who cannot get their money back and knows it.
+
+#### What a revert must guarantee
+
+- **Idempotent.** A session reverts at most once, keyed by `session_id`. A
+  retried failure notification must not credit twice.
+- **Audited.** Every deduction and every reversal is recorded with its
+  attribution and the evidence for it. There is no chargeback process to appeal
+  to, so the ledger is the only account of what happened.
+- **Balance-only.** A reversal restores hours to the balance. It never moves
+  money — see §1.
+
+#### The interruption threshold
+
+A three-second reconnect to a standby worker is not an outage; ninety seconds of
+cold provisioning is. Reverting on every blip is expensive and reverting on none
+is dishonest, so the revert triggers past a threshold of unavailability.
+
+That threshold is what makes standby capacity pay: its job is to keep recoveries
+underneath it.
+
+> **Annotation — this gives resilience a direct financial value again.** With no
+> payout and no time returned, failures cost only retention. With hour reversal
+> they cost revenue: at $10 per reverted hour, plus the GPU already spent on the
+> broken session. If our-fault failures ran at 5% of sessions, that is roughly
+> 5.5% of net income — which is what stage 6 is buying back.
 
 ---
 

@@ -585,11 +585,13 @@ it can land as soon as stage 3 does.
 - Watchdog around the frame loop specifically — **progress-based, not
   liveness-based**, because the CUDA-hang case leaves the process responsive.
 - Retry classification and bounded attempts, as proposed.
-- Decide what happens to an hour consumed by an outage. Unused time is never
-  returned by design, but a GPU dying at minute five is not the customer
-  choosing not to use their hour. With no payout and no time returned, a failure
-  costs retention rather than money — which is harder to measure and probably
-  worse.
+- Fault attribution, and hour reversal when the fault is ours. The heartbeat
+  gives the discriminator: worker gone is ours, client gone with the worker
+  still healthy is theirs. Reversal must be idempotent and audited — on an
+  irreversible rail the ledger is the only account of what happened.
+- Standby capacity with models pre-loaded, so a displaced session has somewhere
+  to go inside the interruption threshold rather than waiting on a cold
+  provision.
 
 ### 7. Provider abstraction
 
@@ -614,6 +616,9 @@ implementation to conform to it and its shape is already visible in
   before expiry and deducts another hour if the balance allows.
 - **Payment.** Bitcoin over Lightning. No refund system; manual payout if one is
   genuinely demanded.
+- **Outages are our cost.** If a session fails because of us, the hour is
+  reverted to the customer's balance. Atomic, never pro-rated. Ambiguous cases
+  resolve in the customer's favour.
 
 ## Still open
 
@@ -639,11 +644,11 @@ connection, no returns — but not whether unspent ones lapse. "Day Pass" implie
 they do. If they do not, it is a 24-hour pack under another name and the ladder
 is three prepaid blocks rather than two plus a pass.
 
-**What happens to an hour consumed by an outage?**
-Unused time is never returned by design, and that is the right answer for a
-customer who chose not to use it. A GPU dying at minute five is a different
-case, and with no payout and no time returned it costs retention rather than
-money — harder to measure and probably worse.
+**How long an interruption counts as an outage?**
+Settled that our-fault failures revert the hour; not settled where the line
+sits. A three-second reconnect to a standby worker is not an outage, ninety
+seconds of cold provisioning is. The threshold is what standby capacity is
+bought to stay under, so it sets how much standby is worth.
 
 **What is the concurrency shape?**
 Many short sessions and few long ones imply different systems. The tiers hint at
