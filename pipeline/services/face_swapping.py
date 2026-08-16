@@ -7,12 +7,12 @@ Provides ONNX-based face swapping without global state.
 
 import os
 import threading
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 import insightface
 
 from pipeline.config import FaceSwapConfig
-from pipeline.types import Frame, Face, Detection
+from pipeline.types import Frame, Face
 from pipeline.logging import emit_status, emit_error
 
 
@@ -39,6 +39,9 @@ class FaceSwapper:
         self.config = config
         self._swapper: Optional[Any] = None
         self._lock = threading.Lock()
+        # Set once if this InsightFace build cannot return the unpasted swap,
+        # so the fallback warning is not repeated on every frame.
+        self._aligned_unsupported = False
 
     def _get_swapper(self) -> Any:
         """
@@ -95,13 +98,16 @@ class FaceSwapper:
         # Fall back to working directory
         return os.path.join(os.getcwd(), 'models', 'inswapper_128.onnx')
 
-    def swap(self, source: Face, target: Detection, frame: Frame) -> Frame:
+    def swap(self, source: Face, target: Face, frame: Frame) -> Frame:
         """
-        Swap a face in a frame.
+        Swap a face in a frame, using InsightFace's own compositing.
+
+        Fallback path — prefer `swap_aligned` so compositing can be done
+        properly. Kept for InsightFace builds that do not return the affine.
 
         Args:
             source: Source face to swap from
-            target: Target detection (with face from target frame)
+            target: Target face from the current frame
             frame: Frame to swap in
 
         Returns:
@@ -113,10 +119,67 @@ class FaceSwapper:
         """
         try:
             swapper = self._get_swapper()
-            return swapper.get(frame, target.face, source, paste_back=True)
+            return swapper.get(frame, target, source, paste_back=True)
         except Exception as e:
             emit_error(f"Face swap failed: {e}", exception=e, scope='SWAPPER')
             return frame
+
+    def swap_aligned(
+        self,
+        source: Face,
+        target: Face,
+        frame: Frame,
+    ) -> Optional[Tuple[Frame, Any]]:
+        """
+        Swap a face and return the raw aligned crop instead of a pasted frame.
+
+        `paste_back=False` hands back the generated crop together with the
+        affine that produced it, which lets the caller own compositing —
+        masking, colour, detail and grain all work far better in aligned
+        space than they do after the model has already pasted.
+
+        Args:
+            source: Source face to swap from
+            target: Target face (fresh detection — its `kps` drives the warp)
+            frame: Frame to swap in
+
+        Returns:
+            (aligned_crop, matrix) where matrix is the 2x3 affine mapping
+            frame space to the crop, or None if this InsightFace build does
+            not support the unpasted form. Callers should fall back to
+            `swap()` in that case.
+        """
+        if self._aligned_unsupported:
+            return None
+
+        try:
+            swapper = self._get_swapper()
+            result = swapper.get(frame, target, source, paste_back=False)
+        except Exception as e:
+            emit_error(f"Face swap failed: {e}", exception=e, scope='SWAPPER')
+            return None
+
+        # Guard the return shape rather than assuming it: older and patched
+        # InsightFace builds have returned a bare frame here.
+        crop, matrix = (result if isinstance(result, tuple) and len(result) == 2
+                        else (None, None))
+
+        if (
+            crop is None
+            or getattr(crop, 'ndim', 0) != 3
+            or getattr(matrix, 'shape', None) != (2, 3)
+        ):
+            self._aligned_unsupported = True
+            emit_status(
+                'InsightFace did not return an affine for the unpasted swap — '
+                'falling back to its built-in compositing. Masking, colour '
+                'matching and grain will be unavailable.',
+                scope='SWAPPER',
+                level='warning',
+            )
+            return None
+
+        return crop, matrix
 
     def pre_check(self) -> bool:
         """

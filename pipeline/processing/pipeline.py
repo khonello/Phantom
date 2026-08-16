@@ -13,32 +13,29 @@ Responsibilities:
 """
 
 import queue
-import struct
 import threading
 import time
-from typing import Any, Callable, List, Optional, Tuple, Union
+from typing import Any, Optional, Tuple, Union
 
 import cv2
 import numpy as np
 
-from pipeline.config import FaceSwapConfig, CONFIG
+from pipeline.config import FaceSwapConfig
 from pipeline.types import Frame
-from pipeline.events import BUS, FRAME_READY, DETECTION, PIPELINE_STARTED, PIPELINE_STOPPED
-from pipeline.logging import emit_status, emit_error
+from pipeline.events import FRAME_READY, DETECTION, PIPELINE_STARTED, PIPELINE_STOPPED
+from pipeline.logging import emit_status, emit_error, get_logger
 
 from pipeline.services.face_detection import FaceDetector
 from pipeline.services.face_swapping import FaceSwapper
 from pipeline.services.enhancement import Enhancer
 from pipeline.services.database import FaceDatabase
+from pipeline.services.masking import FaceMasker
+from pipeline.services.face_tracking import LandmarkStabilizer
 
+from pipeline.processing.compositor import FaceCompositor
 from pipeline.processing.frame_processor import (
-    FrameProcessor,
     DetectionProcessor,
-    TrackingProcessor,
     SwappingProcessor,
-    EnhancementProcessor,
-    BlendingProcessor,
-    ColorCorrectionProcessor,
     PreprocessingProcessor,
 )
 
@@ -61,6 +58,9 @@ class ProcessingPipeline:
         pipeline.stop()
     """
 
+    # Frames between per-stage timing reports (debug log level only).
+    _TIMING_INTERVAL = 30
+
     def __init__(self, config: FaceSwapConfig, bus: Any) -> None:
         """
         Initialize the processing pipeline.
@@ -77,15 +77,16 @@ class ProcessingPipeline:
         self._swapper: Optional[FaceSwapper] = None
         self._enhancer: Optional[Enhancer] = None
         self._database: Optional[FaceDatabase] = None
+        self._masker: Optional[FaceMasker] = None
 
         # Processors
         self._detection_proc: Optional[DetectionProcessor] = None
-        self._tracking_proc: Optional[TrackingProcessor] = None
         self._swapping_proc: Optional[SwappingProcessor] = None
-        self._enhancement_proc: Optional[EnhancementProcessor] = None
-        self._blending_proc: Optional[BlendingProcessor] = None
-        self._color_correction_proc: Optional[ColorCorrectionProcessor] = None
         self._preprocessing_proc: Optional[PreprocessingProcessor] = None
+
+        # Compositing
+        self._compositor: Optional[FaceCompositor] = None
+        self._stabilizer: Optional[LandmarkStabilizer] = None
 
         # State
         self._running = False
@@ -113,7 +114,7 @@ class ProcessingPipeline:
     def _get_enhancer(self) -> Enhancer:
         """Get or create Enhancer."""
         if self._enhancer is None:
-            self._enhancer = Enhancer()
+            self._enhancer = Enhancer(self.config)
         return self._enhancer
 
     def _get_database(self) -> FaceDatabase:
@@ -122,45 +123,74 @@ class ProcessingPipeline:
             self._database = FaceDatabase(self._get_detector())
         return self._database
 
+    def _get_masker(self) -> FaceMasker:
+        """Get or create FaceMasker."""
+        if self._masker is None:
+            self._masker = FaceMasker(self.config)
+        return self._masker
+
     def _build_processors(self) -> None:
-        """Build processor instances."""
+        """Build processor and compositing instances."""
         detector = self._get_detector()
         swapper = self._get_swapper()
         enhancer = self._get_enhancer()
         database = self._get_database()
+        masker = self._get_masker()
 
         # Create fresh processors
         self._detection_proc = DetectionProcessor(self.config, detector)
-        self._tracking_proc = TrackingProcessor(self.config, detector)
         self._swapping_proc = SwappingProcessor(self.config, swapper, database)
-        self._enhancement_proc = EnhancementProcessor(self.config, enhancer)
-        self._blending_proc = BlendingProcessor(self.config)
-        self._color_correction_proc = ColorCorrectionProcessor(self.config)
         self._preprocessing_proc = PreprocessingProcessor(self.config)
+
+        self._compositor = FaceCompositor(self.config, enhancer, masker)
+        self._stabilizer = LandmarkStabilizer(alpha=self.config.alpha)
+
+    def _reset_temporal_state(self) -> None:
+        """
+        Drop everything that smooths across frames.
+
+        Required whenever continuity is broken — a new source identity, a
+        pipeline restart — otherwise the first frames afterwards blend
+        against state belonging to the previous subject.
+        """
+        if self._stabilizer:
+            self._stabilizer.reset()
+        if self._compositor:
+            self._compositor.reset()
 
     def _on_config_changed(self, field: str, value: Any) -> None:
         """
         Handle configuration changes.
 
-        Some changes require rebuilding processor chain.
-
         Args:
             field: Config field name
             value: New value
         """
-        # Source path changed → reset tracker and load new source
+        # Source path changed → drop temporal state and load new source
         if field == 'source_path' or field == 'source_paths':
-            if self._tracking_proc:
-                self._tracking_proc.reset()
+            self._reset_temporal_state()
             if self._swapping_proc:
                 sources = self.config.source_paths or (
                     [self.config.source_path] if self.config.source_path else []
                 )
                 self._swapping_proc.set_source(sources)
 
-        # Tracker type or alpha changed → rebuild processors
-        elif field in ('tracker', 'alpha', 'blend', 'luminance_blend'):
-            self._build_processors()
+        # Landmark smoothing factor changed → rebuild the stabilizer
+        elif field == 'alpha':
+            self._stabilizer = LandmarkStabilizer(alpha=self.config.alpha)
+
+        # Working resolution changed → previously smoothed pixels are the
+        # wrong shape. The compositor detects that and recovers on its own,
+        # but dropping it here avoids a frame of unsmoothed output.
+        elif field == 'aligned_size':
+            if self._compositor:
+                self._compositor.reset()
+
+        # Restoration backend changed → drop the loaded model so the new one
+        # is picked up on the next frame.
+        elif field in ('enhancer_model',):
+            if self._enhancer:
+                self._enhancer.clear()
 
     def run_stream(self) -> None:
         """
@@ -193,10 +223,11 @@ class ProcessingPipeline:
         """
         Eagerly load ML models into GPU memory before the stream loop starts.
 
-        Both models are lazily initialized by default, meaning the first frame
-        that needs them blocks for 10-30s while 500MB+ of ONNX weights are
-        loaded into CUDA. Pre-loading them here in parallel makes the first
-        swap instant and cuts startup time roughly in half.
+        All of these are lazily initialized by default, meaning the first
+        frame that needs them blocks for 10-30s while 500MB+ of ONNX weights
+        are loaded into CUDA — and, for the occluder, while it downloads.
+        Pre-loading them here in parallel makes the first swap instant and
+        cuts startup time roughly in half.
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -210,10 +241,22 @@ class ProcessingPipeline:
             self._get_swapper()._get_swapper()
             return 'swap'
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
+        def _load_masker() -> str:
+            # Downloads on first use; failure is non-fatal by design.
+            self._get_masker()._get_session()
+            return 'occluder'
+
+        def _load_enhancer() -> str:
+            # Also downloads on first use when the backend is CodeFormer.
+            self._get_enhancer().load()
+            return 'restoration'
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
             futures = {
                 pool.submit(_load_detector): 'detection',
                 pool.submit(_load_swapper): 'swap',
+                pool.submit(_load_masker): 'occluder',
+                pool.submit(_load_enhancer): 'restoration',
             }
             for future in as_completed(futures):
                 label = futures[future]
@@ -254,71 +297,94 @@ class ProcessingPipeline:
         else:
             self._stream_loop_capture()
 
+    def _swap_face(self, frame: Frame, face: Any) -> Frame:
+        """
+        Swap and composite a single face.
+
+        Prefers the aligned form so FaceCompositor can own masking, colour,
+        detail and grain. Falls back to InsightFace's own compositing only if
+        this build cannot hand back the affine.
+
+        Args:
+            frame: Frame to swap in
+            face: Fresh (optionally stabilized) face for this frame
+
+        Returns:
+            Frame with the face composited in
+        """
+        result = self._swapping_proc.swap_aligned(frame, face)
+        if result is None:
+            return self._swapping_proc.swap_pasted(frame, face)
+
+        crop, matrix = result
+        return self._compositor.composite(frame, face, crop, matrix)
+
     def _process_and_emit(self, frame: Frame, seq: int, capture_ts: int = 0) -> None:
-        """Run detection → tracking → swap → enhance → emit for one frame.
+        """Run preprocess → detect → swap → composite → emit for one frame.
+
+        Detection runs on every frame, so the swap is always warped with
+        current landmarks. Temporal continuity comes from EMA on those
+        landmarks and on the composited pixels, not from a correlation
+        tracker carrying a stale face forward.
 
         Args:
             frame: Input video frame
             seq: Sequence number
             capture_ts: Capture timestamp in nanoseconds (time.perf_counter_ns)
         """
-        # TEMPORARY: per-stage timing to diagnose GPU performance
-        import sys
-        _t0 = time.perf_counter()
+        started = time.perf_counter()
 
         # Preprocessing: normalize lighting, white balance, denoise
         frame = self._preprocessing_proc.process(frame)
 
         frame = self._detection_proc.process(frame)
         detections = self._detection_proc.latest_detections
-        _t1 = time.perf_counter()
+        detected = time.perf_counter()
 
-        if detections:
+        if not detections:
+            self._stabilizer.mark_missing()
+        elif self._swapping_proc.source_face is not None:
             for detection in detections:
-                if self._tracking_proc.get_tracked_detection() is None:
-                    self._tracking_proc.set_tracked_face(detection, frame)
+                face = detection.face
+                # Landmark smoothing needs a stable subject identity; with
+                # several faces the per-frame detection order is not stable.
+                if not self.config.many_faces:
+                    face = self._stabilizer.stabilize(face)
+                frame = self._swap_face(frame, face)
 
-        frame = self._tracking_proc.process(frame)
-        tracked = self._tracking_proc.get_tracked_detection()
-        _t2 = time.perf_counter()
+            self.bus.emit(DETECTION, detection=detections[0].to_dict(), seq=seq)
 
-        # If the CV2 tracker is unavailable (e.g. opencv-python without contrib),
-        # fall back to the raw detection so swapping still works.
-        if tracked is None and detections:
-            tracked = detections[0]
-
-        if tracked and self._swapping_proc.source_face:
-            # Save original before swap — needed for color correction reference.
-            # Only copy when color correction is enabled to avoid allocation overhead.
-            original_frame = frame.copy() if self.config.color_correction else None
-            frame = self._swapping_proc.swap_detection(frame, tracked)
-
-            # Color correction: match swapped face color to original target skin
-            if original_frame is not None:
-                bbox = tracked.bbox
-                frame = self._color_correction_proc.correct(
-                    frame, original_frame,
-                    (bbox.x, bbox.y, bbox.w, bbox.h),
-                )
-
-            self.bus.emit(DETECTION, detection=tracked.to_dict(), seq=seq)
-        _t3 = time.perf_counter()
-
-        if self.config.enhance:
-            frame = self._enhancement_proc.process(frame)
-        _t4 = time.perf_counter()
+        swapped = time.perf_counter()
 
         self.bus.emit(FRAME_READY, frame=frame, seq=seq, capture_ts=capture_ts)
 
-        # TEMPORARY: print per-stage timing every frame
-        print(
-            f'[PERF] seq={seq} '
-            f'detect={(_t1-_t0)*1000:.0f}ms '
-            f'track={(_t2-_t1)*1000:.0f}ms '
-            f'swap={(_t3-_t2)*1000:.0f}ms '
-            f'enhance={(_t4-_t3)*1000:.0f}ms '
-            f'total={(_t4-_t0)*1000:.0f}ms',
-            file=sys.stderr,
+        self._log_timing(seq, started, detected, swapped)
+
+    def _log_timing(
+        self,
+        seq: int,
+        started: float,
+        detected: float,
+        swapped: float,
+    ) -> None:
+        """
+        Report per-stage timing periodically, at debug level only.
+
+        Args:
+            seq: Frame sequence number
+            started: perf_counter at frame start
+            detected: perf_counter after detection
+            swapped: perf_counter after swap and compositing
+        """
+        if self.config.log_level != 'debug' or seq % self._TIMING_INTERVAL:
+            return
+
+        get_logger('PERF').debug(
+            'seq=%d detect=%.0fms swap+composite=%.0fms total=%.0fms',
+            seq,
+            (detected - started) * 1000.0,
+            (swapped - detected) * 1000.0,
+            (swapped - started) * 1000.0,
         )
 
     @staticmethod
@@ -471,24 +537,15 @@ class ProcessingPipeline:
                 emit_error(f"Failed to load image: {target_path}", scope='PIPELINE')
                 return
 
-            # Process
+            # Process — same compositing path as stream mode, so batch and
+            # realtime output cannot drift apart. Temporal smoothing is a
+            # no-op here since there is no previous frame.
             frame = self._preprocessing_proc.process(frame)
             frame = self._detection_proc.process(frame)
             detections = self._detection_proc.latest_detections
 
-            original_frame = frame.copy() if self.config.color_correction else None
             for detection in detections:
-                frame = self._swapping_proc.swap_detection(frame, detection)
-
-                if original_frame is not None:
-                    bbox = detection.bbox
-                    frame = self._color_correction_proc.correct(
-                        frame, original_frame,
-                        (bbox.x, bbox.y, bbox.w, bbox.h),
-                    )
-
-            if self.config.enhance:
-                frame = self._enhancement_proc.process(frame)
+                frame = self._swap_face(frame, detection.face)
 
             # Save
             if output_path:

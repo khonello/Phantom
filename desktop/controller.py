@@ -385,8 +385,17 @@ class PipelineClient:
         return self._send('set_alpha', value=value)
 
     def set_enhance(self, value: bool) -> Dict[str, Any]:
-        """Enable or disable GFPGAN face enhancement."""
+        """Enable or disable face restoration."""
         return self._send('set_enhance', value=value)
+
+    def set_realism(self, **values: Any) -> Dict[str, Any]:
+        """
+        Set realism tuning parameters.
+
+        Accepts any of: enhancer_model, enhancer_weight, enhance_strength,
+        aligned_size, temporal_alpha, color_strength, grain, occluder.
+        """
+        return self._send('set_realism', values=values)
 
     def set_color_correction(self, value: bool) -> Dict[str, Any]:
         """Enable or disable color correction for cross-skin-tone swaps."""

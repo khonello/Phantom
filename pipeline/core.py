@@ -16,7 +16,7 @@ if any(arg.startswith('--execution-provider') for arg in sys.argv):
 # reduce tensorflow log level
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 import warnings
-from typing import List
+from typing import List, Optional
 import platform
 import signal
 import argparse
@@ -32,6 +32,34 @@ from pipeline.api.schema import PRESETS
 
 warnings.filterwarnings('ignore', category=FutureWarning, module='insightface')
 warnings.filterwarnings('ignore', category=UserWarning, module='torchvision')
+
+
+def _env_float(name: str) -> Optional[float]:
+    """Read a float from the environment, or None if unset/unparseable."""
+    raw = os.environ.get(name)
+    try:
+        return float(raw) if raw else None
+    except ValueError:
+        return None
+
+
+def _env_int(name: str) -> Optional[int]:
+    """Read an int from the environment, or None if unset/unparseable."""
+    raw = os.environ.get(name)
+    try:
+        return int(raw) if raw else None
+    except ValueError:
+        return None
+
+
+def _env_bool(name: str) -> Optional[bool]:
+    """Read a bool from the environment, or None if unset/unrecognised."""
+    raw = (os.environ.get(name) or '').strip().lower()
+    if raw in ('1', 'true', 'yes', 'on'):
+        return True
+    if raw in ('0', 'false', 'no', 'off'):
+        return False
+    return None
 
 
 def parse_args() -> None:
@@ -68,6 +96,29 @@ def parse_args() -> None:
                         dest='blend', type=float, default=None)
     program.add_argument('--luminance-blend', help='enable luminance-adaptive blend',
                         dest='luminance_blend', action='store_true', default=None)
+    # Realism knobs. All default to None so the quality preset applies unless
+    # a flag or environment variable explicitly overrides it. Environment
+    # defaults exist because the RunPod pod is configured through .env rather
+    # than a command line.
+    program.add_argument('--enhancer-model', help='face restoration backend',
+                        dest='enhancer_model', choices=['codeformer', 'gfpgan'],
+                        default=os.environ.get('ENHANCER_MODEL'))
+    program.add_argument('--enhancer-weight', help='CodeFormer fidelity (0=most restoration, 1=closest to input)',
+                        dest='enhancer_weight', type=float, default=_env_float('ENHANCER_WEIGHT'))
+    program.add_argument('--enhance-strength', help='how much of the restored face to keep (0.0-1.0)',
+                        dest='enhance_strength', type=float, default=_env_float('ENHANCE_STRENGTH'))
+    program.add_argument('--aligned-size', help='compositing working resolution (128-512)',
+                        dest='aligned_size', type=int, default=_env_int('ALIGNED_SIZE'))
+    program.add_argument('--temporal-alpha', help='EMA on composited pixels (1.0=off)',
+                        dest='temporal_alpha', type=float, default=_env_float('TEMPORAL_ALPHA'))
+    program.add_argument('--color-strength', help='scales the LAB colour transfer (0.0-1.0)',
+                        dest='color_strength', type=float, default=_env_float('COLOR_STRENGTH'))
+    program.add_argument('--no-enhance', help='disable face restoration',
+                        dest='enhance', action='store_false', default=_env_bool('ENHANCE'))
+    program.add_argument('--no-grain', help='disable sensor-noise matching',
+                        dest='grain', action='store_false', default=_env_bool('GRAIN'))
+    program.add_argument('--no-occluder', help='disable occlusion masking',
+                        dest='occluder', action='store_false', default=_env_bool('OCCLUDER'))
     program.add_argument('--input-url', help='network stream URL (RTSP/RTMP/HTTP)',
                         dest='input_url', default=None)
     program.add_argument('--control-port', help='API server port',
@@ -83,12 +134,6 @@ def parse_args() -> None:
 
     args = program.parse_args()
 
-    # Apply quality preset
-    preset = PRESETS.get(args.quality, PRESETS['optimal'])
-    for key, value in preset.items():
-        if getattr(args, key, None) is None:
-            setattr(args, key, value)
-
     # Update CONFIG
     CONFIG.set('source_paths', args.source_path or [])
     CONFIG.set('source_path', args.source_path[0] if args.source_path else None)
@@ -103,14 +148,31 @@ def parse_args() -> None:
     CONFIG.set('execution_providers', decode_execution_providers(args.execution_provider))
     CONFIG.set('execution_threads', args.execution_threads)
     CONFIG.set('quality', args.quality)
-    if args.tracker:
-        CONFIG.set('tracker', args.tracker)
-    if args.alpha is not None:
-        CONFIG.set('alpha', args.alpha)
-    if args.blend is not None:
-        CONFIG.set('blend', args.blend)
-    if args.luminance_blend is not None:
-        CONFIG.set('luminance_blend', args.luminance_blend)
+
+    # Quality preset first; explicit flags and environment variables then
+    # override it. Applying to CONFIG rather than patching `args` means new
+    # preset keys take effect without also having to be argparse destinations.
+    if args.quality in PRESETS:
+        CONFIG.apply_preset(args.quality)
+
+    for field, value in (
+        ('tracker', args.tracker),
+        ('alpha', args.alpha),
+        ('blend', args.blend),
+        ('luminance_blend', args.luminance_blend),
+        ('enhancer_model', args.enhancer_model),
+        ('enhancer_weight', args.enhancer_weight),
+        ('enhance_strength', args.enhance_strength),
+        ('aligned_size', args.aligned_size),
+        ('temporal_alpha', args.temporal_alpha),
+        ('color_strength', args.color_strength),
+        ('enhance', args.enhance),
+        ('grain', args.grain),
+        ('occluder', args.occluder),
+    ):
+        if value is not None:
+            CONFIG.set(field, value)
+
     if args.input_url:
         CONFIG.set('input_url', args.input_url)
     CONFIG.set('control_port', args.control_port)

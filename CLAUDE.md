@@ -43,12 +43,14 @@ Phantom is a modern, composable face-swapping application for videos and images.
 - **pipeline/services/face_detection.py**: `FaceDetector` (InsightFace wrapper)
 - **pipeline/services/face_swapping.py**: `FaceSwapper` (ONNX face swap)
 - **pipeline/services/enhancement.py**: `Enhancer` (GFPGAN face enhancement)
-- **pipeline/services/face_tracking.py**: `FaceTrackerState` (OpenCV tracker wrapper)
+- **pipeline/services/face_tracking.py**: `LandmarkStabilizer` (EMA on face landmarks)
+- **pipeline/services/masking.py**: `FaceMasker` (landmark hull + optional XSeg occlusion)
 - **pipeline/services/database.py**: `FaceDatabase` (embedding cache & averaging)
 
 **Processing Pipeline:**
 - **pipeline/processing/frame_processor.py**: `FrameProcessor` ABC + implementations
-  - `DetectionProcessor`, `TrackingProcessor`, `SwappingProcessor`, `EnhancementProcessor`, `BlendingProcessor`
+  - `PreprocessingProcessor`, `DetectionProcessor`, `SwappingProcessor`, `OutputProcessor`
+- **pipeline/processing/compositor.py**: `FaceCompositor` (aligned-space compositing)
 - **pipeline/processing/pipeline.py**: `ProcessingPipeline` (orchestrator, replaces monolithic stream.py)
 
 **I/O Layer:**
@@ -87,8 +89,8 @@ The following files were deleted in the Phase 2 cleanup:
 ### Data Flow (Event-Driven)
 1. `pipeline.py` → `core.run_headless()` parses args → loads `.env` → updates `CONFIG`
 2. `WebSocketAPIServer` starts on port 9000 (`ws://host:9000/ws`), single port
-3. **Batch mode**: `ProcessingPipeline.run_batch()` → detects faces → swaps → enhances (if enabled) → outputs
-4. **Stream mode**: `ProcessingPipeline.run_stream()` → captures frames → detects/tracks → swaps → enhances (if enabled, synchronous) → emits `FRAME_READY` event
+3. **Batch mode**: `ProcessingPipeline.run_batch()` → detects faces → swaps → composites → outputs
+4. **Stream mode**: `ProcessingPipeline.run_stream()` → captures frames → detects (every frame) → stabilizes landmarks → swaps → composites → emits `FRAME_READY` event
 5. `FRAME_READY` → server encodes JPEG → pushes binary to all WebSocket clients (no polling)
 6. `STATUS_CHANGED`, `DETECTION` events → server pushes JSON text to all clients
 7. `desktop/bridge.py` receives push callbacks, updates frame buffers and UI state
@@ -109,20 +111,103 @@ QML display
 ### Quality Presets
 Desktop quality dropdown controls capture resolution, frame rate, and processing parameters. Defined in `pipeline/api/schema.py::PRESETS` and `desktop/bridge.py::_QUALITY_CAPTURE`.
 
-|                        | Fast              | Optimal (default) | Production        |
-|------------------------|-------------------|--------------------|-------------------|
-| **Capture resolution** | 480x270           | 640x360            | 960x540           |
-| **Frame rate**         | 15 fps            | 20 fps             | 30 fps            |
-| **JPEG quality**       | 60                | 70                 | 85                |
-| **Tracker**            | KCF (fast)        | CSRT (accurate)    | CSRT (accurate)   |
-| **Alpha smoothing**    | 0.7               | 0.6                | 0.5               |
-| **Luminance blend**    | Off               | On                 | On                |
-| **Redetect interval**  | Every 30 frames   | Every 30 frames    | Every 20 frames   |
+Presets trade latency against realism. Defined once in
+`pipeline/api/schema.py::PRESETS`, applied via `FaceSwapConfig.apply_preset()`.
+
+|                         | Fast      | Optimal (default) | Production |
+|-------------------------|-----------|-------------------|------------|
+| **Capture resolution**  | 480x270   | 640x360           | 960x540    |
+| **Frame rate**          | 15 fps    | 20 fps            | 30 fps     |
+| **JPEG quality**        | 60        | 70                | 85         |
+| **Landmark EMA**        | 0.7       | 0.6               | 0.5        |
+| **Compositing size**    | 192       | 256               | 320        |
+| **Restore strength**    | 0.5       | 0.7               | 0.8        |
+| **Fidelity weight**     | 0.8       | 0.7               | 0.6        |
+| **Temporal EMA**        | 0.7       | 0.6               | 0.5        |
+| **Occlusion masking**   | Off       | On                | On         |
+| **Grain matching**      | On        | On                | On         |
 
 Changing quality restarts the webcam capture device to apply new resolution/fps.
 
-### Enhancement Toggle
-GFPGAN face enhancement is controlled by `config.enhance` (bool, default `True`) — independent of quality presets. Toggled from the desktop header via the ENHANCE button or `set_enhance` API command. Enhancement runs **synchronously** in the frame processing loop on GPU; no frames are dropped or skipped.
+Presets deliberately **do not** set `enhance` or `color_correction`: both have
+explicit toggles in the desktop header, and a preset must not silently undo
+something the operator just clicked.
+
+`tracker`, `blend`, `luminance_blend` and `redetect_interval` remain on
+`FaceSwapConfig` so the `set_blend` / `set_alpha` API commands keep working, but
+nothing reads them and they are no longer in `PRESETS` — face tracking was
+replaced by per-frame detection plus landmark EMA, and blending is handled by the
+compositor's mask.
+
+### Compositing (FaceCompositor)
+Everything after the swap happens in **aligned face space** at 256x256, not on
+whole frames. `FaceSwapper.swap_aligned` returns the swapper's raw crop plus its
+affine (via `paste_back=False`), and `FaceCompositor` owns the rest: enhancement,
+temporal smoothing, colour matching, detail matching, masking and grain. This is
+what lets the mask follow the real jawline, keeps colour from pulsing, and stops
+the enhanced face reading as sharper than the frame around it.
+
+Detection runs on **every** frame, so the swap is always warped with current
+landmarks. Temporal continuity comes from EMA — on landmarks
+(`LandmarkStabilizer`) and on aligned pixels (`FaceCompositor`) — both of which
+release under motion and reset on face loss or source change. Both are bypassed
+when `many_faces` is set, since per-frame detection order is not stable.
+
+### Face restoration
+Two backends, chosen by `config.enhancer_model`:
+
+- **`codeformer`** (default) — ONNX, runs on the onnxruntime session already
+  required by the swapper, so it adds no dependency. Model downloads on first
+  use. Exposes a **fidelity weight** (`enhancer_weight`): `0.0` restores hardest
+  and hallucinates most, `1.0` stays closest to the input. This is the knob that
+  matters for believability — GFPGAN v1.4 restores toward a beautified, poreless
+  look with no way to dial it back, and that plastic skin is the strongest "this
+  is AI" signal on a call.
+- **`gfpgan`** — the previous backend, kept so the two can be compared on real
+  footage. Needs torch + the `gfpgan` package. If the configured backend cannot
+  load, the other is tried before restoration is disabled.
+
+Both are trained on **FFHQ-framed 512x512 crops** and rely on features sitting
+where FFHQ puts them, so `FaceCompositor` warps into FFHQ space around the
+restore call rather than handing them the swapper's tighter arcface crop. FFHQ
+framing is ~28% wider than arcface, so the crop given to the restorer is the real
+frame in FFHQ framing with the swapped face composited over it — otherwise the
+edges would be empty. Only what the swap covers survives the mask, so the real
+face at the edges never reaches the output.
+
+Geometry uses a closed-form Umeyama similarity fit (`estimate_similarity`), not
+`cv2.estimateAffinePartial2D` — the OpenCV estimators are randomized and anything
+that varies frame to frame feeds straight back into shimmer.
+
+### Realism knobs (`FaceSwapConfig`)
+| Field | Default | Effect |
+|-------|---------|--------|
+| `enhance` | `True` | Face restoration on/off |
+| `enhancer_model` | `codeformer` | Restoration backend (`codeformer` or `gfpgan`) |
+| `enhancer_weight` | `0.7` | CodeFormer fidelity: `0`=most restoration, `1`=closest to input |
+| `enhance_strength` | `0.7` | How much of the restored face to keep. Full strength reads as AI; partial keeps believable imperfection |
+| `aligned_size` | `256` | Compositing working resolution (clamped 128–512) |
+| `temporal_alpha` | `0.6` | EMA on aligned pixels, kills shimmer (`1.0` disables) |
+| `color_correction` | `True` | LAB transfer, sampled inside the mask, ramped by colour distance |
+| `color_strength` | `1.0` | Scales that transfer |
+| `grain` | `True` | Matches sensor noise on the composited face |
+| `occluder` | `True` | XSeg mask so hands/mics are not overpainted |
+
+Three ways to set them:
+- **Quality preset** — the desktop dropdown; see the table above.
+- **CLI / env** — `--enhancer-model`, `--enhancer-weight`, `--enhance-strength`,
+  `--aligned-size`, `--temporal-alpha`, `--color-strength`, `--no-enhance`,
+  `--no-grain`, `--no-occluder`. Each also reads an env var
+  (`ENHANCER_MODEL`, `ENHANCER_WEIGHT`, …) since the pod is configured via `.env`.
+  Precedence: preset first, then CLI/env overrides.
+- **`set_realism` API command** — `{"action": "set_realism", "values": {...}}`,
+  or `controller.set_realism(enhancer_weight=0.5)`. Validates and clamps; unknown
+  fields are reported back rather than silently ignored. Use this to A/B live.
+
+Models (`codeformer.onnx`, `dfl_xseg.onnx`) download on first use to
+`/workspace/models/` or `pipeline/models/`. If one is unavailable the pipeline
+degrades — masking falls back to landmark hull + valid-region, restoration falls
+back to the other backend or off — rather than failing.
 
 ### Entry Points
 - **pipeline.py**: Headless engine; starts WebSocket API server + ProcessingPipeline (batch or stream)
@@ -212,12 +297,15 @@ GFPGAN face enhancement is controlled by `config.enhance` (bool, default `True`)
 ### Services (ML/CV Models)
 - `pipeline/services/face_detection.py`: `FaceDetector` wraps InsightFace
 - `pipeline/services/face_swapping.py`: `FaceSwapper` ONNX model orchestration
-- `pipeline/services/enhancement.py`: `Enhancer` GFPGAN optional enhancement
+- `pipeline/services/enhancement.py`: `Enhancer` face restoration, CodeFormer (ONNX) or GFPGAN backend
+- `pipeline/services/masking.py`: `FaceMasker` landmark hull + optional XSeg occlusion
+- `pipeline/services/face_tracking.py`: `LandmarkStabilizer` EMA on kps/106 landmarks
 - `pipeline/services/database.py`: `FaceDatabase` embedding cache & averaging
 
 ### Processing Pipeline
 - `pipeline/processing/pipeline.py`: `ProcessingPipeline` orchestrator (batch & stream modes)
-- `pipeline/processing/frame_processor.py`: `FrameProcessor` ABC + 5 implementations
+- `pipeline/processing/frame_processor.py`: `FrameProcessor` ABC + 4 implementations
+- `pipeline/processing/compositor.py`: `FaceCompositor` aligned-space compositing
 
 ### I/O & API
 - `pipeline/io/capture.py`: Input sources (webcam, file, network)

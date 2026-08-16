@@ -11,13 +11,23 @@ Extends the basic types from pipeline/typing.py.
 """
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 import numpy as np
+import numpy.typing as npt
 from insightface.app.common import Face
 
 # Re-export basic types from typing module for convenience
 Face = Face
-Frame = np.ndarray
+
+# Array aliases. These are all the same underlying type — they exist to say
+# what a given array *means* at each call site. Spelled with explicit type
+# arguments so they satisfy mypy's `disallow_any_generics`; a bare
+# `np.ndarray` is a generic without arguments and is rejected under strict
+# mode (and is not usable as an annotation at all).
+Frame = npt.NDArray[Any]   # image, HxWx3 (BGR) or HxW
+Mask = npt.NDArray[Any]    # single-channel float mask in [0, 1]
+Matrix = npt.NDArray[Any]  # 2x3 affine transform
+Points = npt.NDArray[Any]  # Nx2 point set (landmarks, keypoints)
 
 
 @dataclass
@@ -34,7 +44,7 @@ class Bbox:
     h: int
 
     @classmethod
-    def from_insightface(cls, bbox: np.ndarray) -> 'Bbox':
+    def from_insightface(cls, bbox: npt.NDArray[Any]) -> 'Bbox':
         """
         Convert InsightFace bbox format (x1, y1, x2, y2) to our format.
 
@@ -47,7 +57,7 @@ class Bbox:
         x1, y1, x2, y2 = bbox[:4].astype(int)
         return cls(x=x1, y=y1, w=x2 - x1, h=y2 - y1)
 
-    def to_insightface(self) -> np.ndarray:
+    def to_insightface(self) -> npt.NDArray[Any]:
         """Convert back to InsightFace format (x1, y1, x2, y2)."""
         return np.array([self.x, self.y, self.x + self.w, self.y + self.h], dtype=np.float32)
 
@@ -98,7 +108,7 @@ class Detection:
 
     face: Face
     bbox: Bbox
-    kps: np.ndarray  # keypoints array
+    kps: npt.NDArray[Any]  # keypoints array
     confidence: float
 
     @classmethod
@@ -118,7 +128,7 @@ class Detection:
         confidence = float(score) if score is not None else 0.0
         return cls(face=face, bbox=bbox, kps=kps, confidence=confidence)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict[str, Any]:
         """Serialize to dictionary for logging/debugging."""
         return {
             'bbox': {'x': int(self.bbox.x), 'y': int(self.bbox.y), 'w': int(self.bbox.w), 'h': int(self.bbox.h)},
@@ -136,11 +146,11 @@ class VideoProperties:
     fps: float
 
     @property
-    def frame_size(self) -> tuple:
+    def frame_size(self) -> Tuple[int, int]:
         """Return frame dimensions as (height, width) tuple."""
         return (self.height, self.width)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict[str, Any]:
         """Serialize to dictionary."""
         return {
             'width': self.width,
@@ -157,7 +167,7 @@ class SwapResult:
     source_used: bool  # Was a source face found and used?
     detection: Optional[Detection]  # Detection info if available
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict[str, Any]:
         """Serialize to dictionary."""
         return {
             'source_used': self.source_used,

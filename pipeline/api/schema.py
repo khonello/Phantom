@@ -1,32 +1,51 @@
 from typing import Any, Dict
 
-# Quality presets — single source of truth used by core.py, control.py
+# Quality presets — single source of truth, applied via FaceSwapConfig.apply_preset().
+#
+# These trade latency against realism. Higher presets composite at a larger
+# working resolution, smooth harder, restore more, and enable occlusion masking.
+#
+# Deliberately absent: `enhance` and `color_correction`. Both have explicit
+# toggles in the desktop header, and a preset must not silently undo something
+# the operator just clicked.
+#
+# Also absent: `tracker`, `blend`, `luminance_blend`, `redetect_interval`.
+# Face tracking was replaced by per-frame detection plus landmark EMA, and
+# blending is handled by the compositor's mask. The fields still exist on
+# FaceSwapConfig so the `set_blend` / `set_alpha` API commands keep working,
+# but nothing reads them.
 PRESETS: Dict[str, Dict[str, Any]] = {
     'fast': {
-        'tracker': 'kcf',
-        'alpha': 0.7,
-        'blend': 0.65,
-        'luminance_blend': False,
+        'alpha': 0.7,             # lighter landmark smoothing
+        'aligned_size': 192,      # cheaper compositing
+        'enhancer_weight': 0.8,   # lean to fidelity — least restoration work
+        'enhance_strength': 0.5,
+        'temporal_alpha': 0.7,
+        'occluder': False,        # skips an ONNX pass per frame
+        'grain': True,            # cheap, and the biggest believability win
         'buffer_size': 3,
-        'redetect_interval': 30,
         'warmup_frames': 3,
     },
     'optimal': {
-        'tracker': 'csrt',
         'alpha': 0.6,
-        'blend': 0.65,
-        'luminance_blend': True,
+        'aligned_size': 256,
+        'enhancer_weight': 0.7,
+        'enhance_strength': 0.7,
+        'temporal_alpha': 0.6,
+        'occluder': True,
+        'grain': True,
         'buffer_size': 4,
-        'redetect_interval': 30,
         'warmup_frames': 5,
     },
     'production': {
-        'tracker': 'csrt',
-        'alpha': 0.5,
-        'blend': 0.65,
-        'luminance_blend': True,
+        'alpha': 0.5,             # heaviest landmark smoothing
+        'aligned_size': 320,
+        'enhancer_weight': 0.6,   # allow more restoration
+        'enhance_strength': 0.8,
+        'temporal_alpha': 0.5,
+        'occluder': True,
+        'grain': True,
         'buffer_size': 5,
-        'redetect_interval': 20,
         'warmup_frames': 5,
     },
 }
@@ -47,6 +66,7 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
     'set_blend':       {'value': float},
     'set_alpha':       {'value': float},
     'set_enhance':     {'value': bool},
+    'set_realism':     {'values': dict},
     # Stream routing
     'set_input_url':   {'url': str},
     # Source embedding
@@ -150,6 +170,7 @@ CMD_SET_QUALITY = 'set_quality'
 CMD_SET_BLEND = 'set_blend'
 CMD_SET_ALPHA = 'set_alpha'
 CMD_SET_ENHANCE = 'set_enhance'
+CMD_SET_REALISM = 'set_realism'
 CMD_SET_INPUT_URL = 'set_input_url'
 CMD_CREATE_EMBEDDING = 'create_embedding'
 CMD_CLEANUP_SESSION = 'cleanup_session'

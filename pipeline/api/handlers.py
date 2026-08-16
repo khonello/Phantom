@@ -558,6 +558,66 @@ def handle_set_preprocessing(config: FaceSwapConfig, value: bool) -> ResponseMes
     )
 
 
+# Realism tuning parameters settable at runtime, with their validators.
+# Grouped into one command rather than a handler each: they are knobs that get
+# adjusted together while comparing settings on real footage, and none of them
+# has (or needs) its own control in the desktop header.
+_REALISM_FIELDS: Dict[str, Any] = {
+    'enhancer_model': lambda v: str(v) if str(v) in ('codeformer', 'gfpgan') else None,
+    'enhancer_weight': lambda v: min(1.0, max(0.0, float(v))),
+    'enhance_strength': lambda v: min(1.0, max(0.0, float(v))),
+    'aligned_size': lambda v: min(512, max(128, int(v))),
+    'temporal_alpha': lambda v: min(1.0, max(0.0, float(v))),
+    'color_strength': lambda v: min(1.0, max(0.0, float(v))),
+    'grain': lambda v: bool(v),
+    'occluder': lambda v: bool(v),
+}
+
+
+def handle_set_realism(config: FaceSwapConfig, values: Dict[str, Any]) -> ResponseMessage:
+    """
+    Set one or more realism/compositing tuning parameters.
+
+    Unknown keys and values that fail validation are reported back rather than
+    applied, so a typo during tuning does not silently do nothing.
+
+    Args:
+        config: FaceSwapConfig
+        values: Mapping of field name to new value
+
+    Returns:
+        ResponseMessage listing what was applied and what was rejected
+    """
+    applied: Dict[str, Any] = {}
+    rejected: Dict[str, str] = {}
+
+    for field, raw in (values or {}).items():
+        validator = _REALISM_FIELDS.get(field)
+        if validator is None:
+            rejected[field] = 'unknown field'
+            continue
+        try:
+            value = validator(raw)
+        except (TypeError, ValueError):
+            value = None
+        if value is None:
+            rejected[field] = f'invalid value: {raw!r}'
+            continue
+        config.set(field, value)
+        applied[field] = value
+
+    if applied:
+        summary = ', '.join(f'{k}={v}' for k, v in applied.items())
+        emit_status(f'Realism settings updated: {summary}', scope='API')
+
+    return ResponseMessage(
+        type='set_realism',
+        data={'applied': applied, 'rejected': rejected},
+        success=not rejected,
+        error=None if not rejected else f'Rejected: {rejected}',
+    )
+
+
 def handle_set_input_url(config: FaceSwapConfig, url: str) -> ResponseMessage:
     """
     Set network input stream URL.
@@ -851,6 +911,9 @@ def dispatch_command(
 
         elif command_type == 'set_preprocessing':
             return handle_set_preprocessing(config, bool(data.get('value', True)))
+
+        elif command_type == 'set_realism':
+            return handle_set_realism(config, data.get('values', {}))
 
         elif command_type == 'set_input_url':
             return handle_set_input_url(config, data.get('url', ''))

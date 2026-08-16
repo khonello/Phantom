@@ -40,16 +40,32 @@ class FaceSwapConfig:
 
     # Stream pipeline - quality presets
     quality: str = 'optimal'
-    tracker: str = 'csrt'
-    alpha: float = 0.6
-    blend: float = 0.65
-    luminance_blend: bool = True
+    alpha: float = 0.6  # EMA on face landmarks (0.0 = max smoothing, 1.0 = off)
     enhance: bool = True
     color_correction: bool = True
     preprocessing: bool = False
     buffer_size: int = 4
-    redetect_interval: int = 30
     warmup_frames: int = 5
+
+    # Realism / compositing
+    enhancer_model: str = 'codeformer'  # 'codeformer' (ONNX) or 'gfpgan' (torch)
+    enhancer_weight: float = 0.7    # CodeFormer fidelity: 0 = heaviest restoration
+                                    # and most hallucination, 1 = closest to input
+    enhance_strength: float = 0.7   # how much of the restored face to keep
+    aligned_size: int = 256         # compositing working resolution (128-512)
+    temporal_alpha: float = 0.6     # EMA on aligned pixels (1.0 = off)
+    color_strength: float = 1.0     # scales the LAB colour transfer
+    grain: bool = True              # match sensor noise on the composited face
+    occluder: bool = True           # XSeg mask so hands/mics are not overpainted
+
+    # Vestigial — kept so `apply_preset` and the desktop's `set_quality`
+    # round-trip keeps working. No longer read by the pipeline: face tracking
+    # was replaced by per-frame detection plus landmark EMA, and blending is
+    # now handled by FaceCompositor's mask rather than a global alpha.
+    tracker: str = 'csrt'
+    blend: float = 0.65
+    luminance_blend: bool = True
+    redetect_interval: int = 30
 
     # I/O configuration
     input_url: Optional[str] = None
@@ -154,6 +170,15 @@ class FaceSwapConfig:
             'blend': self.blend,
             'luminance_blend': self.luminance_blend,
             'enhance': self.enhance,
+            'enhancer_model': self.enhancer_model,
+            'enhancer_weight': self.enhancer_weight,
+            'enhance_strength': self.enhance_strength,
+            'aligned_size': self.aligned_size,
+            'temporal_alpha': self.temporal_alpha,
+            'color_correction': self.color_correction,
+            'color_strength': self.color_strength,
+            'grain': self.grain,
+            'occluder': self.occluder,
             'buffer_size': self.buffer_size,
             'redetect_interval': self.redetect_interval,
             'warmup_frames': self.warmup_frames,
