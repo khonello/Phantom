@@ -655,7 +655,17 @@ Not control-plane work, but nothing above can be sold without it.
   along for free.
 - Session state must carry the active mode, since a customer switches between
   live and batch inside one session.
-- Deliberately **no packing yet**. One session per worker is correct and safe.
+- **Move pod lifecycle out of the worker.** The scheduler refcounts sessions per
+  pod and releases when the last one leaves — the worker's own `stop_pod()` call
+  cannot see its neighbours and would kill them. Keep only a long,
+  no-active-session failsafe in the worker against a control-plane outage.
+- **Build every path N-shaped with `max_sessions = 1`**: session-scoped upload
+  and temp directories, control-plane-allocated worker ports, a registry keyed
+  by (pod, slot), routing to a session's worker rather than a pod. Raising the
+  number must then require no code change — see
+  [SESSION_ARCHITECTURE.md §4](SESSION_ARCHITECTURE.md).
+- Deliberately **no packing yet**. Running one session per worker is correct and
+  safe; the paths for two already exist and go untested until stage 7.
 
 ### 4. Attack cold start
 
@@ -719,8 +729,10 @@ session-hour** — which is the catch, since below one concurrent session there
 are none. It is listed last for that reason alone, not because it is hard or
 low value.
 
-Because stage 3 builds slot-shaped scheduling with `max_sessions = 1`, this
-stage is a benchmark and a config change rather than a rewrite. The trigger is
+Because stage 3 builds every path N-shaped with `max_sessions = 1`, this stage
+is a benchmark and a config change rather than a rewrite. If it turns out to be
+more than that, stage 3 was built wrong — and running N=2 in staging is how that
+gets caught early rather than under load. The trigger is
 concurrency approaching 2, or GPU scarcity in a region — and `max_sessions`
 becomes a pricing input at that moment, since a fully-consumed Day Pass is 76%
 margin at one session per card and 88% at two.

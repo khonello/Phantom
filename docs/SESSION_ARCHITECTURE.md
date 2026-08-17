@@ -277,6 +277,48 @@ at each step:
 The result is a per-GPU-type constant: `max_sessions = 2`, or `4`, depending on
 the card and the pipeline.
 
+### `max_sessions` is a value, never an assumption
+
+**Requirement: raising `max_sessions` from 1 to 2 must require no code changes.**
+Every path that differs between one session and many is built to handle many
+from the start, and runs with the count set to 1 until a benchmark says
+otherwise.
+
+This is not the same as leaving room for a future refactor. It means the
+multi-session paths are the *only* paths — there is no single-session special
+case to replace, because one is simply the smallest value of N.
+
+| Path | Must be | Must not be |
+|---|---|---|
+| **Pod release** | Refcounted: the **last** session to leave starts the grace period; the pod is released only if it expires with the count still at zero | The first worker whose timer fires calling `stop_pod()` |
+| **Upload directory** | Scoped per session | One fixed `/tmp/phantom_uploads` |
+| **Batch temp directories** | Scoped per session | Derived from the target filename alone |
+| **Worker port** | Allocated per worker by the control plane | Hardcoded 9000 |
+| **Worker registry** | Keyed by (pod, slot) | Keyed by pod |
+| **Client routing** | To *this session's* worker endpoint | To "the pod's" endpoint |
+| **Capacity check** | Free slots on this pod | Pod busy or free |
+
+With `max_sessions = 1` every one of these behaves exactly as a single-session
+design would. The difference is that none of them has to be found and changed
+later.
+
+**Pod lifecycle moves out of the worker entirely.** A worker reports that its
+session ended; it never decides the pod's fate. §12's rule — the timer starts
+only when zero sessions remain — is already refcounting, and it only works if
+one component can see all the sessions on a pod. That component is the
+scheduler, not a worker that cannot see its neighbours.
+
+One exception is worth keeping: a **failsafe** in the worker that stops the pod
+after a long period with no contact from the control plane *and* no active
+session. Without it, a control-plane outage leaves pods billing indefinitely.
+It must be measured in hours and gated on there being nothing to lose, so it
+can never race a live session the way the current per-process timer does.
+
+> **Annotation — the paths cannot be proven correct at N=1.** Everything above
+> is checkable by reading, but only running two sessions on one pod exercises
+> the collisions. Run N=2 in staging even while production runs N=1, or the
+> "no work required" property is an assumption rather than a fact.
+
 > **Annotation — three corrections to this section.**
 >
 > **VRAM is not the binding constraint.** With models shared across sessions the
