@@ -258,6 +258,98 @@ own alignment, so the two agree by construction.
 
 ---
 
+## Matching the call, not only the face
+
+A believable face is necessary and not sufficient. What reaches the other end of
+the call is a whole video stream, and a stream that behaves unlike every other
+video call is a tell regardless of how good the face is.
+
+Most of that comes free, because the pipeline composites onto a **real webcam
+frame** delivered over a **real network**. The room's lighting, the camera's
+white balance and exposure hunting, its sensor noise, the codec's blocking, the
+irregular arrival of frames — all of it is already in the signal. The job is not
+to invent those characteristics but to make sure the swapped face **follows**
+them rather than sitting statically on top.
+
+### What the frame already carries
+
+| Characteristic | Where it comes from | What the face must do |
+|---|---|---|
+| Room lighting, colour temperature | The real frame | Follow it — LAB match, recomputed every frame |
+| Directional light, one-sided illumination | The real frame | Follow the gradient — illumination match |
+| Auto-exposure and white-balance hunting | The camera, continuously | Follow it, because the match is per-frame and never cached |
+| Sensor noise, ISO grain | The camera | Be matched — estimated per frame from the region around the face |
+| Codec blocking, compression softness | JPEG in, JPEG out | Share it — the whole frame is re-encoded together after compositing |
+| Irregular frame arrival, jitter | The actual network | Inherited; the desktop's jitter buffer already smooths it |
+
+None of these need faking. They need not being *undone*, which is why the colour
+and detail matches are recomputed per frame rather than solved once.
+
+### What is not matched yet
+
+Two physical cues survive, and both appear during movement — which is when a
+viewer is most likely to be looking.
+
+**Motion blur.** When someone turns their head, the real frame smears; the
+generated face does not. The swap is reconstructed from an aligned crop and
+comes back sharp, so during fast movement it is *sharper than the face it is
+replacing*. Detail matching operates on a static high-frequency band and does
+not model direction, so it corrects the average and misses the smear.
+
+The tractable version: estimate inter-frame displacement from the stabilised
+landmarks — which the pipeline already computes — and apply a matching
+directional blur to the aligned crop before compositing. Magnitude and angle
+both fall out of the landmark delta.
+
+**Rolling shutter skew.** A fast pan skews a CMOS sensor's image; a warped crop
+has no skew. Much subtler than motion blur and much harder to model. Worth
+noting and not worth chasing until motion blur is done and measured.
+
+### Degrade like a network, not like an AI
+
+The unifying rule, and the one that already decides several behaviours
+elsewhere:
+
+> When the pipeline cannot do something well, it should fail the way a video
+> call fails — not the way a generative model fails.
+
+A frozen picture, a stutter, a moment of softness: these are things every
+participant on every call has seen a thousand times and reads past without
+thought. A face that flickers between two identities, a seam that appears under
+motion, a mouth that smears — these have no innocent explanation.
+
+Applied so far:
+
+| Situation | Behaviour | Reads as |
+|---|---|---|
+| Multiple faces in frame | Hold the last good frame | Network hiccup |
+| Face lost, detection fails | Hold the last good frame | Network hiccup |
+| Paid hour expires | Hold the last good frame | Network hiccup |
+| Worker dies, pod reclaimed | Hold the last good frame | Network hiccup |
+
+Still to apply:
+
+- **Falling behind.** If the pipeline cannot keep the frame rate, it should drop
+  frames evenly rather than accumulate latency. Even dropping reads as
+  bandwidth; growing lag reads as a machine struggling, and desynchronises from
+  the audio.
+- **Quality under load.** Reducing capture resolution or frame rate under
+  pressure is exactly what a call client does. Falling back a preset is more
+  honest than missing deadlines at the current one.
+
+### The honest caveat
+
+Everything above is reasoning about mechanisms, not observation of output. The
+mechanisms are sound and the measurements behind them are real, but **no part of
+this document has been checked against a recorded call.** Motion blur may turn
+out to be invisible at these resolutions; the illumination match may turn out to
+be the thing that matters most; something not listed here may dominate both.
+
+One clip of real footage would settle more than any further analysis. It remains
+the single highest-value thing outstanding on the whole project.
+
+---
+
 ## Resolution
 
 `aligned_size` sets a **ceiling** on the working resolution (default 256, clamped

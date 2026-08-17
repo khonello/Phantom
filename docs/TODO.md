@@ -122,6 +122,33 @@ Applied at upload, before any embedding is built.
 
 ---
 
+## Stage 3.5 — Call realism
+
+*Ships: output that behaves like a video call, not just a face that looks like one.*
+
+Most video-call character is inherited — real webcam, real network — and the
+existing per-frame colour, detail and grain matching is what stops the face
+undoing it. Two physical cues are still unmatched, and both appear during
+movement.
+
+- [ ] **Motion blur matching.** During head movement the real frame smears and
+      the generated face does not, so the swap is *sharper than what it
+      replaces*. Estimate displacement from the stabilised landmarks the pipeline
+      already computes, and apply matching directional blur to the aligned crop.
+      Magnitude and angle both fall out of the landmark delta
+- [ ] **Drop frames evenly when falling behind**, rather than accumulating
+      latency. Even dropping reads as bandwidth; growing lag reads as a machine
+      struggling, and desynchronises from the audio
+- [ ] **Fall back a quality preset under load** rather than missing deadlines at
+      the current one — which is what a call client does
+- [ ] *Noted, not scheduled:* rolling-shutter skew. Much subtler than motion
+      blur and much harder to model
+- [ ] **Record one clip of real output and watch it.** Nothing above has been
+      checked against a real call. This gates every other item in this stage and
+      is the highest-value outstanding task on the project
+
+---
+
 ## Stage 4 — Control plane, one session per GPU
 
 *Ships: the product. Customers can run sessions.*
