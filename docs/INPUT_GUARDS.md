@@ -1,134 +1,86 @@
 # Input Guards
 
-Rejecting inputs that would produce a wrong or unusable swap, rather than
-swapping them badly.
+Refusing inputs that would produce a wrong swap, instead of swapping them badly.
 
-**Status: design settled, not built.** The guard set, the hold-and-alert
-policy and the clean-video rule are decided; thresholds still need
-calibration against real uploads and real footage.
+**Status: design settled, not built.** Thresholds still need calibration against
+real uploads and real footage.
 
 ---
 
-## The failure this prevents
+## Why
 
-The pipeline currently has no notion of an input it should refuse. It detects a
-face, or it does not. Everything in between — the wrong person, an unusable
-photo, two people in shot — is processed as though it were fine, and the result
-is a swap that is confidently wrong.
+The pipeline has no notion of an input it should refuse. It finds a face or it
+does not; everything in between — the wrong person, an unusable photo, two people
+in shot — is processed as though it were fine.
 
-That is worse than no swap at all. A frame with no face is obviously a failure
-and the operator knows to fix it. A frame with someone *else's* face swapped
-onto it looks like it worked.
+That produces output that is confidently wrong, which is worse than no output. A
+frame with no face is obviously broken and the operator fixes it. A frame with a
+*stranger's* face swapped in looks like it worked.
 
 ---
 
-## What happens today
+## The problem in the current code
 
-Two behaviours, verified against the code, both silent.
-
-### The single-face rule is "leftmost", and it is not a rule
-
-Everywhere the pipeline needs one face, it takes the one with the smallest x
-coordinate:
+**When there is more than one face, the pipeline picks the leftmost one.**
 
 ```python
 # pipeline/services/face_detection.py — detect_one()
 return min(detections, key=lambda d: d.bbox.x)
 ```
 
-This is not a heuristic that sometimes fails. It is an arbitrary tie-break
-standing in for a decision that was never made. Nothing about how images are
-composed makes the leftmost face the subject, and it selects the wrong person
-whenever there is more than one candidate: a friend beside you, someone walking
-behind you, a face on a poster or a television, a reflection, a photograph on
-the wall.
+Not the largest, not the nearest, not the centre — the smallest x coordinate.
+Nothing about how images are composed makes that the subject, so it picks wrong
+whenever there is a second candidate: someone beside you, someone walking
+behind, a face on a television, a photo on the wall. It arrived with the
+original scaffolding and was never revisited.
 
-It came in with the original scaffolding (`98892d6`, "Phase 0 & 1") and was
-never revisited. Its only virtue is determinism — it is reproducibly wrong
-rather than randomly wrong.
+It is used in two places and fails differently in each:
 
-It is used in exactly two places, and it fails differently in each.
+- **Source images** — `FaceDatabase._extract_from_image()` builds the embedding
+  from whatever it returns. One wrong pick at upload time means every subsequent
+  frame swaps the wrong identity. Decided once, silently, never re-examined.
+- **Runtime** — `DetectionProcessor` calls it on *every frame*. As people move,
+  the leftmost face can change between frames, so the swap jumps between
+  subjects mid-call and the `LandmarkStabilizer` is fed alternating identities.
 
-**In source images, one wrong pick poisons the whole session.**
-`FaceDatabase._extract_from_image()` builds the embedding from whatever
-`detect_one` returned. Upload a photo with a friend on your left and every
-subsequent frame swaps in your friend. The choice is made once, silently, and
-never re-examined.
+**Separately, a batch of source images is averaged with no consistency check.**
+`_average_faces()` takes the mean of everything it is given. One photo of a
+different person pulls the identity toward a blend of two people — a face that
+resembles nobody. Nothing reports it.
 
-**At runtime, the failure is instability rather than arbitrariness.**
-`DetectionProcessor.process()` calls `detect_one` on **every frame** when
-`many_faces` is off. As people move, the leftmost face can change from one frame
-to the next — so the swap jumps between subjects mid-stream, and the
-`LandmarkStabilizer`, which exists on the assumption of one continuous subject,
-is fed alternating identities and thrashes. Nothing detects that the target
-changed.
-
-> An earlier draft of this document claimed the pipeline swapped *every*
-> detected face regardless of `many_faces`. That was wrong: `DetectionProcessor`
-> does restrict to one. The stabilizer thrashing is real, but it is caused by
-> the selection flipping between frames, not by multiple faces being swapped.
-
-**A batch of source images is averaged without any consistency check.**
-`_average_faces()` takes the mean of every embedding it was given and normalises
-it. One photo of a different person pulls the identity toward a blend of two
-people, which is an identity that does not exist and will not resemble anyone.
-Nothing reports this either.
-
-### Why guessing better is not the fix
-
-Largest face is a much better heuristic than leftmost — the subject is usually
-nearest the camera — and most-central is defensible too. Both still fail, and
-they fail silently in the same way.
-
-The distinction that matters is whether there is a human available to ask:
-
-- **Source images are an upload flow.** The operator is right there, choosing
-  files. There is no reason to guess: refuse the ambiguous image and say why.
-- **Runtime has nobody to ask.** A rule is unavoidable, so use **largest** as
-  the primary-face rule, and guard the frame when the situation is ambiguous
-  rather than resolving it by fiat.
+Largest-face is a better rule than leftmost and should replace it, but it still
+fails silently. The difference between the two call sites is whether a human is
+available: at upload the operator is right there, so refuse and say why; at
+runtime nobody can be asked, so guard the frame.
 
 ---
 
 ## Source guards
 
-Applied when source images are uploaded, before any embedding is built. A
-rejected image is **reported to the operator with the reason**, never dropped
-silently.
+Applied when images are uploaded, before any embedding is built.
 
-| Guard | Rule | Why it matters |
-|---|---|---|
-| **Multiple faces** | Reject if more than one face is detected | We cannot know which person was intended. This is the requested behaviour and the most important guard here |
-| **No face** | Reject | Already handled, but the reason must reach the UI |
-| **Face too small** | Reject if the face box is under ~110 px on its shorter side | Below this the embedding is being computed from an upscaled blur |
-| **Blurred** | Reject if the variance of the Laplacian over the face crop is below threshold | A soft source produces a soft swap on every frame forever |
-| **Extreme pose** | Reject beyond roughly ±35° yaw | ArcFace embeddings degrade sharply toward profile; a profile source yields a generic face |
-| **Identity outlier** | With three or more images, reject any whose embedding is far from the group consensus | Catches the wrong person in a batch — the failure that `_average_faces` cannot currently see |
+| Guard | Rule |
+|---|---|
+| **Multiple faces** | Reject — we cannot know which person was meant |
+| **No face** | Reject |
+| **Face too small** | Reject under ~110 px on the shorter side; the embedding would come from an upscaled blur |
+| **Blurred** | Reject below a Laplacian-variance floor; a soft source gives a soft swap on every frame |
+| **Extreme pose** | Reject beyond roughly ±35° yaw; ArcFace degrades sharply toward profile |
+| **Identity outlier** | With three or more images, reject any that disagrees with the rest |
+
+A rejected image reports **which** image and **why**. This is an upload flow with
+a person present, so a bare failure is not good enough — they need to know which
+photo to replace.
 
 ### The outlier check
 
-Cosine similarity against the mean of the others, leave-one-out:
+Leave-one-out cosine similarity: compare each embedding against the mean of the
+others, and reject any that sits too far away. This catches the wrong person
+hidden in a batch, which is the failure `_average_faces` cannot currently see.
 
-```
-  img1  img2  img3  img4  img5
-   │     │     │     │     │
-   └─────┴──┬──┴─────┴─────┘
-            ▼
-     mean embedding (excluding the one under test)
-            │
-            ▼
-   cos(img_i, mean_without_i)  <  threshold   →  reject img_i
-```
-
-Two properties worth stating:
-
-- **It needs three images to be meaningful.** With two dissimilar images there is
-  no majority and no way to tell which is the intruder — report the
-  disagreement and let the operator choose, rather than guessing.
-- **The threshold is identity-scale, not pixel-scale.** Same person across
-  lighting, age and expression typically sits well above the separation between
-  different people, which is what makes this work at all. The exact number has
-  to be calibrated against real uploads.
+It needs **three images** to mean anything. With two that disagree there is no
+majority and no way to tell which is the intruder — report the disagreement
+rather than guessing.
 
 ---
 
@@ -136,215 +88,149 @@ Two properties worth stating:
 
 Applied per frame, before swapping.
 
-| Guard | Rule | Action |
-|---|---|---|
-| **Multiple faces** | More than one detection and `many_faces` is off | Do not swap this frame — the requested behaviour |
-| **Low confidence** | Detection score below threshold | Do not swap |
-| **Face too small** | Face box under ~80 px | Do not swap; the result would be mush |
-| **Extreme pose** | Yaw beyond limit | Do not swap, or reduce strength |
-| **Heavy occlusion** | XSeg coverage below ~40% of the hull | Do not swap; mostly hands or a microphone |
+| Guard | Rule |
+|---|---|
+| **Multiple faces** | More than one detection while `many_faces` is off |
+| **Low confidence** | Detection score below threshold |
+| **Face too small** | Under ~80 px; the swap would be mush |
+| **Extreme pose** | Yaw beyond limit |
+| **Heavy occlusion** | XSeg coverage below ~40% of the hull |
 
 ```
-frame ─▶ detect ─┬─ 0 faces ────────────▶ no swap, mark missing
+frame ─▶ detect ─┬─ 0 faces ──────────────▶ no swap, mark missing
                  │
-                 ├─ >1 face  ───────────▶ GUARDED
-                 │   (many_faces off)
+                 ├─ >1 face ───────────────▶ GUARDED
                  │
-                 └─ 1 face ─┬─ too small ─────▶ GUARDED
-                            ├─ low score ─────▶ GUARDED
-                            ├─ extreme pose ──▶ GUARDED
-                            ├─ occluded ──────▶ GUARDED
-                            └─ ok ────────────▶ swap · composite · emit
+                 └─ 1 face ─┬─ too small ──▶ GUARDED
+                            ├─ low score ──▶ GUARDED
+                            ├─ bad pose ───▶ GUARDED
+                            ├─ occluded ───▶ GUARDED
+                            └─ ok ─────────▶ swap · composite · emit
 ```
 
-Detection already runs on every frame, so every one of these is a comparison
-against data the pipeline has in hand. The cost is negligible.
-
-**Decided: a guarded frame never updates temporal state.** Feeding one into the
-pixel EMA would blend a stranger, or a bad detection, into the smoothed history
-— and then leak it back out over the following frames once the guard clears.
-`FaceCompositor.reset()` and `LandmarkStabilizer.reset()` both already exist for
-this; a guard must call them rather than simply skipping the swap.
+Detection already runs every frame, so all of these read data the pipeline
+already has. The cost is negligible.
 
 ---
 
 ## What a guarded frame emits
 
-**Decided: hold the last good swapped frame. Never pass the raw frame through.**
+**The last good swapped frame, unchanged.**
 
-The operator is on a video call precisely because they do not want their own
-face transmitted. Guarding a frame and then showing their real face turns a
-safety feature into the exposure it exists to prevent.
+Nothing is drawn onto it — no banner, no border, no text, no tint. The frame goes
+straight to the virtual camera and therefore to everyone on the call, so anything
+added would be visible to every participant. A held frame reads as a network
+hiccup, which is the most innocuous way this can fail in front of other people.
 
-| Option | Behaviour | Verdict |
-|---|---|---|
-| Pass through unswapped | Real face reaches the call | **Never.** Defeats the entire purpose |
-| Hold last good swapped frame | Output appears to freeze | **Chosen** |
-| Emit nothing | Client freezes on its last frame | Equivalent, but decided in the wrong place |
+Passing the *raw* frame through is never an option: the operator is on the call
+precisely because they do not want their own face transmitted, and showing it
+turns the guard into the exposure it exists to prevent.
 
-Holding for roughly a second covers the common transient case — someone crossing
-behind the operator — without any visible interruption at all. Past that window
-the condition is not transient and the operator has to be told.
+Two rules go with it:
 
-There is a second reason to prefer holding: **a frozen picture reads as a
-network hiccup**, which is the most innocuous way this can possibly fail in
-front of other people. Every alternative is either an exposure or an
-announcement.
-
-**Guards fail closed.** If a guard cannot be evaluated — the occluder model
-missing, a detection error, a threshold unset — the frame is guarded. An
-un-evaluable guard is never treated as a pass.
+- **Fail closed.** If a guard cannot be evaluated — occluder model missing,
+  detection error, threshold unset — the frame is guarded.
+- **Never update temporal state.** A guarded frame must not enter the pixel EMA
+  or the landmark EMA, or a stranger gets blended into the smoothed history and
+  leaks back out over the following frames. Guards call `FaceCompositor.reset()`
+  and `LandmarkStabilizer.reset()`.
 
 ---
 
-## Making the guard unmissable
+## The virtual camera invariant
 
-A warning the operator does not see is the same as no guard at all, and the
-obvious placements both fail:
+A guarded frame is one case of a rule that has to hold everywhere:
 
-```
-  the operator is looking HERE ─────────┐
-                                        ▼
-  ┌──────────────────────────┐   ┌──────────────────────┐
-  │ Phantom window           │   │ Zoom / Meet / Teams  │
-  │  · status line           │   │  · self-view         │
-  │  · behind the call, or   │   │  · other participants│
-  │    minimised             │   │                      │
-  │         ✗ missable       │   │   ✗ burning a banner │
-  └──────────────────────────┘   │     in here is seen  │
-                                 │     by EVERYONE      │
-                                 └──────────────────────┘
-```
+> **The virtual camera shows the last augmented frame, or an augmented frame.
+> Never the raw camera, and never nothing.**
 
-The virtual camera feed goes straight to the call (`desktop/bridge.py::_run_vcam`
-sends whatever frame it is given). So the two intuitive answers are both wrong:
-Phantom's own status line sits in a window that is behind the call or minimised,
-and anything drawn into the frame is broadcast to every other participant —
-which advertises the tool at the worst possible moment.
+It applies to every way processing can stop:
 
-That gives two hard rules.
+| Event | Virtual camera shows |
+|---|---|
+| Frame guarded | Last augmented frame |
+| **Paid hour expires, pipeline disconnects** | **Last augmented frame** |
+| Session ends or is stopped | Last augmented frame |
+| Worker dies, pod reclaimed, network drops | Last augmented frame |
+| Pipeline crashes | Last augmented frame |
 
-**The video output stays clean.** No banner, no border, no tint, no text is ever
-composited into a frame that reaches the virtual camera. The guard state must
-not be inferable by anyone on the call. A freeze is the entire outward signal,
-and it should look like a dropped connection.
+The hour-expiry case is the one most likely to be got wrong, because it is the
+only one that is *expected*. It must behave exactly like the failures: the
+operator's real face must not appear on the call the moment their time runs out.
 
-**Alerting reaches the operator outside Phantom's window**, through channels
-that other participants cannot perceive:
+**"Never nothing" matters as much as "never raw."** Today `_run_vcam` only calls
+`cam.send()` when a frame arrives:
 
-| Channel | Reaches them | Leaks to the call |
-|---|---|---|
-| Always-on-top overlay, small, local | Yes — over the call window | No |
-| Taskbar flash / OS notification | Yes | No |
-| Phantom's local preview, clearly marked | Only if visible | No |
-| Status line alone | **No** | No |
-| Anything drawn into the frame | Yes | **Yes — never** |
-| Audible alert | Yes | **Possibly** — an open mic carries it |
-
-An always-on-top overlay is the primary channel, since it is the only one
-guaranteed to be in front of the call window. Qt supports it directly
-(`Qt.WindowStaysOnTopHint`). Keep it small, put the reason on it, and make it
-disappear the instant the guard clears.
-
-An audible alert is worth offering but **off by default**: an open microphone
-will carry it into the call, which is precisely the announcement the clean-video
-rule exists to avoid.
-
-### Escalation
-
-```
-  t=0      guard trips           hold last good frame · no alert yet
-  t≈1s     still guarded         always-on-top overlay + taskbar flash
-  t≈5s     still guarded         overlay persists, reason shown, optional sound
-  clear    guard releases        overlay disappears immediately, swap resumes
+```python
+# desktop/bridge.py — _run_vcam()
+frame = self._vcam_queue.get(timeout=0.1)
+cam.send(frame)
 ```
 
-Below one second nothing is shown, because a transient guard that resolves
-itself is not worth interrupting a call over. Above it, the alert stays until
-the condition actually clears — it is never auto-dismissed on a timer, and it
-is not a toast that disappears while the problem persists.
+When frames stop, it stops sending. The device stalls rather than freezing, and a
+call application may report that as a disconnected camera — a louder and stranger
+signal than a frozen picture. The loop must instead **hold the last frame and keep
+re-sending it** at the normal rate, so the stream stays alive and simply stops
+moving.
 
-### The other places a guard must not be missable
-
-- **Source rejection reports per-image reasons.** *"3 of 5 accepted —
-  `group.jpg` has 2 faces, `blurry.png` is too soft"*, never a bare failure.
-  This is an upload flow with the operator present; there is no excuse for
-  ambiguity.
-- **A disabled guard is visible.** `guard_multi_face` can be switched off, since
-  the pipeline also serves `many_faces` deliberately — but a session running with
-  guards off must say so on screen. A guard that is silently disabled is worse
-  than one that was never built, because the operator believes they are
-  protected.
-- **Guard activations are counted.** A source guarded 30% of the time is a bad
-  source, and the operator should be told to replace it rather than left to
-  wonder why the swap keeps stalling.
+The raw camera already never reaches the virtual camera: `_push_to_vcam` is only
+called with processed frames. That property is easy to break by accident and
+worth a test.
 
 ---
 
 ## Configuration
 
-Every guard needs a threshold and every threshold is a guess until calibrated
-against real footage. They belong on `FaceSwapConfig` alongside the realism
-knobs, settable through `set_realism`'s validation pattern.
+Thresholds live on `FaceSwapConfig` alongside the realism knobs, settable through
+the `set_realism` validation pattern.
 
 ```
-guard_multi_face        True      reject multi-face sources, skip multi-face frames
+guard_multi_face        True      reject multi-face sources, guard multi-face frames
 guard_min_source_px     110       minimum source face size
 guard_min_frame_px      80        minimum runtime face size
-guard_min_sharpness     …         Laplacian variance floor, needs calibration
+guard_min_sharpness     …         Laplacian variance floor — needs calibration
 guard_max_yaw           35        degrees
-guard_min_confidence    0.5       detection score floor, above the 0.35 detect threshold
+guard_min_confidence    0.5       detection score floor (detect threshold is 0.35)
 guard_min_coverage      0.4       fraction of hull unoccluded
-guard_hold_ms           1000      hold last good frame before alerting
-guard_alert_sound       False     off by default — an open mic carries it
-guard_overlay           True      always-on-top local alert; the primary channel
-guard_outlier_sim       …         cosine floor for source consistency, needs calibration
+guard_outlier_sim       …         cosine floor for source consistency — needs calibration
 ```
 
-`guard_multi_face` should be switchable off, since the same pipeline serves
+`guard_multi_face` must be switchable off, since the same pipeline serves
 `many_faces` deliberately.
 
 ---
 
 ## Where this lands
 
-| Guard | File |
+| Piece | File |
 |---|---|
+| Largest-face rule, face count | `pipeline/services/face_detection.py` |
 | Source guards, per-image reasons | `pipeline/services/database.py` |
 | Outlier rejection | `pipeline/services/database.py::_average_faces` |
-| Multi-face source detection | `pipeline/services/face_detection.py` — needs a count, not just `detect_one` |
-| Runtime guards | `pipeline/processing/pipeline.py::_process_and_emit` |
-| Hold-last-frame | `pipeline/processing/pipeline.py` |
-| Guard events | `pipeline/events.py`, `pipeline/api/server.py` |
-| Always-on-top alert overlay | `desktop/main.qml` (`Qt.WindowStaysOnTopHint`) |
-| Per-image rejection reasons | `desktop/bridge.py`, `desktop/main.qml` |
-| Clean-video guarantee | `desktop/bridge.py::_push_to_vcam` — nothing drawn into the frame |
+| Runtime guards, hold-last-frame | `pipeline/processing/pipeline.py::_process_and_emit` |
+| Virtual camera holds last frame | `desktop/bridge.py::_run_vcam` — re-send on empty queue |
 | Thresholds | `pipeline/config.py`, `pipeline/api/handlers.py` |
+| Rejection reasons in the UI | `desktop/bridge.py`, `desktop/main.qml` |
 
-Two fixes belong in the same pass, independent of the guards themselves:
-replacing `detect_one`'s leftmost rule with largest-face, and resetting the
-`LandmarkStabilizer` whenever the selected face changes identity — a large
-centroid jump between frames already triggers a reset, but a genuine switch
-between two people standing still does not.
+Two fixes belong in the same pass, independent of the guards: replace leftmost
+with largest, and reset the stabilizer when the selected face changes identity —
+the existing centroid-jump reset does not catch a switch between two people
+standing still.
 
 ---
 
 ## Open questions
 
-**Is largest-face enough at runtime, or does selection need continuity?**
-Largest is a clear improvement on leftmost, but it can still flip if two people
-are of similar apparent size. Preferring the face nearest the previous frame's
-position would be steadier — though that is a tracker by another name, and
-per-frame detection exists partly to avoid one. Guarding may make the question
-moot: if two comparable faces are in shot, the frame is guarded anyway.
+**Is largest-face enough, or does selection need continuity?** Largest can still
+flip between two people of similar apparent size. Preferring the face nearest the
+previous frame's position would be steadier, but that is a tracker by another
+name. Guarding may make it moot: two comparable faces in shot guards the frame
+anyway.
 
-**Is pose available cheaply?** InsightFace exposes pose on some model
-configurations. If `buffalo_l` does not provide it, yaw can be approximated from
-the five keypoints, which is cheaper than adding a model but needs its own
-calibration.
+**Is pose available cheaply?** InsightFace exposes it on some configurations. If
+`buffalo_l` does not, yaw can be approximated from the five keypoints.
 
 **How aggressive should source rejection be?** Every guard that rejects a usable
-photo is friction at the exact moment a new customer is deciding whether this
-product works. Multi-face is unambiguous; sharpness and pose are judgement
-calls, and starting permissive with a warning may convert better than starting
-strict with a rejection.
+photo is friction at the moment a new customer is deciding whether this works.
+Multi-face is unambiguous; sharpness and pose are judgement calls, and starting
+permissive may convert better than starting strict.

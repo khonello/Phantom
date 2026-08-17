@@ -715,6 +715,14 @@ Two rules follow, and they are deliberate:
 Before the hour expires, a modal offers to extend. Extending deducts another
 hour if the balance can sustain it.
 
+**When the hour ends the pipeline disconnects, and the virtual camera holds the
+last augmented frame.** It must not fall back to the raw camera, and it must not
+go dead — the operator may still be on a call, and their real face appearing at
+the moment their time runs out is the worst possible failure. Expiry behaves
+exactly like an outage from the call's point of view: the picture freezes and
+reads as a network problem. See
+[INPUT_GUARDS.md](INPUT_GUARDS.md#the-virtual-camera-invariant).
+
 > **Annotation — this already exists in prototype.** The `auto_stop_warning`
 > event, the `keep_alive` command, and the desktop's countdown dialog with
 > Extend and Dismiss were built for pod uptime. The mechanism transfers directly
