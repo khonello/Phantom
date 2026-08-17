@@ -291,6 +291,13 @@ the card and the pipeline.
 > **Define the ceiling by a latency budget, not by absence of crashes.** A live
 > session is unusable long before it OOMs.
 >
+> **Packing is deferred, but the shape must not be.** Concurrency is expected to
+> be low initially, so running two sessions on a card is worth nothing yet —
+> but adoption is unforecastable, and a scheduler that counts GPUs has to be
+> rewritten to count slots while a scheduler that counts slots with
+> `max_sessions = 1` behaves identically today. Build the slot abstraction now;
+> raise the number when demand asks.
+>
 > **Packing itself is available now.** Two sessions on one GPU means two
 > pipeline processes, each with its own config, event bus, port and client set —
 > isolated by construction. Three shared paths need session-scoping first:

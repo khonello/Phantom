@@ -557,15 +557,26 @@ So cold start is a patience cost, not an economic one. It deserves the cheap fix
 — bake the image so `apt-get`, `git pull` and `pip install` leave the critical
 path — and not the expensive one.
 
-### What this removes from the architecture
+### What this defers — and what it must not foreclose
 
 The original proposal is organised around GPU pooling and session packing. At
-the expected load that centrepiece is the least valuable part of it:
+the expected load that centrepiece does not pay yet. But adoption is unknown,
+and *unlikely* is not *impossible* — designing as though low concurrency is
+certain is the same mistake as designing as though high concurrency is certain,
+pointed the other way.
 
-| Component | At low concurrency |
+So the distinction is between **building packing** (defer) and **being able to
+turn it on** (do not defer). The second costs almost nothing if it is designed
+in, and is expensive to retrofit at exactly the moment it becomes urgent.
+
+| Component | Now |
 |---|---|
-| Session packing, slot accounting | Park. Simplifies to "is a GPU free" |
-| `max_sessions` benchmark | Park. Nothing depends on the answer yet |
+| Slot-shaped scheduling | **Build it** — with `max_sessions = 1`, identical behaviour, zero cost |
+| `max_sessions` as per-GPU-type config | **Build it** — never hardcode 1 |
+| Session → worker assignment | **Many-to-one capable** in the data model, 1:1 in practice |
+| The three shared-path fixes | **Do them** — two are correctness bugs regardless |
+| `max_sessions` benchmark | Defer. Nothing depends on the answer yet |
+| Actually running two sessions per pod | Defer. Worth $0 today |
 | Warm pool / standby capacity | Skip. Costs more than the revenue it serves |
 | Regional fallback | **Keep** — availability matters more, not less, with no spare capacity |
 | Session lifecycle, billing clock, balance | **Keep** — this is the product |
@@ -573,12 +584,21 @@ the expected load that centrepiece is the least valuable part of it:
 | Heartbeat, lease, watchdog | **Keep** — with few customers each one matters disproportionately |
 | Provider abstraction | Keep. Cheap insurance |
 
-Deferring packing costs almost nothing later: it is two pipeline processes on a
-pod plus three shared-path fixes, not the large refactor an earlier draft
-claimed. It can be added the week it is needed.
+A scheduler that counts **slots** behaves identically to one that counts GPUs
+while `max_sessions` is 1. A scheduler that counts GPUs has to be rewritten to
+count slots. Same code today, very different code the week demand arrives — and
+it would arrive with customers already on the system.
 
-**Trigger to revisit:** average concurrency above ~2, or GPUs becoming hard to
-rent in a region. Either one makes packing worth building; neither is true today.
+The asymmetry is what decides it:
+
+```
+  cost of keeping the option open   ~0   (a config value and a plural)
+  cost of retrofitting under load   high (scheduler data model, live traffic)
+```
+
+**Trigger to enable:** average concurrency approaching 2, or GPUs becoming hard
+to rent in a region. At that point packing is a benchmark plus a config change,
+not a project.
 
 ---
 
@@ -678,7 +698,7 @@ implementation to conform to it and its shape is already visible in
 
 ### 7. Packing, then shared models
 
-*Ships: nothing until concurrency justifies it. Parked behind a trigger.*
+*Ships: capacity, when concurrency asks for it. A config change plus a benchmark, because stage 3 kept the shape.*
 
 Split in two, because the first half is nearly free:
 
@@ -694,11 +714,16 @@ second session on a warm pod; ONNX Runtime sessions are already safe to call
 from multiple threads. Worth doing when VRAM or second-session latency actually
 binds — not before.
 
-Under the earlier $120/hour assumption this was a rounding error. At $10/hour
-PAYG and $4.17/hour on a Day Pass it is worth between 2x and 115x more than
-fixing cold start, and `max_sessions` becomes a pricing input rather than just a
-capacity number. Stage 4a only needs the control plane to know about slots, so
-it can land as soon as stage 3 does.
+Worth between 2x and 115x more than fixing cold start **per overlapping
+session-hour** — which is the catch, since below one concurrent session there
+are none. It is listed last for that reason alone, not because it is hard or
+low value.
+
+Because stage 3 builds slot-shaped scheduling with `max_sessions = 1`, this
+stage is a benchmark and a config change rather than a rewrite. The trigger is
+concurrency approaching 2, or GPU scarcity in a region — and `max_sessions`
+becomes a pricing input at that moment, since a fully-consumed Day Pass is 76%
+margin at one session per card and 88% at two.
 
 ---
 
@@ -774,8 +799,14 @@ effort spent on the wrong end. Answer it when stages 1-4 are done, not before.
 Build it — but build considerably less of it than the proposal describes.
 
 **Order: measure startup, close the batch and file-transfer gap, build the
-control plane at one session per GPU, make cold start reasonable, then make it
-survive failure.** Packing goes last and probably never, at least for now.
+control plane, make cold start reasonable, then make it survive failure.**
+Packing goes last — enabled by a trigger rather than scheduled.
+
+That last point is a deferral, not a rejection. Build the control plane
+slot-shaped with `max_sessions = 1`: identical behaviour today, and packing
+becomes a config change rather than a scheduler rewrite if adoption arrives.
+Adoption is the one number nobody can forecast, and it would arrive with
+customers already on the system.
 
 The proposal is organised around GPU pooling and session packing. At the
 concurrency actually expected — below one, with gradual growth — that
