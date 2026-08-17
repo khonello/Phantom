@@ -52,15 +52,18 @@ descending effective rate:
 | Tier | Price | Effective | Notes |
 |---|---|---|---|
 | **PAYG** | $10 / hour | $10.00/hr | No commitment. One hour at a time. **The full hour is deducted at session start.** For occasional and first-time users. |
-| **4-Hour Pack** | $35 | $8.75/hr | Prepaid block. |
-| **10-Hour Pack** | $70 | $7.00/hr | Prepaid block. |
-| **Day Pass** | $100 / 24 hours | $4.17/hr | Heavy users. Strongest discount. |
+| **2-Hour Pack** | $18 | $9.00/hr | Prepaid hours. 10% off. |
+| **5-Hour Pack** | $40 | $8.00/hr | Prepaid hours. 20% off. |
 
 ```
-  PAYG  →  Session Packs  →  Day Pass
-   ────────────────────────────────▶
+  PAYG  →  2-Hour Pack  →  5-Hour Pack
+   ─────────────────────────────────▶
    rising commitment, falling rate
 ```
+
+Every tier sells the same thing: **prepaid hours, cheaper in bulk.** There is no
+time-boxed pass, so hours are never stranded by a clock and no tier undercuts
+the ones above it.
 
 A session stays active until either:
 
@@ -76,7 +79,8 @@ This is a **long-lived compute session**, deliberately not the conventional
 be the second-largest cost line: a card charge on a $10 PAYG purchase costs
 $0.59, more than the compute it pays for. On-chain Bitcoin is unusable at the
 small tiers — a ~$3 network fee is 30% of a PAYG purchase — so Lightning is the
-primary rail, with on-chain viable only as a Day Pass fallback.
+only viable rail — with no $100 tier, a ~$3 network fee is at least 7.5% of
+any purchase.
 
 Three consequences the architecture has to absorb:
 
@@ -99,20 +103,22 @@ Three consequences the architecture has to absorb:
 > ourselves. See §11 for the consumption rule, the reversal rule, and why the
 > balance is denominated in hours rather than currency.
 
-> **Annotation — three things the tiers imply for the architecture.**
+> **Annotation — a day-long pass was considered and dropped.** At $100 for 24
+> hours it only became the rational purchase above roughly 14 hours of use. If
+> its hours expired, almost nobody could reach that in a day; if they did not, it
+> was simply the cheapest bulk rate and would have cannibalised every tier above
+> it — at the thinnest margin of the four. It was also the only tier with a
+> plausible loss scenario, breaking even at a 25% failure rate against 61-69%
+> for the rest. Dropping it removed an open question rather than answering one.
 >
-> **`max_sessions` becomes a pricing input, not just a capacity number.** A
-> fully-consumed Day Pass costs $24 of GPU against $100 at one session per card,
-> and $12 at two. That is the difference between a 76% and an 88% margin, so the
-> benchmark in §4 now feeds the price list.
+> **`max_sessions` is still a pricing input, not just a capacity number**, since
+> the cost of a sold hour halves when two sessions share a card. It matters less
+> now that the cheapest tier is $8.00/hr rather than $4.17.
 >
-> **The Day Pass is bounded by hours connected, not by standing availability.**
-> Since every tier draws down the same hour blocks (§11), a Day Pass costs us GPU
-> only for the hours a customer actually connects. Twenty-four is the worst case
-> — $24 of GPU against $100 at one session per card, $12 at two — rather than the
-> expected one, and hours bought but never connected are pure margin. What
-> remains undecided is whether unspent Day Pass hours **expire**; if they do not,
-> the tier is a 24-hour pack under another name.
+> **Every tier is bounded by hours connected.** Since all of them draw down the
+> same hour blocks (§11), GPU cost tracks what a customer actually uses, and
+> hours bought but never connected are pure margin. Nothing is time-boxed, so no
+> tier can strand hours behind a clock.
 
 ### What the customer does inside a session
 
@@ -382,8 +388,7 @@ or VRAM.
 
 > **Annotation —** this metric is right, and under the tiered pricing it matters
 > considerably more than an earlier draft of this note suggested. At $10/hour
-> PAYG a packed session costs $0.50 of GPU; on a fully-consumed Day Pass at
-> $4.17/hour it is $12 against $100. Cost per session-hour is therefore a direct
+> PAYG a packed session costs $0.50 of GPU; on a 5-Hour Pack at $8.00/hour it is $2.50 against $40. Cost per session-hour is therefore a direct
 > margin lever, not a rounding error, and it compounds with the capacity argument
 > — packing doubles the demand servable from whatever cards are actually
 > available (§8). See SESSION_PLANE.md for the full economics.
@@ -782,7 +787,7 @@ reads as a network problem. See
 > sell hours at a discount, so a dollar balance cannot represent them: $35 of
 > balance against a $10 hourly price yields 3.5 hours, not the 4 that were
 > bought. Purchases convert money to hours at the tier's rate; sessions deduct
-> one hour. A Day Pass is then 24 hours of balance drawn down in hour blocks,
+> one hour. A 5-Hour Pack is then five hours of balance drawn down in blocks,
 > which keeps one consumption rule for every tier.
 
 > **Annotation — infrastructure failure is a different case and is not yet

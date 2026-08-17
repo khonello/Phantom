@@ -65,7 +65,7 @@ Settled, and it removes two of the original open questions:
   protocol. `desktop.py` is the product surface; the WebSocket API stays an
   internal detail between our app and our workers.
 - **A session is time, not a mode.** A customer buys a block — an hour PAYG, a
-  4- or 10-hour pack, a 24-hour Day Pass — connects, and within that block uses
+  2- or 5-hour pack — connects, and within that block uses
   either live video call *or* batch processing, switching freely.
 
 Both have consequences the original proposal does not cover, because it assumes
@@ -95,24 +95,31 @@ time unless it is deliberately excluded.
 ## The economics
 
 > **Revised for the tiered pricing.** Earlier drafts assumed $10 per 5 minutes —
-> $120/hour. The proposed tiers run $10/hour down to $4.17/hour. That is a **12×
-> to 29× drop in revenue per hour**, and it inverts the central conclusion.
-> Everything in this section replaces what was here before.
+> $120/hour. The tiers run $10/hour down to $8/hour. That is a **12× to 15× drop
+> in revenue per hour**, and it inverts the central conclusion. Everything in
+> this section replaces what was here before.
 
 ```
 Tiers, against a $1.00/hr GPU
 
-  tier             price     $/hr   disc   GPU 1x   GPU 2x   margin 1x  2x
-  ──────────────────────────────────────────────────────────────────────────
-  PAYG            $10.00   $10.00     0%    $1.00    $0.50        90%  95%
-  4-Hour Pack     $35.00    $8.75    12%    $4.00    $2.00        89%  94%
-  10-Hour Pack    $70.00    $7.00    30%   $10.00    $5.00        86%  93%
-  Day Pass       $100.00    $4.17    58%   $24.00   $12.00        76%  88%
+  tier            price    $/hr   disc   GPU 1x   GPU 2x   margin 1x  2x
+  ───────────────────────────────────────────────────────────────────────
+  PAYG           $10.00  $10.00     0%    $1.00    $0.50        90%  95%
+  2-Hour Pack    $18.00   $9.00    10%    $2.00    $1.00        89%  94%
+  5-Hour Pack    $40.00   $8.00    20%    $5.00    $2.50        88%  94%
 ```
 
-Margins are healthy — 76% to 95% — but they are *margins* now, not rounding
-errors. GPU cost was a 240th of revenue under the old pricing. On a fully-used
-Day Pass it is nearly a quarter.
+Margins are healthy — 88% to 95% — but they are *margins* now, not rounding
+errors. GPU cost was a 240th of revenue under the old pricing; it is now around
+a tenth.
+
+> **A 24-hour Day Pass at $100 was considered and dropped.** It only became the
+> rational purchase above ~14 hours of use: with expiring hours almost nobody
+> could reach that in a day, and with non-expiring hours it was simply the
+> cheapest bulk rate and would have cannibalised every tier above it. It was
+> also the thinnest tier by a wide margin — breaking even at a 25% failure rate
+> against 61-69% for the rest — and the only one with a plausible loss scenario.
+> Removing it deleted an open question instead of answering one.
 
 ### This reverses the priority I recommended
 
@@ -120,12 +127,11 @@ The previous conclusion was that cold start beats packing by 72×. At these
 prices the comparison flips, and not marginally:
 
 ```
-  tier            $/min   90s cold start   packing saves      winner
-  ─────────────────────────────────────────────────────────────────────
-  PAYG            0.167            $0.25           $0.50   packing   2x
-  4-Hour Pack     0.146            $0.22           $2.00   packing   9x
-  10-Hour Pack    0.117            $0.17           $5.00   packing  29x
-  Day Pass        0.069            $0.10          $12.00   packing 115x
+  tier           $/min   90s cold start   packing saves      winner
+  ────────────────────────────────────────────────────────────────────
+  PAYG           0.167            $0.25           $0.50   packing   2x
+  2-Hour Pack    0.150            $0.22           $1.00   packing   5x
+  5-Hour Pack    0.133            $0.20           $2.50   packing  13x
 ```
 
 **Packing is now the dominant financial lever, by up to two orders of
@@ -133,9 +139,9 @@ magnitude.** Cold start's financial argument has collapsed — 90 seconds costs
 between 10 and 25 cents, against $3.00 before.
 
 Cold start still matters, but as a **user-experience** problem rather than a
-revenue one, and it arguably matters more than it did: a Day Pass holder
-connects and disconnects repeatedly across a day, so they meet the cold start
-many times rather than once.
+revenue one, and it arguably matters more than it did: a pack holder connects
+and disconnects across several sessions, so they meet the cold start each time
+rather than once.
 
 ### Two consequences worth acting on
 
@@ -144,12 +150,15 @@ the second-largest cost line. On cards, a $10 PAYG charge costs $0.59 to collect
 against $0.50 of packed GPU — the fee would exceed the compute.
 
 ```
-  rail                PAYG $10        Day Pass $100
+  rail                PAYG $10      5-Hour Pack $40
   ─────────────────────────────────────────────────
-  Stripe card      $0.59  (5.9%)     $3.20  (3.2%)
-  BTC on-chain     $3.00 (30.0%)     $3.00  (3.0%)   ← unusable at $10
-  BTC Lightning    $0.02  (0.2%)     $0.20  (0.2%)   ← chosen
+  Stripe card      $0.59  (5.9%)     $1.46  (3.7%)
+  BTC on-chain     $3.00 (30.0%)     $3.00  (7.5%)   ← unusable at any tier
+  BTC Lightning    $0.02  (0.2%)     $0.08  (0.2%)   ← chosen
 ```
+
+With no $100 tier, on-chain is now unusable everywhere — Lightning is the only
+viable rail rather than the primary one.
 
 Switching PAYG from cards to Lightning saves $0.57 per session — **more than
 packing 1→2 saves ($0.50)**, for an integration rather than a refactor. It is
@@ -159,8 +168,8 @@ Two knock-on effects worth noting. Fee overhead is now flat at 0.2% across all
 tiers, so **the tier ladder can no longer be justified on payment costs** — it
 rests on commitment and on utilisation, which is fine, but the earlier argument
 that packs reduce payment overhead no longer applies. And on-chain remains
-viable only for the Day Pass, so Lightning cannot be the sole rail if you want
-an on-chain fallback at the top tier.
+unusable at every tier now that there is no $100 purchase, so Lightning is the
+only rail rather than the primary one.
 
 ### One cost line is still unmodelled: bandwidth
 
@@ -169,21 +178,20 @@ assumption rather than a finding.
 
 Live streaming moves roughly **2.2 GB/hour outbound** — processed frames going
 from the pod back to the customer — and the same again inbound. Over a 24-hour
-Day Pass that is about **53 GB of egress**.
+5-Hour Pack that is about **11 GB of egress**.
 
 ```
-  egress billed at    cost on a $100 Day Pass    share of revenue
-  ────────────────────────────────────────────────────────────────
+  egress billed at    cost on a $40 5-Hour Pack   share of revenue
+  ─────────────────────────────────────────────────────────────────
   $0.00/GB  (included)          $0.00                     0%
-  $0.05/GB                      $2.65                   2.7%
-  $0.10/GB                      $5.31                   5.3%
+  $0.05/GB                      $0.55                   1.4%
+  $0.10/GB                      $1.10                   2.8%
 ```
 
-At $0.05/GB this would be the **second-largest cost line after the GPU**, about
-thirteen times the Lightning fee. RunPod is believed to include bandwidth on
+At $0.05/GB this would still be the **second-largest cost line after the GPU**,
+about seven times the Lightning fee. RunPod is believed to include bandwidth on
 pods, which is why it is modelled at zero — but that has not been verified, and
-it is the only cost here set to zero without evidence. Worth confirming before
-the Day Pass margin is trusted.
+it is the only cost here set to zero without evidence.
 
 **PAYG's "full hour deducted at session start" is a gift to the architecture.**
 Once the hour is paid, holding that customer's worker for the remainder of it
@@ -191,40 +199,9 @@ costs at most $1 against $10 collected — and it eliminates reconnect cold star
 entirely inside the paid window. The grace period for a PAYG session should
 therefore be *the remainder of the paid hour*, not five minutes.
 
-That does not generalise to a Day Pass: holding a worker for 24 hours costs $24
-of $100. **Grace period policy should differ by tier**, which the architecture
-currently treats as a single global constant.
-
-### The Day Pass, now that consumption is settled
-
-The session rule resolves what used to be the biggest open number here. A Day
-Pass is **24 hours of balance, drawn down one wall-clock hour at a time**, each
-deducted when a session becomes usable and consumed whether or not the customer
-does anything with it. So GPU cost is bounded by hours actually *connected*, not
-by 24 hours of standing availability — and any hour the customer buys but never
-connects is pure margin.
-
-That makes 24 the worst case rather than the expected one:
-
-```
-  hours actually connected   cost 1x   cost 2x   margin 1x   margin 2x
-  ──────────────────────────────────────────────────────────────────────
-                        4      $4.00     $2.00         96%         98%
-                        8      $8.00     $4.00         92%         96%
-                       12     $12.00     $6.00         88%         94%
-                       24     $24.00    $12.00         76%         88%   ← worst case
-```
-
-Not loss-making at any point. The remaining exposure is a $2/hr GPU held
-unpacked across a fully-consumed pass, which is a **52% margin** — and that is
-before bandwidth, storage, orchestration and failed sessions.
-
-Two things still follow. `max_sessions` is a **pricing input**, not just a
-capacity number: a fully-consumed Day Pass yields 76% at one session per card
-and 88% at two. And one question survives — whether Day Pass hours **expire**.
-"Day Pass" implies they do; if they do not, it is simply a 24-hour pack under
-another name, and the tier ladder has three prepaid blocks rather than two plus
-a pass.
+Because every tier now sells the same hour blocks, this rule is uniform — there
+is no long-dated pass where holding a worker for the paid window would cost more
+than it collects.
 
 ### Cold start, drawn
 
@@ -740,8 +717,8 @@ is a benchmark and a config change rather than a rewrite. If it turns out to be
 more than that, stage 3 was built wrong — and running N=2 in staging is how that
 gets caught early rather than under load. The trigger is
 concurrency approaching 2, or GPU scarcity in a region — and `max_sessions`
-becomes a pricing input at that moment, since a fully-consumed Day Pass is 76%
-margin at one session per card and 88% at two.
+becomes a pricing input at that moment, since a 5-Hour Pack is 88% margin at
+one session per card and 94% at two.
 
 ---
 
@@ -782,21 +759,9 @@ per-process. If a customer switches source faces mid-session, that is per-sessio
 state; if a session is one identity throughout, embeddings can be cached per
 worker and reused, which meaningfully cheapens packing.
 
-**Do Day Pass hours expire?**
-The consumption rule settles how hours are *spent* — one wall-clock hour per
-connection, no returns — but not whether unspent ones lapse. "Day Pass" implies
-they do. If they do not, it is a 24-hour pack under another name and the ladder
-is three prepaid blocks rather than two plus a pass.
-
-**How long an interruption counts as an outage?**
-Settled that our-fault failures revert the hour; not settled where the line
-sits. A three-second reconnect to a standby worker is not an outage, ninety
-seconds of cold provisioning is. The threshold is what standby capacity is
-bought to stay under, so it sets how much standby is worth.
-
 **Does the scheduler need to know the tier?**
-Under contention a PAYG session earns $10 per GPU-hour and a Day Pass session
-$4.17. That is a legitimate admission-control input when capacity is scarce, and
+Under contention a PAYG session earns $10 per GPU-hour and a 5-Hour Pack
+session $8.00. That is a legitimate admission-control input when capacity is scarce, and
 an unpleasant one to discover after the fact. Worth deciding deliberately rather
 than by omission.
 

@@ -27,7 +27,7 @@ Small, independent, and they stop the other stages building on sand.
       functions: `estimate_similarity`, the compositor's colour and detail
       matching, `FaceDatabase` averaging, the guard predicates.
 - [ ] **Verify whether RunPod bills egress.** ~2.2 GB/hour outbound per session,
-      ~53 GB over a Day Pass. The only cost line in the economics set to zero
+      ~11 GB over a 5-Hour Pack. The only cost line in the economics set to zero
       without evidence. A pricing-page lookup.
 
 ---
@@ -269,14 +269,13 @@ region. Neither is true today.*
 - [ ] **USD-denominated invoices** with a short expiry, roughly fifteen minutes
 - [ ] **Decide hold or auto-convert.** Holding is an unhedged position on the
       entire top line
-- [ ] **On-chain as a Day Pass fallback only** — a ~$3 network fee is 30% of a
-      PAYG purchase and 3% of a Day Pass
+- [ ] **Lightning only.** With no tier above $40, a ~$3 on-chain network fee is
+      at least 7.5% of any purchase and 30% of a PAYG hour
 - [ ] **Purchases top up the hour balance.** Money never flows back out
 - [ ] **No refund system.** If one is genuinely demanded, Bitcoin is sent
       manually — an exception handled by a person, not a code path
-- [ ] Tier pricing: PAYG $10/hr, 4-Hour $35, 10-Hour $70, Day Pass $100/24h
-- [ ] **Decide whether Day Pass hours expire.** If not, it is a 24-hour pack
-      under another name
+- [ ] Tier pricing: PAYG $10/hr, 2-Hour Pack $18, 5-Hour Pack $40
+
 
 ---
 
@@ -305,7 +304,6 @@ Recorded here so they are not rediscovered mid-implementation.
 | Is pose available from `buffalo_l`? | Stage 3 | Else approximate yaw from the five keypoints |
 | Is largest-face enough, or is continuity needed? | Stage 3 | Guarding may make it moot |
 | Is a session one face, or one seat? | Stage 4 | Fixed identity makes packing cheaper |
-| Does the scheduler need to know the tier? | Stage 4 | PAYG earns $10/GPU-hour against a Day Pass's $4.17 |
+| Does the scheduler need to know the tier? | Stage 4 | PAYG earns $10/GPU-hour against a 5-Hour Pack's $8.00 |
 | Interruption threshold for hour reversal | Stage 6 | Sets what standby is worth |
-| Do Day Pass hours expire? | Stage 9 | Otherwise it is a 24-hour pack |
-| Does RunPod bill egress? | Stage 0 | 2.7% of a Day Pass at $0.05/GB |
+| Does RunPod bill egress? | Stage 0 | 1.4% of a 5-Hour Pack at $0.05/GB |
