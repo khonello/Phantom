@@ -649,7 +649,8 @@ Not control-plane work, but nothing above can be sold without it.
 
 - Session manager with the explicit state machine, a session store, and the
   session/attempt split.
-- Billing clock starting at first delivered frame.
+- Billing clock starting when the session becomes **usable** — worker
+  running, models loaded, client connected — then one wall-clock hour.
 - Promote `orchestrator.py`'s discovery and multi-datacenter fallback into a
   scheduler service. A port, not a rewrite — and it brings regional redundancy
   along for free.
@@ -674,11 +675,12 @@ Not control-plane work, but nothing above can be sold without it.
 - Bake a Docker image with dependencies and model weights inside, so `apt-get`,
   `git pull` and `pip install` leave the critical path. `orchestrator.py`
   already has a docker deploy mode.
-- Keep a small **warm pool**: workers provisioned with models loaded and no
-  session assigned. Same mechanism as the five-minute grace period, generalised
-  — hold capacity ahead of demand, not only behind it.
 - Pre-seed both regional volumes, so a fallback region is not silently the slow
   path.
+- **No warm pool.** An always-on standby GPU is $720/month against roughly $900
+  of revenue at three sessions a day. The billing clock already means the
+  customer does not pay for startup, so this is a patience cost of about 1.7
+  cents of GPU — worth the cheap fix and not the expensive one.
 
 ### 5. Resilience
 
@@ -693,9 +695,13 @@ Not control-plane work, but nothing above can be sold without it.
   gives the discriminator: worker gone is ours, client gone with the worker
   still healthy is theirs. Reversal must be idempotent and audited — on an
   irreversible rail the ledger is the only account of what happened.
-- Standby capacity with models pre-loaded, so a displaced session has somewhere
-  to go inside the interruption threshold rather than waiting on a cold
-  provision.
+- **Build** the scheduler's ability to hold a reserved pre-loaded worker, but
+  leave it **disabled**. Standby costs $1 per hour held; reverting an hour costs
+  $10 and only on the sessions that actually fail. Below roughly a 10% failure
+  rate the standby costs more than the failures it prevents, so it is
+  trigger-gated like packing — the mechanism exists, the number starts at zero.
+- Until then a failure means: revert the hour, re-provision, customer restarts.
+  They lose about ninety seconds and pay nothing.
 
 ### 6. Provider abstraction
 
@@ -712,12 +718,12 @@ implementation to conform to it and its shape is already visible in
 
 Split in two, because the first half is nearly free:
 
-**4a — packing (small).** Run *N* pipeline processes per pod, isolated as they
+**7a — packing (small).** Run *N* pipeline processes per pod, isolated as they
 already are. Fix the three shared paths: session-scope `_UPLOAD_DIR`,
 session-scope batch temp dirs, and move `runpod.stop_pod()` out of the worker
 into the control plane. Enforce the measured `max_sessions` in slot accounting.
 
-**4b — shared models (larger, optional).** Remove the `CONFIG` and `BUS`
+**7b — shared models (larger, optional).** Remove the `CONFIG` and `BUS`
 singletons in favour of per-session context, and route frames by `session_id`
 instead of broadcasting to a client set. Buys VRAM headroom and a near-instant
 second session on a warm pod; ONNX Runtime sessions are already safe to call
