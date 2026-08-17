@@ -3,7 +3,9 @@
 Rejecting inputs that would produce a wrong or unusable swap, rather than
 swapping them badly.
 
-**Status: proposed. None of this is built.**
+**Status: design settled, not built.** The guard set, the hold-and-alert
+policy and the clean-video rule are decided; thresholds still need
+calibration against real uploads and real footage.
 
 ---
 
@@ -22,7 +24,7 @@ onto it looks like it worked.
 
 ## What happens today
 
-Three behaviours, all verified against the code, all silent.
+Two behaviours, verified against the code, both silent.
 
 ### The single-face rule is "leftmost", and it is not a rule
 
@@ -158,49 +160,124 @@ frame ─▶ detect ─┬─ 0 faces ────────────▶ no
 Detection already runs on every frame, so every one of these is a comparison
 against data the pipeline has in hand. The cost is negligible.
 
+**Decided: a guarded frame never updates temporal state.** Feeding one into the
+pixel EMA would blend a stranger, or a bad detection, into the smoothed history
+— and then leak it back out over the following frames once the guard clears.
+`FaceCompositor.reset()` and `LandmarkStabilizer.reset()` both already exist for
+this; a guard must call them rather than simply skipping the swap.
+
 ---
 
-## What to emit when a frame is guarded
+## What a guarded frame emits
 
-This is the decision that matters most, and it is a product judgement rather
-than a technical one.
+**Decided: hold the last good swapped frame. Never pass the raw frame through.**
 
-The naive answer — pass the frame through unswapped — is the wrong one. The
-operator is on a video call precisely because they do not want their own face
-transmitted. Guarding a frame and then showing their real face turns a safety
-feature into the exposure it was meant to prevent.
+The operator is on a video call precisely because they do not want their own
+face transmitted. Guarding a frame and then showing their real face turns a
+safety feature into the exposure it exists to prevent.
 
-| Option | Behaviour | Problem |
+| Option | Behaviour | Verdict |
 |---|---|---|
-| Pass through unswapped | Real face appears | Defeats the purpose entirely |
-| Hold last good swapped frame | Video appears to freeze | Obvious if it lasts |
-| Emit nothing | Client freezes on its last frame | Same as holding, decided client-side |
+| Pass through unswapped | Real face reaches the call | **Never.** Defeats the entire purpose |
+| Hold last good swapped frame | Output appears to freeze | **Chosen** |
+| Emit nothing | Client freezes on its last frame | Equivalent, but decided in the wrong place |
 
-**Recommended:** hold the last good swapped frame for a short window — roughly a
-second — which covers the common transient case of someone crossing behind the
-operator. Past that window the condition is not transient and the operator needs
-to know, loudly and immediately, so they can move, close the door, or end the
-call. A frozen picture with a clear on-screen reason is recoverable; a swapped
-stranger is not.
+Holding for roughly a second covers the common transient case — someone crossing
+behind the operator — without any visible interruption at all. Past that window
+the condition is not transient and the operator has to be told.
 
-Never fail open. If a guard cannot be evaluated, treat the frame as guarded.
+There is a second reason to prefer holding: **a frozen picture reads as a
+network hiccup**, which is the most innocuous way this can possibly fail in
+front of other people. Every alternative is either an exposure or an
+announcement.
+
+**Guards fail closed.** If a guard cannot be evaluated — the occluder model
+missing, a detection error, a threshold unset — the frame is guarded. An
+un-evaluable guard is never treated as a pass.
 
 ---
 
-## Telling the operator
+## Making the guard unmissable
 
-Guards are worthless if they are silent — that is the current failure mode being
-fixed, and it would be easy to reproduce.
+A warning the operator does not see is the same as no guard at all, and the
+obvious placements both fail:
 
-- **Source rejection** returns per-image reasons, so the UI can say *"3 of 5
-  images accepted — `group.jpg` has 2 faces, `blurry.png` is too soft"* rather
-  than a bare failure.
-- **Runtime guarding** emits an event carrying the reason, so the desktop can
-  show a persistent, unmissable state while it lasts. This needs to be more
-  prominent than the existing status line: it is the difference between a
-  working call and an exposed one.
-- Guard activations are worth counting. A source that is guarded 30% of the time
-  is a bad source, and the operator should be told to replace it.
+```
+  the operator is looking HERE ─────────┐
+                                        ▼
+  ┌──────────────────────────┐   ┌──────────────────────┐
+  │ Phantom window           │   │ Zoom / Meet / Teams  │
+  │  · status line           │   │  · self-view         │
+  │  · behind the call, or   │   │  · other participants│
+  │    minimised             │   │                      │
+  │         ✗ missable       │   │   ✗ burning a banner │
+  └──────────────────────────┘   │     in here is seen  │
+                                 │     by EVERYONE      │
+                                 └──────────────────────┘
+```
+
+The virtual camera feed goes straight to the call (`desktop/bridge.py::_run_vcam`
+sends whatever frame it is given). So the two intuitive answers are both wrong:
+Phantom's own status line sits in a window that is behind the call or minimised,
+and anything drawn into the frame is broadcast to every other participant —
+which advertises the tool at the worst possible moment.
+
+That gives two hard rules.
+
+**The video output stays clean.** No banner, no border, no tint, no text is ever
+composited into a frame that reaches the virtual camera. The guard state must
+not be inferable by anyone on the call. A freeze is the entire outward signal,
+and it should look like a dropped connection.
+
+**Alerting reaches the operator outside Phantom's window**, through channels
+that other participants cannot perceive:
+
+| Channel | Reaches them | Leaks to the call |
+|---|---|---|
+| Always-on-top overlay, small, local | Yes — over the call window | No |
+| Taskbar flash / OS notification | Yes | No |
+| Phantom's local preview, clearly marked | Only if visible | No |
+| Status line alone | **No** | No |
+| Anything drawn into the frame | Yes | **Yes — never** |
+| Audible alert | Yes | **Possibly** — an open mic carries it |
+
+An always-on-top overlay is the primary channel, since it is the only one
+guaranteed to be in front of the call window. Qt supports it directly
+(`Qt.WindowStaysOnTopHint`). Keep it small, put the reason on it, and make it
+disappear the instant the guard clears.
+
+An audible alert is worth offering but **off by default**: an open microphone
+will carry it into the call, which is precisely the announcement the clean-video
+rule exists to avoid.
+
+### Escalation
+
+```
+  t=0      guard trips           hold last good frame · no alert yet
+  t≈1s     still guarded         always-on-top overlay + taskbar flash
+  t≈5s     still guarded         overlay persists, reason shown, optional sound
+  clear    guard releases        overlay disappears immediately, swap resumes
+```
+
+Below one second nothing is shown, because a transient guard that resolves
+itself is not worth interrupting a call over. Above it, the alert stays until
+the condition actually clears — it is never auto-dismissed on a timer, and it
+is not a toast that disappears while the problem persists.
+
+### The other places a guard must not be missable
+
+- **Source rejection reports per-image reasons.** *"3 of 5 accepted —
+  `group.jpg` has 2 faces, `blurry.png` is too soft"*, never a bare failure.
+  This is an upload flow with the operator present; there is no excuse for
+  ambiguity.
+- **A disabled guard is visible.** `guard_multi_face` can be switched off, since
+  the pipeline also serves `many_faces` deliberately — but a session running with
+  guards off must say so on screen. A guard that is silently disabled is worse
+  than one that was never built, because the operator believes they are
+  protected.
+- **Guard activations are counted.** A source guarded 30% of the time is a bad
+  source, and the operator should be told to replace it rather than left to
+  wonder why the swap keeps stalling.
 
 ---
 
@@ -218,7 +295,9 @@ guard_min_sharpness     …         Laplacian variance floor, needs calibration
 guard_max_yaw           35        degrees
 guard_min_confidence    0.5       detection score floor, above the 0.35 detect threshold
 guard_min_coverage      0.4       fraction of hull unoccluded
-guard_hold_ms           1000      how long to hold the last good frame
+guard_hold_ms           1000      hold last good frame before alerting
+guard_alert_sound       False     off by default — an open mic carries it
+guard_overlay           True      always-on-top local alert; the primary channel
 guard_outlier_sim       …         cosine floor for source consistency, needs calibration
 ```
 
@@ -237,7 +316,9 @@ guard_outlier_sim       …         cosine floor for source consistency, needs c
 | Runtime guards | `pipeline/processing/pipeline.py::_process_and_emit` |
 | Hold-last-frame | `pipeline/processing/pipeline.py` |
 | Guard events | `pipeline/events.py`, `pipeline/api/server.py` |
-| Operator display | `desktop/bridge.py`, `desktop/main.qml` |
+| Always-on-top alert overlay | `desktop/main.qml` (`Qt.WindowStaysOnTopHint`) |
+| Per-image rejection reasons | `desktop/bridge.py`, `desktop/main.qml` |
+| Clean-video guarantee | `desktop/bridge.py::_push_to_vcam` — nothing drawn into the frame |
 | Thresholds | `pipeline/config.py`, `pipeline/api/handlers.py` |
 
 Two fixes belong in the same pass, independent of the guards themselves:
@@ -256,11 +337,6 @@ are of similar apparent size. Preferring the face nearest the previous frame's
 position would be steadier — though that is a tracker by another name, and
 per-frame detection exists partly to avoid one. Guarding may make the question
 moot: if two comparable faces are in shot, the frame is guarded anyway.
-
-**Should a guarded frame still update the temporal state?**
-It should not — feeding a guarded frame into the pixel EMA would blend a
-stranger, or a bad detection, into the smoothed history. The compositor's
-`reset()` already exists for this.
 
 **Is pose available cheaply?** InsightFace exposes pose on some model
 configurations. If `buffalo_l` does not provide it, yaw can be approximated from
