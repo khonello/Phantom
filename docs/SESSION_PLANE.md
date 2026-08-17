@@ -162,6 +162,29 @@ that packs reduce payment overhead no longer applies. And on-chain remains
 viable only for the Day Pass, so Lightning cannot be the sole rail if you want
 an on-chain fallback at the top tier.
 
+### One cost line is still unmodelled: bandwidth
+
+Every margin figure in this document treats bandwidth as free, which is an
+assumption rather than a finding.
+
+Live streaming moves roughly **2.2 GB/hour outbound** — processed frames going
+from the pod back to the customer — and the same again inbound. Over a 24-hour
+Day Pass that is about **53 GB of egress**.
+
+```
+  egress billed at    cost on a $100 Day Pass    share of revenue
+  ────────────────────────────────────────────────────────────────
+  $0.00/GB  (included)          $0.00                     0%
+  $0.05/GB                      $2.65                   2.7%
+  $0.10/GB                      $5.31                   5.3%
+```
+
+At $0.05/GB this would be the **second-largest cost line after the GPU**, about
+thirteen times the Lightning fee. RunPod is believed to include bandwidth on
+pods, which is why it is modelled at zero — but that has not been verified, and
+it is the only cost here set to zero without evidence. Worth confirming before
+the Day Pass margin is trusted.
+
 **PAYG's "full hour deducted at session start" is a gift to the architecture.**
 Once the hour is paid, holding that customer's worker for the remainder of it
 costs at most $1 against $10 collected — and it eliminates reconnect cold starts
@@ -651,9 +674,40 @@ seconds of cold provisioning is. The threshold is what standby capacity is
 bought to stay under, so it sets how much standby is worth.
 
 **What is the concurrency shape?**
-Many short sessions and few long ones imply different systems. The tiers hint at
-the answer — PAYG is short and bursty, a Day Pass is long and intermittent — but
-the mix is unknown, and it decides how much warm capacity is worth holding.
+Not session length — **overlap**. Packing can only pay when two customers are
+connected at once, so the number that matters is *average concurrent sessions*,
+and total volume says almost nothing about it. Ten customers a day at an hour
+each average 0.4 concurrent if spread evenly and 3.3 if they all arrive in the
+evening: same revenue, opposite answer.
+
+```
+  avg concurrent   revenue/mo   GPU 1x   GPU 2x   packing saves/mo
+  ─────────────────────────────────────────────────────────────────
+            0.5       $1,200     $120      $60        $60
+            1.0       $2,400     $240     $120       $120
+            2.0       $4,800     $480     $240       $240
+            4.0       $9,600     $960     $480       $480
+            8.0      $19,200   $1,920     $960       $960
+```
+
+Below 1 concurrent, packing is worth exactly zero however many customers there
+are. A second trigger is independent of revenue, though: if GPUs are simply
+unavailable in a region — the proposal's own central worry — then packing
+doubles the demand that can be served from whatever cards can be rented, at any
+scale.
+
+Peak and average do different jobs: **peak sizes the fleet, average decides
+whether packing pays.** Video calls cluster by timezone, so a regional customer
+base may see a peak several times its average and pay for idle cards overnight
+regardless.
+
+**This does not need answering before stage 3 — stage 3 answers it.** The
+control plane records session start and end, so concurrency becomes a query
+rather than a guess, and everything in stage 3 is correct under either shape.
+The fork after that is clean: below ~1 concurrent, cold start and warm pool are
+the priority and packing is dead weight; above ~2, packing pays and keeps
+paying. Tier mix is a leading indicator available earlier — Day Passes imply
+long overlapping sessions, PAYG short bursty ones.
 
 **Does the scheduler need to know the tier?**
 Under contention a PAYG session earns $10 per GPU-hour and a Day Pass session
@@ -662,9 +716,14 @@ an unpleasant one to discover after the fact. Worth deciding deliberately rather
 than by omission.
 
 **Where does authentication and payment live?**
-Not addressed in the proposal or here. The desktop app currently has no concept
-of a user. Purchase, entitlement and remaining-time state all have to originate
+Not addressed in the proposal or here. The desktop app has no concept of a user,
+and purchase, entitlement and remaining-time state all have to originate
 somewhere before the session API means anything.
+
+**Deliberately deferred to last.** It is the largest unwritten piece, but none
+of it matters until the pipeline is worth selling — a billing system attached to
+a product that cannot yet do batch video, or cannot hold a session together, is
+effort spent on the wrong end. Answer it when stages 1-4 are done, not before.
 
 ---
 
