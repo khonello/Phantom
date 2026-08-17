@@ -511,26 +511,101 @@ right and needs the transfer path designed for it from the start.
 
 ---
 
+## What low concurrency changes
+
+Concurrency is expected to sit below one — two customers connected at the same
+time is unlikely, and growth gradual. That is the answer the previous section
+said stage 3 would produce, and it arrives early enough to save building things
+that would not have paid.
+
+**The margin holds up without packing.** Provision on demand, release promptly
+when the paid hour ends, and the arithmetic works at every volume:
+
+```
+  sessions/day   revenue/mo   GPU/mo    fees        net   margin
+  ───────────────────────────────────────────────────────────────
+             1         $300      $36    $0.6       $263      88%
+             3         $900     $108    $1.8       $790      88%
+             5       $1,500     $180    $3.0     $1,317      88%
+            10       $3,000     $360    $6.0     $2,634      88%
+```
+
+(assuming 1.2 GPU-hours paid per hour sold, covering provisioning and the gap
+before release)
+
+Utilisation is high *by construction* here, because nothing is held idle. The
+low-utilisation risk in the earlier analysis came entirely from warm pools and
+long grace periods — neither of which is affordable at this scale.
+
+**Packing is worth $0.** Not "a little" — zero. There is never a second session
+on the card to pack.
+
+**A warm pool is unaffordable.** One always-on standby GPU costs $720/month,
+which is 80% of revenue at three sessions a day. It does not become sensible
+until roughly ten sessions a day, and even then it buys back seconds on a wait
+the customer is not billed for.
+
+### Cold start stops being urgent too
+
+At low concurrency every session is a cold start — there is no previous
+customer's warm pod to inherit. That sounds like it makes cold start worse, and
+in UX terms it does. But the billing rule already absorbs the cost: the clock
+starts when the session becomes *usable*, so the customer never pays for the
+wait, and we pay about 1.7 cents of GPU for it.
+
+So cold start is a patience cost, not an economic one. It deserves the cheap fix
+— bake the image so `apt-get`, `git pull` and `pip install` leave the critical
+path — and not the expensive one.
+
+### What this removes from the architecture
+
+The original proposal is organised around GPU pooling and session packing. At
+the expected load that centrepiece is the least valuable part of it:
+
+| Component | At low concurrency |
+|---|---|
+| Session packing, slot accounting | Park. Simplifies to "is a GPU free" |
+| `max_sessions` benchmark | Park. Nothing depends on the answer yet |
+| Warm pool / standby capacity | Skip. Costs more than the revenue it serves |
+| Regional fallback | **Keep** — availability matters more, not less, with no spare capacity |
+| Session lifecycle, billing clock, balance | **Keep** — this is the product |
+| Fault attribution, hour reversal | **Keep** |
+| Heartbeat, lease, watchdog | **Keep** — with few customers each one matters disproportionately |
+| Provider abstraction | Keep. Cheap insurance |
+
+Deferring packing costs almost nothing later: it is two pipeline processes on a
+pod plus three shared-path fixes, not the large refactor an earlier draft
+claimed. It can be added the week it is needed.
+
+**Trigger to revisit:** average concurrency above ~2, or GPUs becoming hard to
+rent in a region. Either one makes packing worth building; neither is true today.
+
+---
+
 ## A staged path
 
 Ordered by dependency and by what each stage makes sellable.
 
-### 1. Measure the two unknown numbers
+### 1. Measure time to first frame
 
-*Ships: nothing customer-facing. Unblocks every decision below.*
+*Ships: nothing customer-facing. Sizes the only number that still matters.*
 
-`max_sessions` and time-to-first-frame are both guesses today, and every
-capacity and pricing decision depends on them.
+Scope reduced now that concurrency is known to be low. `max_sessions` no longer
+gates anything — with fewer than one concurrent session there is nothing to pack
+— so the load harness can wait.
 
-- Load harness driving *N* concurrent synthetic clients pushing frames at a
-  fixed rate, ramping 1 → 2 → 3 → 4.
-- Record per session: end-to-end latency, achieved fps, dropped frames. Per
-  host: GPU utilisation, VRAM, **CPU per core**.
-- Separately, time a cold provision end to end, broken down by phase, on both a
-  warm and an empty volume.
+What remains worth measuring is startup, because every session pays it:
 
-Define the ceiling by a **latency budget**, not by absence of crashes — the
-session is unusable long before it OOMs.
+- Time a cold provision end to end, broken down by phase — provisioning,
+  `apt-get`, `git pull`, `pip install`, model load — on both a warm and an empty
+  volume.
+- Confirm one session comfortably holds its latency budget at each preset. A
+  single session missing frame deadlines is a quality problem regardless of how
+  many others there are.
+
+The `max_sessions` benchmark — ramping concurrent sessions while recording
+latency, GPU utilisation, VRAM and **CPU per core** — moves to stage 7 with the
+packing work it exists to inform.
 
 ### 2. Close the product gap: batch video and file transfer
 
@@ -562,9 +637,48 @@ Not control-plane work, but nothing above can be sold without it.
   live and batch inside one session.
 - Deliberately **no packing yet**. One session per worker is correct and safe.
 
-### 4. Packing, then shared models
+### 4. Attack cold start
 
-*Ships: the dominant margin lever under the tiered pricing. Cheaper than it looks.*
+*Ships: a session that starts in tens of seconds rather than minutes. Image baking only — no warm pool.*
+
+- Bake a Docker image with dependencies and model weights inside, so `apt-get`,
+  `git pull` and `pip install` leave the critical path. `orchestrator.py`
+  already has a docker deploy mode.
+- Keep a small **warm pool**: workers provisioned with models loaded and no
+  session assigned. Same mechanism as the five-minute grace period, generalised
+  — hold capacity ahead of demand, not only behind it.
+- Pre-seed both regional volumes, so a fallback region is not silently the slow
+  path.
+
+### 5. Resilience
+
+*Ships: sessions that survive infrastructure failure.*
+
+- Worker → backend heartbeat and session leases, so a dead GPU stops being
+  advertised as available.
+- Watchdog around the frame loop specifically — **progress-based, not
+  liveness-based**, because the CUDA-hang case leaves the process responsive.
+- Retry classification and bounded attempts, as proposed.
+- Fault attribution, and hour reversal when the fault is ours. The heartbeat
+  gives the discriminator: worker gone is ours, client gone with the worker
+  still healthy is theirs. Reversal must be idempotent and audited — on an
+  irreversible rail the ledger is the only account of what happened.
+- Standby capacity with models pre-loaded, so a displaced session has somewhere
+  to go inside the interruption threshold rather than waiting on a cold
+  provision.
+
+### 6. Provider abstraction
+
+*Ships: insurance against a single vendor's availability and pricing.*
+
+Define the provider interface — provision, status, terminate, list capacity —
+and move RunPod specifics behind it. Cheap now, because there is exactly one
+implementation to conform to it and its shape is already visible in
+`orchestrator.py`.
+
+### 7. Packing, then shared models
+
+*Ships: nothing until concurrency justifies it. Parked behind a trigger.*
 
 Split in two, because the first half is nearly free:
 
@@ -586,45 +700,6 @@ fixing cold start, and `max_sessions` becomes a pricing input rather than just a
 capacity number. Stage 4a only needs the control plane to know about slots, so
 it can land as soon as stage 3 does.
 
-### 5. Attack cold start
-
-*Ships: a session that starts in seconds. A UX win, no longer a revenue one.*
-
-- Bake a Docker image with dependencies and model weights inside, so `apt-get`,
-  `git pull` and `pip install` leave the critical path. `orchestrator.py`
-  already has a docker deploy mode.
-- Keep a small **warm pool**: workers provisioned with models loaded and no
-  session assigned. Same mechanism as the five-minute grace period, generalised
-  — hold capacity ahead of demand, not only behind it.
-- Pre-seed both regional volumes, so a fallback region is not silently the slow
-  path.
-
-### 6. Resilience
-
-*Ships: sessions that survive infrastructure failure.*
-
-- Worker → backend heartbeat and session leases, so a dead GPU stops being
-  advertised as available.
-- Watchdog around the frame loop specifically — **progress-based, not
-  liveness-based**, because the CUDA-hang case leaves the process responsive.
-- Retry classification and bounded attempts, as proposed.
-- Fault attribution, and hour reversal when the fault is ours. The heartbeat
-  gives the discriminator: worker gone is ours, client gone with the worker
-  still healthy is theirs. Reversal must be idempotent and audited — on an
-  irreversible rail the ledger is the only account of what happened.
-- Standby capacity with models pre-loaded, so a displaced session has somewhere
-  to go inside the interruption threshold rather than waiting on a cold
-  provision.
-
-### 7. Provider abstraction
-
-*Ships: insurance against a single vendor's availability and pricing.*
-
-Define the provider interface — provision, status, terminate, list capacity —
-and move RunPod specifics behind it. Cheap now, because there is exactly one
-implementation to conform to it and its shape is already visible in
-`orchestrator.py`.
-
 ---
 
 ## Settled
@@ -642,6 +717,9 @@ implementation to conform to it and its shape is already visible in
 - **Outages are our cost.** If a session fails because of us, the hour is
   reverted to the customer's balance. Atomic, never pro-rated. Ambiguous cases
   resolve in the customer's favour.
+- **Concurrency is expected to be low.** Two customers connected at once is
+  unlikely, at least initially, and growth is expected to be gradual. Packing
+  was conceived as cost minimisation rather than a response to load.
 
 ## Still open
 
@@ -673,42 +751,6 @@ sits. A three-second reconnect to a standby worker is not an outage, ninety
 seconds of cold provisioning is. The threshold is what standby capacity is
 bought to stay under, so it sets how much standby is worth.
 
-**What is the concurrency shape?**
-Not session length — **overlap**. Packing can only pay when two customers are
-connected at once, so the number that matters is *average concurrent sessions*,
-and total volume says almost nothing about it. Ten customers a day at an hour
-each average 0.4 concurrent if spread evenly and 3.3 if they all arrive in the
-evening: same revenue, opposite answer.
-
-```
-  avg concurrent   revenue/mo   GPU 1x   GPU 2x   packing saves/mo
-  ─────────────────────────────────────────────────────────────────
-            0.5       $1,200     $120      $60        $60
-            1.0       $2,400     $240     $120       $120
-            2.0       $4,800     $480     $240       $240
-            4.0       $9,600     $960     $480       $480
-            8.0      $19,200   $1,920     $960       $960
-```
-
-Below 1 concurrent, packing is worth exactly zero however many customers there
-are. A second trigger is independent of revenue, though: if GPUs are simply
-unavailable in a region — the proposal's own central worry — then packing
-doubles the demand that can be served from whatever cards can be rented, at any
-scale.
-
-Peak and average do different jobs: **peak sizes the fleet, average decides
-whether packing pays.** Video calls cluster by timezone, so a regional customer
-base may see a peak several times its average and pay for idle cards overnight
-regardless.
-
-**This does not need answering before stage 3 — stage 3 answers it.** The
-control plane records session start and end, so concurrency becomes a query
-rather than a guess, and everything in stage 3 is correct under either shape.
-The fork after that is clean: below ~1 concurrent, cold start and warm pool are
-the priority and packing is dead weight; above ~2, packing pays and keeps
-paying. Tier mix is a leading indicator available earlier — Day Passes imply
-long overlapping sessions, PAYG short bursty ones.
-
 **Does the scheduler need to know the tier?**
 Under contention a PAYG session earns $10 per GPU-hour and a Day Pass session
 $4.17. That is a legitimate admission-control input when capacity is scarce, and
@@ -729,27 +771,30 @@ effort spent on the wrong end. Answer it when stages 1-4 are done, not before.
 
 ## The short version
 
-Build it. The proposal is sound, most of the hard thinking is already done in
-it, and it is additive to a pipeline that works.
+Build it — but build considerably less of it than the proposal describes.
 
-Reorder the first moves: **measure the two unknown numbers, close the batch and
-file-transfer gap, build the control plane at one session per GPU, then pack.**
+**Order: measure startup, close the batch and file-transfer gap, build the
+control plane at one session per GPU, make cold start reasonable, then make it
+survive failure.** Packing goes last and probably never, at least for now.
 
-The tiered pricing changed which lever matters. At $120/hour, GPU cost was a
-rounding error and cold start was the whole game. At $10/hour PAYG — and $4.17
-on a Day Pass — packing is worth between 2× and 115× more than fixing cold
-start, and `max_sessions` stops being a capacity number and becomes a pricing
-input. Cold start is still worth fixing, but as a user-experience problem.
+The proposal is organised around GPU pooling and session packing. At the
+concurrency actually expected — below one, with gradual growth — that
+centrepiece is the least valuable part of it, and the supporting machinery is
+the product. Session lifecycle, the billing clock, fault attribution and the
+hour reversal are what make this sellable; slot arithmetic is what makes it
+sellable *at scale*, and scale is not the problem to solve yet.
 
-And packing turns out to be cheap: two isolated processes per pod plus three
-shared-path fixes. The singleton refactor is a later optimisation for VRAM
-headroom and second-session latency, not the gate it was described as.
+The margin does not need packing. Provision on demand, release promptly when
+the paid hour ends, and it holds at **88% across every volume** — because
+nothing is being held idle. The two things that would erode it, warm pools and
+long grace periods, are exactly the two this scale cannot afford.
 
-Two things still decide how much of the rest is right. **What a Day Pass
-actually costs us** depends on whether "24 hours" means access or accumulated
-session time — the difference is a 76% margin or a 96% one. And **batch is no
-longer optional**; it is half of what a session is sold as.
+Deferring costs almost nothing. Packing is two pipeline processes plus three
+shared-path fixes, not a refactor, so it can be added the week concurrency or
+GPU scarcity makes it worth having.
 
-Then take the one decision that costs nothing today and is painful to retrofit:
-**start the billing clock when the session becomes usable**, not when it is
-created. Everything else then optimises in the customer's direction by default.
+What still matters regardless of scale: **batch video is half of what a session
+is sold as** and does not exist yet; **outages must revert the hour**, which
+needs fault attribution the spec did not have; and the billing clock starts when
+the session becomes **usable**, which is the one decision that is free today and
+painful to retrofit.
