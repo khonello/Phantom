@@ -143,9 +143,17 @@ movement.
       the current one — which is what a call client does
 - [ ] *Noted, not scheduled:* rolling-shutter skew. Much subtler than motion
       blur and much harder to model
+- [x] **Debug frame capture.** `--debug-frames DIR` writes lossless
+      `NNNNNN_in.png` / `NNNNNN_out.png` pairs from a live session, on a
+      background thread so it does not change the latency it exists to measure.
+      `--debug-frames-stride` and `--debug-frames-limit` bound the volume
 - [ ] **Record one clip of real output and watch it.** Nothing above has been
       checked against a real call. This gates every other item in this stage and
       is the highest-value outstanding task on the project
+- [ ] **Write the comparison script** once a clip exists: noise sigma inside vs
+      outside the mask, high-frequency energy ratio, LAB distribution against
+      lighting changes, gradient discontinuity across the mask boundary, and
+      blur anisotropy face-vs-frame during motion
 
 ---
 

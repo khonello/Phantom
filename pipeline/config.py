@@ -59,6 +59,20 @@ class FaceSwapConfig:
     # largest per-frame cost — 320 is a quarter the pixels of 640.
     det_size: int = 448
 
+    # Debug frame capture. When `debug_frames_dir` is set, the stream writes
+    # (input, output) pairs so realism changes can be measured against a fixed
+    # clip rather than re-recorded each time. Written on a background thread and
+    # dropped under pressure, so enabling it does not change the latency of the
+    # thing being measured. Off and free by default.
+    #
+    # Written as lossless PNG, because these frames get measured and a lossy
+    # encode would add its own artefacts to the very statistics being compared.
+    # That costs disk: roughly 1.4 MB per pair at 640x360, so about 27 MB/s at
+    # 20fps. Raise the stride for anything longer than a short clip.
+    debug_frames_dir: Optional[str] = None
+    debug_frames_stride: int = 1   # keep every Nth frame
+    debug_frames_limit: int = 0    # stop after N pairs; 0 = unlimited
+
     # Realism / compositing
     enhancer_model: str = 'codeformer'  # 'codeformer' (ONNX) or 'gfpgan' (torch)
     enhancer_weight: float = 0.7    # CodeFormer fidelity: 0 = heaviest restoration

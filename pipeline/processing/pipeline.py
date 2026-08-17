@@ -94,7 +94,13 @@ class ProcessingPipeline:
 
         # Set by WebSocketAPIServer to enable push mode: desktop sends JPEG
         # frames via WebSocket instead of the pipeline capturing a local device.
-        self.frame_queue: Optional[queue.Queue] = None
+        self.frame_queue: Optional['queue.Queue[Any]'] = None
+
+        # Debug frame capture (see config.debug_frames_dir)
+        self._debug_queue: Optional['queue.Queue[Any]'] = None
+        self._debug_thread: Optional[threading.Thread] = None
+        self._debug_written = 0
+        self._debug_dropped = 0
 
         # Listen to config changes
         self.config.on_change(self._on_config_changed)
@@ -334,6 +340,10 @@ class ProcessingPipeline:
         """
         started = time.perf_counter()
 
+        # Captured before anything touches it, so the pair is genuinely
+        # "what the camera sent" against "what the far end sees".
+        debug_input = frame.copy() if self.config.debug_frames_dir else None
+
         # Preprocessing: normalize lighting, white balance, denoise
         frame = self._preprocessing_proc.process(frame)
 
@@ -356,9 +366,103 @@ class ProcessingPipeline:
 
         swapped = time.perf_counter()
 
+        if debug_input is not None:
+            self._queue_debug_pair(seq, debug_input, frame)
+
         self.bus.emit(FRAME_READY, frame=frame, seq=seq, capture_ts=capture_ts)
 
         self._log_timing(seq, started, detected, swapped)
+
+    # ------------------------------------------------------------------
+    # Debug frame capture
+    # ------------------------------------------------------------------
+
+    def _queue_debug_pair(self, seq: int, source: Frame, output: Frame) -> None:
+        """
+        Hand an (input, output) pair to the writer thread.
+
+        Never blocks and never writes on this thread: encoding PNGs inline
+        would add tens of milliseconds per frame and change the latency of the
+        very thing the capture exists to measure. Pairs are dropped rather than
+        queued when the writer falls behind.
+
+        Args:
+            seq: Frame sequence number, used as the filename stem
+            source: Frame as received, before any processing
+            output: Final composited frame, as emitted
+        """
+        stride = max(1, int(self.config.debug_frames_stride or 1))
+        if seq % stride:
+            return
+
+        limit = int(self.config.debug_frames_limit or 0)
+        if limit and self._debug_written >= limit:
+            return
+
+        if self._debug_queue is None:
+            self._start_debug_writer()
+        assert self._debug_queue is not None
+
+        try:
+            self._debug_queue.put_nowait((seq, source, output.copy()))
+        except queue.Full:
+            self._debug_dropped += 1
+
+    def _start_debug_writer(self) -> None:
+        """Create the capture directory and start the background writer."""
+        import os
+
+        directory = self.config.debug_frames_dir or ''
+        os.makedirs(directory, exist_ok=True)
+
+        # 32 pairs of headroom, ~45 MB at 640x360. The writer sustains about
+        # 39 pairs/second at that size, comfortably ahead of a 20fps stream,
+        # so the depth is there to absorb a disk hiccup rather than a deficit.
+        self._debug_queue = queue.Queue(maxsize=32)
+        self._debug_thread = threading.Thread(
+            target=self._debug_writer_loop,
+            name='debug-frame-writer',
+            daemon=True,
+        )
+        self._debug_thread.start()
+        emit_status(f'Debug frame capture writing to: {directory}', scope='DEBUG_FRAMES')
+
+    def _debug_writer_loop(self) -> None:
+        """
+        Write queued pairs as PNG until the pipeline stops.
+
+        PNG rather than JPEG because these frames are measured, and a lossy
+        encode would add its own artefacts to exactly the statistics — noise,
+        high-frequency energy, blocking — the capture exists to compare.
+        """
+        import os
+
+        assert self._debug_queue is not None
+        directory = self.config.debug_frames_dir or ''
+
+        while not self._stop_event.is_set():
+            try:
+                seq, source, output = self._debug_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+
+            try:
+                cv2.imwrite(os.path.join(directory, f'{seq:06d}_in.png'), source)
+                cv2.imwrite(os.path.join(directory, f'{seq:06d}_out.png'), output)
+                self._debug_written += 1
+            except Exception as e:
+                emit_error(
+                    f'Debug frame write failed: {type(e).__name__}: {e}',
+                    exception=e, scope='DEBUG_FRAMES',
+                )
+                return
+
+        if self._debug_written:
+            emit_status(
+                f'Debug frame capture: {self._debug_written} pairs written, '
+                f'{self._debug_dropped} dropped',
+                scope='DEBUG_FRAMES',
+            )
 
     def _log_timing(
         self,

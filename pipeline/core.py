@@ -119,6 +119,12 @@ def parse_args() -> None:
                         dest='grain', action='store_false', default=_env_bool('GRAIN'))
     program.add_argument('--no-occluder', help='disable occlusion masking',
                         dest='occluder', action='store_false', default=_env_bool('OCCLUDER'))
+    program.add_argument('--debug-frames', help='write (input, output) frame pairs to this directory',
+                        dest='debug_frames_dir', default=os.environ.get('DEBUG_FRAMES_DIR'))
+    program.add_argument('--debug-frames-stride', help='keep every Nth frame pair (default 1)',
+                        dest='debug_frames_stride', type=int, default=_env_int('DEBUG_FRAMES_STRIDE'))
+    program.add_argument('--debug-frames-limit', help='stop after N frame pairs (0 = unlimited)',
+                        dest='debug_frames_limit', type=int, default=_env_int('DEBUG_FRAMES_LIMIT'))
     program.add_argument('--input-url', help='network stream URL (RTSP/RTMP/HTTP)',
                         dest='input_url', default=None)
     program.add_argument('--control-port', help='API server port',
@@ -169,6 +175,9 @@ def parse_args() -> None:
         ('enhance', args.enhance),
         ('grain', args.grain),
         ('occluder', args.occluder),
+        ('debug_frames_dir', args.debug_frames_dir),
+        ('debug_frames_stride', args.debug_frames_stride),
+        ('debug_frames_limit', args.debug_frames_limit),
     ):
         if value is not None:
             CONFIG.set(field, value)
