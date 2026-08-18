@@ -25,7 +25,7 @@ import time
 from typing import Any, Dict, Optional, Set
 
 from pipeline.config import FaceSwapConfig, CONFIG
-from pipeline.events import BUS, FRAME_READY, DETECTION, STATUS_CHANGED, PIPELINE_STARTED, PIPELINE_STOPPED, WARNING
+from pipeline.events import BUS, ERROR, FRAME_READY, DETECTION, STATUS_CHANGED, PIPELINE_STARTED, PIPELINE_STOPPED, WARNING
 from pipeline.api.handlers import dispatch_command, HandlerContext
 from pipeline.processing.pipeline import ProcessingPipeline
 from pipeline.logging import emit_status, emit_error
@@ -40,9 +40,9 @@ class WebSocketAPIServer:
     Receives commands as JSON text frames.
 
     Supports:
-    - Frame streaming (FRAME_READY event → binary JPEG push via dedicated sender thread)
-    - Status updates (STATUS_CHANGED event → JSON text push)
-    - Command dispatch (JSON text received → handler response)
+    - Frame streaming (FRAME_READY event -> binary JPEG push via dedicated sender thread)
+    - Status updates (STATUS_CHANGED event -> JSON text push)
+    - Command dispatch (JSON text received -> handler response)
     - Health check ({"action": "health"} command)
     - Built-in WebSocket ping/pong (30s interval, 120s timeout)
 
@@ -117,6 +117,7 @@ class WebSocketAPIServer:
         BUS.on(PIPELINE_STARTED, self._on_pipeline_started)
         BUS.on(PIPELINE_STOPPED, self._on_pipeline_stopped)
         BUS.on(WARNING, self._on_warning)
+        BUS.on(ERROR, self._on_error)
 
     @classmethod
     def create_with_pipeline(
@@ -619,6 +620,32 @@ class WebSocketAPIServer:
             'message': message,
             'scope': scope,
             'level': 'warning',
+        })
+
+    def _on_error(
+        self,
+        message: str,
+        exception: Optional[BaseException] = None,
+        scope: str = 'PHANTOM',
+    ) -> None:
+        """
+        Handle ERROR event — push to all clients as STATUS_CHANGED with error level.
+
+        Without this a failed batch reaches the client as nothing but
+        PIPELINE_STOPPED, which is indistinguishable from success.
+
+        Args:
+            message: Error description
+            exception: Originating exception, not forwarded — the client has no
+                       use for a traceback and it does not serialise
+            scope: Source scope
+        """
+        self._broadcast_text({
+            'type': 'event',
+            'event': 'STATUS_CHANGED',
+            'message': message,
+            'scope': scope,
+            'level': 'error',
         })
 
     def _on_detection(self, detection: Any, seq: int) -> None:

@@ -2,8 +2,41 @@
 
 Refusing inputs that would produce a wrong swap, instead of swapping them badly.
 
-**Status: design settled, not built.** Thresholds still need calibration against
-real uploads and real footage.
+**Status: built.** Implemented in `pipeline/services/guards.py`, with source
+review in `pipeline/services/database.py` and the runtime path in
+`pipeline/processing/pipeline.py`.
+
+**Thresholds are not calibrated, but the measurement for it is built.** Run:
+
+```bash
+python pipeline.py --stream --guard-observe --guard-report calibration.json
+```
+
+Observe mode evaluates and records every guard while none of them act. That is
+not a convenience — a session that *enforces* cannot measure itself, because a
+guarded frame emits the held frame and stops being a sample of what the camera
+was doing. The report gives a distribution per metric with the percentage that
+would fail and the **margin** to the configured threshold; a negative margin
+means the threshold sits inside normal operating range.
+
+Nine thresholds, not the two this document originally anticipated. Three can make
+things actively worse if mis-set, and none of the three is visible from watching
+the output:
+
+| Threshold | Risk if wrong |
+|---|---|
+| `guard_min_coverage` | Compared against XSeg coverage of the *expanded* hull. What that reads on a completely clear face has never been measured |
+| `guard_identity_sim` | Above the same-person similarity under motion blur, the stabilizer resets every frame — the shimmer comes back, caused by a guard |
+| `guard_min_confidence` | 0.5 against a detector threshold of 0.35, so everything scoring in between is guarded |
+
+`guard_min_sharpness` and `guard_outlier_sim` are the two that need *upload* data
+rather than footage. All start permissive on purpose — see *How aggressive should
+source rejection be?* below.
+
+Everything described here is present with one deliberate deviation: **zero faces
+is not a guarded frame.** It is the ordinary case of someone stepping out of
+shot, already handled by marking the stabilizer missing, and holding the last
+good frame there would keep a stale face over an empty chair.
 
 ---
 
@@ -221,16 +254,35 @@ standing still.
 
 ## Open questions
 
-**Is largest-face enough, or does selection need continuity?** Largest can still
-flip between two people of similar apparent size. Preferring the face nearest the
-previous frame's position would be steadier, but that is a tracker by another
-name. Guarding may make it moot: two comparable faces in shot guards the frame
-anyway.
+**Is largest-face enough, or does selection need continuity?** *Settled: enough.*
+Guarding made it moot as expected — two comparable faces in shot guards the frame
+regardless of which one selection picks. The remaining case, a switch between two
+people of *similar size*, is caught by the stabilizer's identity check rather
+than by selection, which is the cheaper place for it.
 
-**Is pose available cheaply?** InsightFace exposes it on some configurations. If
-`buffalo_l` does not, yaw can be approximated from the five keypoints.
+**Is pose available cheaply?** *Settled: yes, and it was already being computed.*
+`buffalo_l` bundles `1k3d68.onnx`, and InsightFace's 3D-landmark model sets
+`face.pose` as a side effect of every detection — the pipeline was throwing it
+away and approximating it. `guards.measure_yaw` now prefers it.
 
-**How aggressive should source rejection be?** Every guard that rejects a usable
-photo is friction at the moment a new customer is deciding whether this works.
-Multi-face is unambiguous; sharpness and pose are judgement calls, and starting
-permissive may convert better than starting strict.
+The keypoint approximation survives as the fallback for packs trimmed with
+`allowed_modules`: the nose's offset along the inter-eye axis normalised by eye
+span, which is scale and roll invariant, coarse, and increasingly pessimistic
+past the threshold — the safe direction. The two are **not on the same scale**,
+so a threshold calibrated against one should not be assumed correct for the
+other; which source produced each reading is recorded in the telemetry.
+
+The startup capability probe reports whether `pose` is actually present on the
+running pack, along with `normed_embedding`, `landmark_2d_106` and `det_score`.
+Each of those silently disables a guard when missing, and a disabled guard is
+indistinguishable from one that never had cause to fire.
+
+**How aggressive should source rejection be?** *Still open, and only real upload
+data settles it.* Every guard that rejects a usable photo is friction at the
+moment a new customer is deciding whether this works. Multi-face is unambiguous;
+sharpness and pose are judgement calls, so both start permissive.
+
+One caveat on the sharpness floor: Laplacian variance is scale-dependent, so the
+same face photographed larger scores higher. That is tolerable for source uploads
+— they are all face photographs, and the floor is low — but it means the number
+cannot be reused as-is for anything differently framed.

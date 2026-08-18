@@ -25,6 +25,9 @@ _UPLOAD_DIR = '/tmp/phantom_uploads'
 from pipeline.config import FaceSwapConfig
 from pipeline.api.schema import ResponseMessage
 from pipeline.processing.pipeline import ProcessingPipeline
+from pipeline.services import guards
+from pipeline.services import swapper_models
+from pipeline.services.database import SourceReview
 from pipeline.logging import emit_status, emit_error
 from pipeline.io.ffmpeg import is_image, is_video, normalize_output_path
 
@@ -563,6 +566,10 @@ def handle_set_preprocessing(config: FaceSwapConfig, value: bool) -> ResponseMes
 # adjusted together while comparing settings on real footage, and none of them
 # has (or needs) its own control in the desktop header.
 _REALISM_FIELDS: Dict[str, Any] = {
+    # Switchable live, which is the point: comparing two swappers on the same
+    # clip is the only way to know which is actually better. Changing it also
+    # applies that model's realism profile, via the pipeline's config listener.
+    'swapper_model': lambda v: str(v) if str(v) in swapper_models.names() else None,
     'enhancer_model': lambda v: str(v) if str(v) in ('codeformer', 'gfpgan') else None,
     'enhancer_weight': lambda v: min(1.0, max(0.0, float(v))),
     'enhance_strength': lambda v: min(1.0, max(0.0, float(v))),
@@ -576,7 +583,13 @@ _REALISM_FIELDS: Dict[str, Any] = {
 
 def handle_set_realism(config: FaceSwapConfig, values: Dict[str, Any]) -> ResponseMessage:
     """
-    Set one or more realism/compositing tuning parameters.
+    Set one or more realism, compositing or guard-threshold parameters.
+
+    Guard thresholds share this command rather than getting one of their own,
+    for the same reason the realism knobs share it: they are adjusted together
+    while comparing behaviour on real footage. Guard values are *clamped* to
+    their legal range rather than rejected, so an operator sweeping a threshold
+    live gets the nearest legal value instead of an error.
 
     Unknown keys and values that fail validation are reported back rather than
     applied, so a typo during tuning does not silently do nothing.
@@ -592,6 +605,15 @@ def handle_set_realism(config: FaceSwapConfig, values: Dict[str, Any]) -> Respon
     rejected: Dict[str, str] = {}
 
     for field, raw in (values or {}).items():
+        if field in guards.GUARD_FIELDS:
+            accepted, value, error = guards.validate_guard_value(field, raw)
+            if not accepted:
+                rejected[field] = error
+                continue
+            config.set(field, value)
+            applied[field] = value
+            continue
+
         validator = _REALISM_FIELDS.get(field)
         if validator is None:
             rejected[field] = 'unknown field'
@@ -646,15 +668,21 @@ def handle_set_input_url(config: FaceSwapConfig, url: str) -> ResponseMessage:
 def handle_upload_source(
     config: FaceSwapConfig,
     images: List[Dict[str, Any]],
+    pipeline: Optional[ProcessingPipeline] = None,
 ) -> ResponseMessage:
     """
     Receive source image(s) as base64-encoded bytes, save to temp dir, and
     set source config. Replaces path-based set_source / create_embedding for
     remote deployments where the client cannot share a filesystem with the server.
 
+    Images that fail the source guards are reported individually — which image
+    and why — rather than as one opaque failure. This is an upload flow with a
+    person present; they need to know which photo to replace.
+
     Args:
         config: FaceSwapConfig
         images: List of dicts with 'name' (filename) and 'data' (base64 string)
+        pipeline: Pipeline whose source review should be reported, if available
 
     Returns:
         ResponseMessage with saved server-side paths on success
@@ -696,15 +724,68 @@ def handle_upload_source(
             fh.write(image_bytes)
         saved.append(path)
 
+    # Setting these runs the source guards synchronously, via the pipeline's
+    # config listener, so the review is available by the time this returns.
     config.set('source_paths', saved)
     config.set('source_path', saved[0])
-    emit_status(f'Source uploaded: {len(saved)} image(s)', scope='API')
+
+    review = _source_review(pipeline)
+    if review is None:
+        emit_status(f'Source uploaded: {len(saved)} image(s)', scope='API')
+        return ResponseMessage(
+            type='upload_source',
+            data={'paths': saved, 'count': len(saved)},
+            success=True,
+        )
+
+    data: Dict[str, Any] = {
+        'paths': review.accepted,
+        'count': len(review.accepted),
+        'uploaded': len(saved),
+        **review.to_dict(),
+    }
+
+    if not review.usable:
+        # Every image refused. Reported as a failure with a reason per image,
+        # because there is a person on the other end of this who has to know
+        # which photo to replace.
+        reasons = '; '.join(
+            f'{os.path.basename(p)}: {review.messages.get(p, r)}'
+            for p, r in review.rejected
+        )
+        return ResponseMessage(
+            type='upload_source',
+            data=data,
+            success=False,
+            error=f'No usable source image — {reasons}',
+        )
+
+    if review.rejected:
+        emit_status(
+            f'Source uploaded: {len(review.accepted)} of {len(saved)} image(s) '
+            f'accepted',
+            scope='API',
+        )
+    else:
+        emit_status(f'Source uploaded: {len(saved)} image(s)', scope='API')
 
     return ResponseMessage(
         type='upload_source',
-        data={'paths': saved, 'count': len(saved)},
+        data=data,
         success=True,
     )
+
+
+def _source_review(pipeline: Optional[ProcessingPipeline]) -> Optional[SourceReview]:
+    """
+    The most recent source review, if the pipeline has run one.
+
+    Returns None when there is no pipeline or it has not evaluated sources yet,
+    in which case callers fall back to reporting a bare success — guards that
+    never ran must not be reported as guards that passed.
+    """
+    processor = getattr(pipeline, '_swapping_proc', None)
+    return getattr(processor, 'last_review', None) if processor else None
 
 
 def handle_create_embedding(config: FaceSwapConfig, paths: List[str]) -> ResponseMessage:
@@ -919,7 +1000,7 @@ def dispatch_command(
             return handle_set_input_url(config, data.get('url', ''))
 
         elif command_type == 'upload_source':
-            return handle_upload_source(config, data.get('images', []))
+            return handle_upload_source(config, data.get('images', []), ctx.pipeline)
         elif command_type == 'create_embedding':
             return handle_create_embedding(config, data.get('paths', []))
 

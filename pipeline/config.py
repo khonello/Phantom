@@ -73,16 +73,70 @@ class FaceSwapConfig:
     debug_frames_stride: int = 1   # keep every Nth frame
     debug_frames_limit: int = 0    # stop after N pairs; 0 = unlimited
 
+    # Face-swap model. Selects both the weights and the realism profile tuned
+    # for them — see pipeline/services/swapper_models.py. Changing this without
+    # changing the profile is what would make a better model look worse.
+    swapper_model: str = 'inswapper_128'
+
     # Realism / compositing
     enhancer_model: str = 'codeformer'  # 'codeformer' (ONNX) or 'gfpgan' (torch)
     enhancer_weight: float = 0.7    # CodeFormer fidelity: 0 = heaviest restoration
                                     # and most hallucination, 1 = closest to input
     enhance_strength: float = 0.7   # how much of the restored face to keep
-    aligned_size: int = 256         # compositing working resolution (128-512)
+    aligned_size: int = 256         # compositing ceiling (128-512), from the preset
+    # Compositing floor, from the model profile. Compositing below a model's
+    # native output size throws away detail it already generated, so a 256 model
+    # should never composite a distant face at 128 the way a 128 model can.
+    aligned_min: int = 128
     temporal_alpha: float = 0.6     # EMA on aligned pixels (1.0 = off)
     color_strength: float = 1.0     # scales the LAB colour transfer
     grain: bool = True              # match sensor noise on the composited face
     occluder: bool = True           # XSeg mask so hands/mics are not overpainted
+
+    # Input guards. Refusing an input beats swapping it badly: a frame with no
+    # face is obviously broken and gets fixed, while a frame with a *stranger's*
+    # face swapped in looks like it worked. See docs/INPUT_GUARDS.md.
+    guards: bool = True             # master switch for runtime guards
+    guard_multi_face: bool = True   # reject multi-face sources, guard multi-face frames
+    guard_min_source_px: int = 110  # minimum source face size, shorter side
+    guard_min_frame_px: int = 80    # minimum runtime face size, shorter side
+    guard_max_yaw: float = 35.0     # degrees; ArcFace degrades sharply toward profile
+    guard_min_confidence: float = 0.5   # detection score floor (detect thresh is 0.35)
+    guard_min_coverage: float = 0.4     # fraction of the hull left unoccluded
+
+    # Cosine below which consecutive frames are treated as different people, so
+    # `LandmarkStabilizer` drops its smoothing. On config rather than as a
+    # constant because it is the guard threshold most able to *cost* realism: set
+    # too high, the stabilizer resets on ordinary motion blur and the shimmer it
+    # exists to remove comes back.
+    #
+    # 0.35 rather than 0.5 because the two populations are far apart and the
+    # threshold should sit in the gap with margin on both sides. ArcFace
+    # embeddings of *different* people are close to orthogonal (~0.0-0.2); the
+    # same person on consecutive frames normally sits above 0.9 and degrades only
+    # under blur or extreme pose. 0.5 leaves almost no room beneath a degraded
+    # same-person reading; 0.35 clears both.
+    #
+    # The threshold is only half the protection — see `_IDENTITY_CONFIRM`, which
+    # requires the reading to stay low across several frames before believing it.
+    # Set this to -1.0 to disable identity-based resetting entirely, leaving only
+    # the centroid-jump test.
+    guard_identity_sim: float = 0.35
+
+    # The two thresholds the design left open, because neither can be set
+    # honestly without real uploads to calibrate against. Both start permissive:
+    # a guard that rejects a usable photo is friction at the exact moment a new
+    # customer is deciding whether this works at all, so the failure to prefer
+    # is letting a marginal image through, not turning a good one away.
+    guard_min_sharpness: float = 40.0   # Laplacian variance floor on source images
+    guard_outlier_sim: float = 0.35     # cosine floor against the group mean
+
+    # Calibration. In observe mode every guard is evaluated and recorded but
+    # none of them act, so a single session measures what all the thresholds
+    # would have done without any of them affecting the footage being measured.
+    # This is how the numbers above stop being guesses.
+    guard_observe: bool = False
+    guard_report: Optional[str] = None  # write the telemetry JSON here on stop
 
     # Vestigial — kept so `apply_preset` and the desktop's `set_quality`
     # round-trip keeps working. No longer read by the pipeline: face tracking
@@ -149,6 +203,25 @@ class FaceSwapConfig:
                 # Log but don't crash if callback fails
                 import sys
                 print(f"Warning: config change listener failed: {e}", file=sys.stderr)
+
+    def apply_model_profile(self, model_name: Optional[str] = None) -> None:
+        """
+        Apply the realism profile belonging to a swap model.
+
+        Ordering matters: this runs *after* `apply_preset`, because the preset
+        owns compute and the model owns appearance. Explicit CLI, env and
+        `set_realism` values are applied after both and win over each.
+
+        Args:
+            model_name: Registry key. None uses the configured `swapper_model`
+        """
+        from pipeline.services.swapper_models import resolve
+
+        model = resolve(model_name or self.swapper_model)
+        self.set('swapper_model', model.name)
+
+        for key, value in model.look().items():
+            self.set(key, int(value) if key == 'aligned_min' else value)
 
     def apply_preset(self, preset_name: str) -> None:
         """

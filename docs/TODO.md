@@ -7,10 +7,16 @@ Sources: [SESSION_ARCHITECTURE.md](SESSION_ARCHITECTURE.md) (the spec),
 [SESSION_PLANE.md](SESSION_PLANE.md) (assessment and staging),
 [INPUT_GUARDS.md](INPUT_GUARDS.md) (input validation).
 
-**Nothing below is built.** Items are grouped by stage; stages are ordered by
-what unblocks what, and by what makes the product sellable. Payment and auth are
-last on purpose — a billing system attached to a product that cannot yet do
-batch video, or hold a session together, is effort spent on the wrong end.
+For the *order* to work through this in, with the commands, see
+[PENDING_WORK.md](PENDING_WORK.md). This file stays the record of what is
+outstanding; that one is the runbook for getting through it.
+
+Items are grouped by stage; stages are ordered by what unblocks what, and by
+what makes the product sellable. Payment and auth are last on purpose — a
+billing system attached to a product that cannot hold a session together is
+effort spent on the wrong end.
+
+Checked items are built. Everything else is not.
 
 ---
 
@@ -18,17 +24,53 @@ batch video, or hold a session together, is effort spent on the wrong end.
 
 Small, independent, and they stop the other stages building on sand.
 
-- [ ] **Fix the CI test job.** It runs the batch-video command, which hits the
-      unimplemented path. Currently fails on every push. Resolved by stage 2.
-- [ ] **Clear the 12 remaining mypy errors** — `Queue` and `dict` type arguments,
+- [x] **Fix the CI test job.** Two separate defects, both fixed; a green run has
+      not been observed yet, so confirm on the next push.
+      - `requirements-ci.txt` did not exist in any commit, so the job failed at
+        `pip install` and never reached the batch command at all. Now present,
+        referencing `requirements-pipeline-cpu.txt` so the two cannot drift
+      - The batch-video path it invokes is implemented (stage 2)
+      - The job wrote its output over `.github/examples/output.mp4`, a *tracked*
+        file, so a run that produced nothing could still pass by comparing the
+        committed copy against the snapshot. Output now goes to `$RUNNER_TEMP`
+        and is checked for existence before the comparison
+- [ ] **Clear the remaining mypy errors** — `Queue` and `dict` type arguments,
       platform-specific module attributes, a `cv2` constant. All trivial; none
-      are in code written recently.
-- [ ] **Add a test suite.** There is none. Start with the pieces that are pure
-      functions: `estimate_similarity`, the compositor's colour and detail
-      matching, `FaceDatabase` averaging, the guard predicates.
-- [ ] **Verify whether RunPod bills egress.** ~2.2 GB/hour outbound per session,
-      ~11 GB over a 5-Hour Pack. The only cost line in the economics set to zero
-      without evidence. A pricing-page lookup.
+      are in code written recently. **11**, not 12 — and that is `mypy pipeline`,
+      which is what CI runs. The command in CLAUDE.md, `mypy pipeline desktop`,
+      reports **36**: the desktop package accounts for 25 of them and CI never
+      looks at it.
+- [x] **Add a test suite.** `tests/`, 165 checks across five modules, running
+      under pytest in ~40s and wired into CI as a `unit` job. `conftest.py` stubs
+      the ML layer into `sys.modules`, which is what lets the suite run with no
+      GPU, no weights and no multi-gigabyte install — `pytest numpy
+      opencv-python-headless tqdm` is the whole dependency list.
+
+      Covers the parts that fail *silently*: guard predicates and thresholds,
+      face selection, the stabilizer's identity reset, source review, held-frame
+      behaviour, the FFmpeg batch plumbing (ordering, audio sync, cancellation,
+      cleanup), execution-provider verification, and the realism metrics.
+
+      Each file is still runnable directly for debugging; a `test_everything_passed`
+      function is what surfaces it to pytest.
+
+      **Not covered: the models.** Everything ML is stubbed, so this proves the
+      logic around the models, never the models themselves. That gap closes on
+      the pod, not here.
+- [x] **Verify whether RunPod bills egress.** **It does not.** RunPod's Pod
+      pricing documentation states "no fees for data ingress or egress", and the
+      pricing page repeats it as a differentiator against AWS. The zero in the
+      economics was right, and is now evidence rather than assumption.
+
+      What *is* billed, so the model stays honest: compute per second, plus
+      storage — container disk $0.10/GB/month (running only), volume disk
+      $0.10 running / $0.20 stopped, network volume $0.07/GB/month under 1 TB
+      and $0.05 above, charged whether the pod runs or not.
+
+      That last one is the line worth watching instead: a network volume bills
+      continuously, including while every pod is stopped, and the multi-datacenter
+      fallback needs **one volume per region**. Egress was never the leak — idle
+      regional volumes are.
 
 ---
 
@@ -36,13 +78,37 @@ Small, independent, and they stop the other stages building on sand.
 
 *Ships: nothing customer-facing. Sizes the only number that still matters.*
 
-- [ ] **Time a cold provision end to end**, broken down by phase: provisioning,
-      `apt-get`, `git pull`, `pip install`, model load. Run it against both a
-      warm volume and an empty one.
-- [ ] **Confirm a single session holds its latency budget** at each preset. One
-      session missing frame deadlines is a quality problem regardless of how many
-      others exist. The per-stage timings behind `--log-level debug` already
-      exist for this.
+**The instrumentation is built; only the pod run is missing.** Both items below
+now produce their own numbers, so this stage is a session rather than a
+stopwatch exercise.
+
+- [ ] **Time a cold provision end to end**, broken down by phase. `orchestrator.py
+      start` and `resume` now print the breakdown themselves — `BootTimer` measures
+      the coarse phases (provision, wait-for-ssh, remote-setup, pipeline-ready) and
+      `startup.sh` reports its own inner phases as `PHASE <name> <seconds>` lines
+      which the orchestrator folds in, so `pip-install` and `model-load` appear as
+      separate rows rather than hiding inside "setup". Every run states whether the
+      volume was **warm or empty**, so the two cases stop being remembered and
+      start being labelled.
+
+      Still to do: run it. Twice — once on a warm volume, once on an empty one.
+
+      This is also what settles the Docker question. If `pip-install` dominates,
+      baking an image is the answer; if `model-load` does, it is not, because the
+      Dockerfile deliberately leaves weights on the network volume and the real
+      fix is pre-seeding regional volumes instead.
+- [ ] **Confirm a single session holds its latency budget** at each preset.
+      `LatencyBudget` now records every frame's stage timings — not the 1-in-30
+      sample at debug level, which cannot answer a question about a distribution —
+      and reports p50/p95/p99 per stage against the deadline the preset's own
+      capture rate sets (66ms at 15fps, 50 at 20, 33 at 30). It prints a `HOLDS`
+      or `MISSES` verdict with the percentage of frames over deadline and the
+      headroom at p95.
+
+      A frame over deadline does not borrow time back from a fast neighbour, so
+      the number that matters is the fraction over and the p95, never the mean.
+
+      Still to do: run one session per preset and read the verdict.
 
 The `max_sessions` load harness is deliberately *not* here — nothing depends on
 that number until stage 7.
@@ -53,13 +119,17 @@ that number until stage 7.
 
 *Ships: the other half of what a session is sold as. Launch prerequisite.*
 
-A session is sold as "live **or** batch". Half of that currently returns an
-error.
+A session is sold as "live **or** batch". Batch now runs end to end for both
+images and video; what remains is getting large files to and from the worker, and
+deciding what a job that outlives its session costs.
 
-- [ ] **Wire `_process_target_batch()` for video.** The FFmpeg pieces already
-      exist in `pipeline/io/ffmpeg.py` — `extract_frames`, `create_video`,
-      `restore_audio`, `clean_temp` — and batch reuses the same compositor as
-      live, so the work is frame iteration plus audio and FPS restoration.
+- [x] **Wire `_process_target_batch()` for video.** Extract → swap in place →
+      encode → restore audio, reusing the FFmpeg helpers and the same compositor
+      as live. Splits into `_process_image_batch` and `_process_video_batch` over
+      a shared `_swap_frame_faces`, so the two cannot drift. Landmark smoothing
+      is on for video (consecutive frames) and off for a lone image. Honours
+      `_stop_event` between frames, reports throttled progress with an ETA, and
+      cleans its scratch space on every exit path.
 - [ ] **Build a real file transfer path**: chunked, resumable,
       progress-reporting, both directions. `upload_source` is base64 inside one
       JSON message — fine for a 200 KB face, unusable for a 2 GB video.
@@ -67,7 +137,31 @@ error.
       its session: refuse / bill overflow / absorb / detach and hold the result.
 - [ ] **Decide whether upload time is billed.** Overlapping transfer with worker
       startup is the likely answer, but it has to be designed in.
-- [ ] Desktop VIDEO mode and the CI test both start working as a side effect.
+- [x] Desktop VIDEO mode and the CI test both start working as a side effect.
+      Not quite free, in the end — see below.
+
+### Found while wiring it
+
+Three defects sitting in the path, none of which were reachable while video
+batch returned an error string.
+
+- [x] **`ERROR` events never reached any client.** The server forwards
+      `STATUS_CHANGED`, `DETECTION`, `WARNING` and the lifecycle events, but not
+      `ERROR` — and `emit_error` publishes only to `ERROR`. A batch reports
+      completion *by stopping*, so every failure arrived at the desktop as a bare
+      `PIPELINE_STOPPED` and was rendered as "processing complete". The server
+      now forwards it as an error-level status, and the bridge holds the message
+      and reports `failed: <reason>` instead of marking the job complete.
+- [x] **Frame ordering broke past 9999 frames.** `extract_frames` wrote `%04d.png`
+      while `get_temp_frame_paths` orders by sorting filenames, so at 10000
+      frames `'10000.png'` sorts before `'9999.png'` and every later frame was
+      silently reordered. That is 5m34s at 30fps. Now `%06d`.
+- [x] **`keep_fps = False` desynchronised the audio.** `create_video` passes `-r`
+      *before* `-i`, which sets the image2 demuxer's **input** rate — so the
+      frames were consumed at 30fps regardless of the source, rescaling a 4.00s
+      24fps clip to 3.20s of video against 4.02s of restored audio. Frames are
+      now always read at the source rate and retiming is a separate `fps=` filter,
+      which drops or duplicates frames and preserves duration.
 
 ---
 
@@ -77,48 +171,129 @@ error.
 
 Independent of the control plane, and worth doing before customers arrive.
 
+**Built**, except for calibrating two thresholds, which needs real uploads. See
+[INPUT_GUARDS.md](INPUT_GUARDS.md) for the design and
+`pipeline/services/guards.py` for the implementation.
+
 ### Fixes that stand on their own
 
-- [ ] **Replace `detect_one`'s leftmost rule with largest-face.**
-      `min(detections, key=lambda d: d.bbox.x)` is an arbitrary tie-break, not a
-      heuristic.
-- [ ] **Reset `LandmarkStabilizer` when the selected face changes identity.** The
-      existing centroid-jump reset does not catch a switch between two people who
-      are standing still.
+- [x] **Replace `detect_one`'s leftmost rule with largest-face.** Now
+      `FaceDetector.select_primary`, so a caller that needs the whole list to
+      count faces does not run detection twice. `DetectionProcessor` calls
+      `detect()` and trims, rather than `detect_one()` which threw the count
+      away — and the count is what the multi-face guard *is*.
+- [x] **Reset `LandmarkStabilizer` when the selected face changes identity.**
+      Compares the recognition embedding InsightFace already computed, so it
+      costs a dot product. The remembered identity deliberately survives
+      `reset()`: clearing it would leave the frame after a reset with nothing to
+      compare against, so two people alternating would be caught on only every
+      second frame.
 
 ### Source guards
 
 Applied at upload, before any embedding is built.
 
-- [ ] Reject images containing **more than one face**
-- [ ] Reject **no face** (exists; the reason must reach the UI)
-- [ ] Reject faces under ~110 px on the shorter side
-- [ ] Reject blurred sources below a Laplacian-variance floor
-- [ ] Reject extreme pose beyond roughly ±35° yaw
-- [ ] **Identity outlier check** — leave-one-out cosine similarity against the
-      group mean, three images minimum
-- [ ] **Report per-image reasons**, not a bare failure
+All in `pipeline/services/guards.py`, as pure predicates over data the pipeline
+already has, called from `FaceDatabase.review_sources`.
+
+- [x] Reject images containing **more than one face**
+- [x] Reject **no face** — the reason now reaches the UI
+- [x] Reject faces under ~110 px on the shorter side. The *shorter* side, not the
+      longer one or the area: a tall narrow box has too few pixels across the
+      features however tall it is
+- [x] Reject blurred sources below a Laplacian-variance floor
+- [x] Reject extreme pose beyond roughly ±35° yaw. Pose is not reliably exposed
+      by `buffalo_l`, so yaw is approximated from the five keypoints — the nose's
+      offset along the inter-eye axis, normalised by eye span, so it is scale and
+      roll invariant. Coarse by design; it only has to separate "roughly frontal"
+      from "far enough that ArcFace degrades", and the alternative is a second
+      model on the critical path
+- [x] **Identity outlier check** — leave-one-out cosine against the mean of *the
+      others*, three images minimum. Including a candidate in the mean it is
+      tested against is what lets one wrong photo drag the reference toward
+      itself and pass
+- [x] **Report per-image reasons**, not a bare failure. `SourceReview` carries
+      one outcome per image; `upload_source` returns them and the desktop names
+      the refused file. Partial rejection is reported too — a source built from 1
+      of 3 photos still succeeds, and the label would otherwise go on claiming
+      all three were averaged
 
 ### Runtime guards
 
-- [ ] Guard frames with more than one detection while `many_faces` is off
-- [ ] Guard on low detection confidence
-- [ ] Guard faces under ~80 px
-- [ ] Guard extreme pose
-- [ ] Guard heavy occlusion (XSeg coverage below ~40% of the hull)
+- [x] Guard frames with more than one detection while `many_faces` is off
+- [x] Guard on low detection confidence
+- [x] Guard faces under ~80 px
+- [x] Guard extreme pose
+- [x] Guard heavy occlusion (XSeg coverage below ~40% of the hull). Measured
+      against the hull *alone*, not hull × valid-region: a face at the frame edge
+      is cropped, not occluded, and including that term would guard it for the
+      wrong reason. No second XSeg pass — `FaceMasker` records the coverage from
+      the inference it already runs, and `FaceCompositor` builds the mask before
+      restoration and smoothing so the guard can refuse the frame before
+      anything mutates temporal state
+
+Zero faces is deliberately **not** a guarded frame. That is someone stepping out
+of shot, already handled, and guarding it would hold a stale face over an empty
+chair.
 
 ### Guard behaviour
 
-- [ ] **Emit the last good swapped frame**, unchanged — nothing drawn on it
-- [ ] **Fail closed**: an un-evaluable guard is a guarded frame
-- [ ] **Never update temporal state** on a guarded frame — call
+- [x] **Emit the last good swapped frame**, unchanged — nothing drawn on it
+- [x] **Fail closed**: an un-evaluable guard is a guarded frame. This also
+      corrected `FaceCompositor.composite`, which returned the *untouched frame*
+      when compositing failed — on the live path that is the operator's real
+      face, the exact exposure the guards exist to prevent. It now returns None
+      and the caller decides: live holds the last good frame, batch passes the
+      original through, since a batch target is a file the operator supplied
+      rather than their camera
+- [x] **Never update temporal state** on a guarded frame — calls
       `FaceCompositor.reset()` and `LandmarkStabilizer.reset()`
-- [ ] **`_run_vcam` holds and re-sends the last frame** when the queue is empty,
-      rather than stopping `cam.send()`. A stalled device can surface as
-      "camera disconnected"; a frozen picture reads as a network hiccup.
-- [ ] Add guard thresholds to `FaceSwapConfig` and the `set_realism` validator
-- [ ] Calibrate the two unknown thresholds — sharpness floor, outlier cosine
-      floor — against real uploads
+- [x] **`_run_vcam` holds and re-sends the last frame** when the queue is empty,
+      rather than stopping `cam.send()`. This covers every way frames can stop,
+      not just guarded ones — hour expiry, session end, worker death, a crash
+- [x] Add guard thresholds to `FaceSwapConfig` and the `set_realism` validator.
+      Guard values are *clamped* rather than rejected, so sweeping a threshold
+      live gives the nearest legal value instead of an error
+- [ ] Calibrate the thresholds against real footage. **The measurement is built;
+      only the session is missing.** Run with `--guard-observe --guard-report
+      report.json` and every guard is evaluated and recorded while none of them
+      act — a session that *enforces* cannot measure itself, since a guarded
+      frame emits a held frame and stops being a sample of what the camera was
+      doing. The report gives a distribution per metric with the percentage that
+      would fail and the margin to the threshold, so the output is a number per
+      knob rather than "it seemed to guard a lot".
+
+      It turned out to be **nine** thresholds, not two, and three of them can
+      make things actively worse:
+      - `guard_min_coverage` (0.4) is compared against XSeg coverage of an
+        *expanded* hull. What that reads on a completely clear face was never
+        measured, so the floor could sit inside normal range and guard constantly
+      - `guard_identity_sim` (0.5) — promoted from a constant on
+        `LandmarkStabilizer` to config for this. If it sits above where the same
+        person lands under motion blur, the stabilizer resets every frame and the
+        shimmer it exists to remove comes back: **a realism regression caused by
+        a guard**
+      - `guard_min_confidence` (0.5) against a detector threshold of 0.35, so
+        everything scoring in between is guarded
+
+      `guard_min_sharpness` (40.0) and `guard_outlier_sim` (0.35) remain the two
+      that need *upload* data rather than footage. All are deliberately
+      permissive: a guard that turns away a usable photo is friction at the exact
+      moment a new customer is deciding whether this works.
+- [x] **Guard calibration telemetry** — `guards.GuardTelemetry`, reported to the
+      log on stop and written as JSON with `--guard-report`. Records the measured
+      value behind every guard, not just the verdict, because watching output
+      only ever reveals *that* something is wrong, never which number
+- [x] **Capability probe** — logs on first detection which `Face` attributes the
+      model pack actually provides. Several guards silently become no-ops when
+      their input is missing (no `normed_embedding`, no identity reset; no
+      `det_score`, no confidence guard), and a silent no-op looks exactly like a
+      guard that never had cause to fire
+- [x] **Yaw now prefers `face.pose`.** `buffalo_l` bundles `1k3d68.onnx`, whose
+      3D-landmark model sets `face.pose` as a side effect of detection — so the
+      real estimate was already being computed and thrown away. The keypoint
+      approximation is now the fallback for trimmed packs. The two are not on the
+      same scale, so the telemetry records which source was used
 
 ---
 
@@ -149,11 +324,30 @@ movement.
       `--debug-frames-stride` and `--debug-frames-limit` bound the volume
 - [ ] **Record one clip of real output and watch it.** Nothing above has been
       checked against a real call. This gates every other item in this stage and
-      is the highest-value outstanding task on the project
-- [ ] **Write the comparison script** once a clip exists: noise sigma inside vs
-      outside the mask, high-frequency energy ratio, LAB distribution against
-      lighting changes, gradient discontinuity across the mask boundary, and
-      blur anisotropy face-vs-frame during motion
+      is the highest-value outstanding task on the project. The capture
+      (`--debug-frames`) and the measurement (below) both exist now, so this is
+      one session away
+- [x] **Write the comparison script.** `tools/compare_frames.py`, measuring a
+      `--debug-frames` capture for all five: noise sigma inside vs outside the
+      mask, high-frequency energy ratio, LAB distribution, gradient
+      discontinuity across the mask boundary, and blur anisotropy face-vs-frame
+      **during motion specifically** — averaging that over a still clip hides
+      the very effect it exists to find.
+
+      Every ratio is inside-over-outside taken from the *output* frame, because
+      the question is not whether the swap resembles the original face but
+      whether it belongs in the picture it is now part of.
+
+      The face region is derived from the input/output difference rather than
+      from a detector: the swap marks its own extent, so this needs no models
+      and no GPU. `--against DIR` diffs two captures, which is how a realism
+      change gets judged rather than argued about.
+
+      It prints a plain-language reading, not just numbers — "TOO CLEAN: the
+      face carries 14% of the sensor noise the rest of the frame has" — and is
+      tested against synthetic frames with each defect deliberately present, so
+      the metrics are known to detect what they claim rather than merely
+      producing a number that would get quoted in decisions
 
 ---
 
@@ -200,8 +394,20 @@ Raising the number later must require no code change.
       control-plane contact *and* no active session, so an outage does not leave
       pods billing forever
 - [ ] **Session-scoped `_UPLOAD_DIR`** — currently the fixed `/tmp/phantom_uploads`
-- [ ] **Session-scoped batch temp directories** — currently derived from the
-      target filename
+- [x] **Session-scoped batch temp directories** — done early, since stage 2 was
+      writing these call sites for the first time and scoping them later would
+      have meant editing them twice. Scratch space is now
+      `<root>/<session>/temp/<target>`: keyed by session so two sessions handed
+      the same filename cannot collide, with the target name kept as the leaf so
+      one session can process several targets. Root is `PHANTOM_TEMP_DIR` or the
+      system temp — no longer a `temp/` directory created next to the target,
+      which on a pod is inside the upload directory. `set_temp_scope()` is what
+      the control plane will call; until then the scope defaults to
+      `PHANTOM_SESSION_ID`, else a per-process token, which is exactly one
+      session while `max_sessions` is 1. `reset_temp()` clears scratch before a
+      run unconditionally, so frames from an aborted job cannot be picked up and
+      re-encoded into the next one — `clean_temp` could not do that job, since
+      `keep_frames` would have turned it into silent corruption.
 - [ ] **Control-plane-allocated worker ports**, not a hardcoded 9000
 - [ ] **Worker registry keyed by (pod, slot)**, not by pod
 - [ ] **Route clients to a session's worker**, not to "the pod"
@@ -335,10 +541,10 @@ Recorded here so they are not rediscovered mid-implementation.
 |---|---|---|
 | Batch job outliving its session | Stage 2 | Four defensible options |
 | Is upload time billed? | Stage 2 | Overlap with startup is the likely answer |
-| How aggressive should source rejection be? | Stage 3 | Friction at signup versus wrong output |
-| Is pose available from `buffalo_l`? | Stage 3 | Else approximate yaw from the five keypoints |
-| Is largest-face enough, or is continuity needed? | Stage 3 | Guarding may make it moot |
+| How aggressive should source rejection be? | Stage 3 | **Open.** Started permissive; needs real upload data to settle |
+| ~~Is pose available from `buffalo_l`?~~ | — | **Settled:** not reliably, so yaw is approximated from the five keypoints |
+| ~~Is largest-face enough, or is continuity needed?~~ | — | **Settled:** enough. Two comparable faces guard the frame anyway, and the identity check on the stabilizer catches a switch the size rule misses |
 | Is a session one face, or one seat? | Stage 4 | Fixed identity makes packing cheaper |
 | Does the scheduler need to know the tier? | Stage 4 | PAYG earns $10/GPU-hour against a 5-Hour Pack's $8.00 |
 | Interruption threshold for hour reversal | Stage 6 | Sets what standby is worth |
-| Does RunPod bill egress? | Stage 0 | 1.4% of a 5-Hour Pack at $0.05/GB |
+| ~~Does RunPod bill egress?~~ | — | **Settled: no.** Documented as "no fees for data ingress or egress". Watch idle per-region network volumes instead |

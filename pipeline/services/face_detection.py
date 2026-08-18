@@ -11,12 +11,13 @@ Model cache priority:
 
 import os
 import threading
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import insightface
 
 from pipeline.config import FaceSwapConfig
 from pipeline.types import Frame, Detection
+from pipeline.services import guards
 from pipeline.logging import emit_status
 
 # RunPod Network Volume model cache path
@@ -70,6 +71,11 @@ class FaceDetector:
         self._analyser: Optional[Any] = None
         self._prepared_size: int = 0
         self._lock = threading.Lock()
+        # What this model pack actually provides, probed on the first real
+        # detection. Several guards silently become no-ops when their input is
+        # absent, and a guard that never fires because its data is missing looks
+        # exactly like one that never had cause to fire.
+        self.capabilities: Dict[str, bool] = {}
 
     # Detector input is square and must be a multiple of 32 for the retinaface
     # backbone's stride. Values outside this range are not useful: below 256 the
@@ -133,6 +139,8 @@ class FaceDetector:
             if not raw_faces:
                 return []
 
+            self._probe_once(raw_faces[0])
+
             detections = []
             for face in raw_faces:
                 det = Detection.from_insightface(face)
@@ -147,20 +155,72 @@ class FaceDetector:
 
     def detect_one(self, frame: Frame) -> Optional[Detection]:
         """
-        Detect a single face in a frame (leftmost face).
+        Detect the primary face in a frame — the largest one.
+
+        Previously the *leftmost* (`min(detections, key=lambda d: d.bbox.x)`),
+        which is not a heuristic but an arbitrary tie-break: nothing about how
+        images are composed makes the smallest x coordinate the subject, so it
+        picked wrong whenever there was a second candidate — someone beside you,
+        someone walking behind, a face on a television. It also meant the choice
+        could change between frames as people moved, feeding the stabilizer
+        alternating identities.
+
+        Largest-face is a better rule but still fails silently when two faces
+        are of comparable size, which is what the guards are for: see
+        `pipeline.services.guards.check_frame`.
 
         Args:
             frame: Input frame as numpy array
 
         Returns:
-            Detection of the leftmost face, or None if no face found
+            Detection of the largest face, or None if no face found
         """
-        detections = self.detect(frame)
+        return self.select_primary(self.detect(frame))
+
+    @staticmethod
+    def select_primary(detections: List[Detection]) -> Optional[Detection]:
+        """
+        Pick the primary face from an existing detection list.
+
+        Separate from `detect_one` so a caller that needs the full list — to
+        count faces for a guard — does not have to run detection twice.
+
+        Ties broken by bounding-box area, then by distance from the frame's left
+        edge, purely so the result is deterministic for identical boxes.
+
+        Args:
+            detections: Faces found in one frame
+
+        Returns:
+            The largest detection, or None if the list is empty
+        """
         if not detections:
             return None
 
-        # Return leftmost face (smallest x coordinate)
-        return min(detections, key=lambda d: d.bbox.x)
+        return max(detections, key=lambda d: (d.bbox.w * d.bbox.h, -d.bbox.x))
+
+    def _probe_once(self, face: Any) -> None:
+        """
+        Record and report what this model pack provides, on first detection.
+
+        Cheap enough to do unconditionally: it is a handful of getattr calls,
+        once per process. Reported at info level because the answer changes how
+        several guards behave and is otherwise invisible — `buffalo_l` bundles
+        `1k3d68.onnx`, whose 3D-landmark model sets `face.pose`, but a pack
+        trimmed with `allowed_modules` would not, and yaw would silently fall
+        back to a keypoint approximation on a different scale.
+
+        Args:
+            face: A raw InsightFace Face from a successful detection
+        """
+        if self.capabilities:
+            return
+
+        self.capabilities = guards.probe_capabilities(face)
+        emit_status(
+            guards.describe_capabilities(self.capabilities),
+            scope='FACE_DETECTOR',
+        )
 
     def clear(self) -> None:
         """Clear the cached model (useful for memory cleanup)."""

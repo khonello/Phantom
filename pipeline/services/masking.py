@@ -27,6 +27,7 @@ import numpy.typing as npt
 
 from pipeline.config import FaceSwapConfig
 from pipeline.types import Frame, Face, Mask, Matrix
+from pipeline.services import guards
 from pipeline.logging import emit_status, emit_warning
 
 # DFL XSeg, distributed by the facefusion project. Segments the face area
@@ -79,6 +80,11 @@ class FaceMasker:
         self._lock = threading.Lock()
         self._white: Optional[Frame] = None
         self._white_shape: Tuple[int, int] = (0, 0)
+        # Fraction of the landmark hull the occluder left in, from the most
+        # recent `build()`. None when occlusion was not evaluated — the model is
+        # missing, or the occluder is switched off. Read by the occlusion guard,
+        # which cannot compute it itself without a second XSeg inference.
+        self.last_coverage: Optional[float] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -105,12 +111,17 @@ class FaceMasker:
         """
         size = aligned.shape[0]
 
-        mask = self._hull_mask(face, matrix, size)
-        mask *= self._valid_mask(matrix, size, frame_shape)
+        hull = self._hull_mask(face, matrix, size)
+        mask: Mask = hull * self._valid_mask(matrix, size, frame_shape)
 
+        self.last_coverage = None
         if self.config.occluder:
             occlusion = self._occlusion_mask(aligned)
             if occlusion is not None:
+                # Measured against the hull alone, not the hull times the valid
+                # region: a face at the frame edge is cropped, not occluded, and
+                # including that term would guard it for the wrong reason.
+                self.last_coverage = guards.hull_coverage(hull, occlusion)
                 mask *= occlusion
 
         # Feather. Blurring a hard-edged mask here plus a second, smaller blur

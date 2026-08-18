@@ -32,9 +32,14 @@ from typing import Any, Dict
 # Look parameters — identical in every preset. Change these to change the look
 # globally; override per-run with --enhancer-weight / --enhance-strength or the
 # set_realism command.
+# What every preset shares. `enhancer_weight` and `enhance_strength` used to live
+# here, on the correct reasoning that a preset must not change how the face
+# looks — but that put them in the wrong place rather than the wrong preset. How
+# much restoration a face needs depends on **what generated it**, not on the
+# frame rate, so they now belong to the model profile in
+# pipeline/services/swapper_models.py. Applied after the preset, which is why
+# nothing here can contradict them.
 _LOOK: Dict[str, Any] = {
-    'enhancer_weight': 0.7,   # CodeFormer fidelity: 0=most restoration, 1=closest to input
-    'enhance_strength': 0.7,  # how much of the restored face to keep
     'grain': True,            # cheap, and the biggest believability win per ms
 }
 

@@ -1,19 +1,49 @@
 """
 Face swapping service for the Phantom pipeline.
 
-Extracted from pipeline/processors/frame/face_swapper.py.
-Provides ONNX-based face swapping without global state.
+Two inference families, selected by `config.swapper_model` and described in
+`pipeline/services/swapper_models.py`:
+
+- **inswapper** — run through InsightFace's own `INSwapper`, which owns the
+  alignment, the `emap` projection of the source embedding, and the crop. This
+  is the incumbent path and is untouched.
+- **hyperswap** — 256px native, run on a plain onnxruntime session here. Same
+  ArcFace alignment template and the same *embedding* source contract, which is
+  the whole reason it can be swapped in without the compositor, masker or guards
+  changing.
+
+Both return the aligned crop plus the affine that produced it, so compositing
+stays where it belongs.
 """
 
 import os
 import threading
 from typing import Any, Optional, Tuple
 
+import cv2
 import insightface
+import numpy as np
 
 from pipeline.config import FaceSwapConfig
 from pipeline.types import Frame, Face
+from pipeline.services import swapper_models
 from pipeline.logging import emit_status, emit_error
+
+# ArcFace 5-point template, normalised to [0, 1]. Multiplied by the crop size at
+# use, so one constant serves 128 and 256 alike.
+#
+# This is exactly InsightFace's `arcface_dst` shifted by +8px in x and divided by
+# 128 — the transform its own `estimate_norm` applies for a 128px crop. Verified
+# equal to facefusion's `arcface_128` to eight decimal places, which is why the
+# two model families produce crops in the same space and the affine convention
+# carries over unchanged.
+_ARCFACE_TEMPLATE = np.array([
+    [0.36167656, 0.40387734],
+    [0.63696719, 0.40235469],
+    [0.50019687, 0.56044219],
+    [0.38710391, 0.72160547],
+    [0.61507734, 0.72034453],
+], dtype=np.float64)
 
 
 class FaceSwapper:
@@ -38,6 +68,13 @@ class FaceSwapper:
         """
         self.config = config
         self._swapper: Optional[Any] = None
+        # Plain onnxruntime session for the non-inswapper families, cached
+        # alongside the input names so they are introspected once rather than
+        # assumed — the same approach masking.py takes with the occluder.
+        self._session: Optional[Any] = None
+        self._session_model: str = ''
+        self._source_input: str = 'source'
+        self._target_input: str = 'target'
         self._lock = threading.Lock()
         # Set once if this InsightFace build cannot return the unpasted swap,
         # so the fallback warning is not repeated on every frame.
@@ -70,6 +107,215 @@ class FaceSwapper:
                         providers=self.config.execution_providers,
                     )
         return self._swapper
+
+    def model(self) -> 'swapper_models.SwapperModel':
+        """
+        The registry entry for the configured model.
+
+        Returns:
+            Spec plus realism profile; falls back to the default on an unknown
+            name rather than failing a session that has already been paid for
+        """
+        return swapper_models.resolve(self.config.swapper_model)
+
+    # ------------------------------------------------------------------
+    # Non-inswapper families (hyperswap): plain onnxruntime
+    # ------------------------------------------------------------------
+
+    def _get_session(self, model: 'swapper_models.SwapperModel') -> Optional[Any]:
+        """
+        Load (downloading if needed) the ONNX session for a non-inswapper model.
+
+        Args:
+            model: Registry entry to load
+
+        Returns:
+            An InferenceSession, or None if the weights could not be obtained
+        """
+        if self._session is not None and self._session_model == model.name:
+            return self._session
+
+        with self._lock:
+            if self._session is not None and self._session_model == model.name:
+                return self._session
+
+            path = self._resolve_named_model(model.filename)
+            if not os.path.isfile(path) and not self._download(model, path):
+                return None
+
+            try:
+                import onnxruntime as ort
+
+                session = ort.InferenceSession(
+                    path, providers=self.config.execution_providers,
+                )
+
+                # Introspected rather than assumed: exports differ in what they
+                # name these, and a wrong key is a KeyError on every frame.
+                names = [i.name for i in session.get_inputs()]
+                self._source_input = next(
+                    (n for n in names if 'source' in n.lower() or 'emb' in n.lower()),
+                    names[0],
+                )
+                self._target_input = next(
+                    (n for n in names if n != self._source_input), names[-1],
+                )
+
+                self._session = session
+                self._session_model = model.name
+                emit_status(
+                    f'Swapper: {model.name} ({model.size}px native, inputs '
+                    f'{self._source_input}/{self._target_input})',
+                    scope='SWAPPER',
+                )
+                return session
+            except Exception as e:
+                emit_error(
+                    f'Failed to load {model.name}: {type(e).__name__}: {e}',
+                    exception=e, scope='SWAPPER',
+                )
+                return None
+
+    @staticmethod
+    def _download(model: 'swapper_models.SwapperModel', path: str) -> bool:
+        """
+        Fetch a model's weights.
+
+        Args:
+            model: Registry entry, supplying the URL
+            path: Where the file should end up
+
+        Returns:
+            True if the file is present afterwards
+        """
+        if not model.url:
+            return False
+
+        megabytes = swapper_models.HYPERSWAP_SIZE_BYTES // (1024 * 1024)
+        emit_status(
+            f'Downloading {model.filename} (~{megabytes} MB)...',
+            scope='SWAPPER',
+        )
+        try:
+            from pipeline.io.ffmpeg import conditional_download
+
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            conditional_download(os.path.dirname(path), [model.url])
+        except Exception as e:
+            emit_error(
+                f'Download failed for {model.filename}: {type(e).__name__}: {e}',
+                exception=e, scope='SWAPPER',
+            )
+            return False
+
+        return os.path.isfile(path)
+
+    def _swap_session(
+        self,
+        model: 'swapper_models.SwapperModel',
+        source: Face,
+        target: Face,
+        frame: Frame,
+    ) -> Optional[Tuple[Frame, Any]]:
+        """
+        Run a non-inswapper model, returning the aligned crop and its affine.
+
+        The source is the **L2-normalised embedding vector**. Worth naming
+        precisely, because two libraries disagree about the word: facefusion's
+        `embedding_norm` is that normalised 512-d vector, while InsightFace's
+        attribute of the same name is a *scalar* magnitude and its vector is
+        called `normed_embedding`. Passing the scalar would produce garbage
+        rather than an error, so this reads the InsightFace name deliberately.
+
+        Unlike inswapper there is no `emap` projection — the normalised
+        embedding is fed straight in.
+
+        Args:
+            model: Registry entry
+            source: Source face carrying the embedding
+            target: Target face whose `kps` drive the alignment
+            frame: Frame to sample the crop from
+
+        Returns:
+            (crop, matrix) in the same convention InsightFace returns, or None
+        """
+        session = self._get_session(model)
+        if session is None:
+            return None
+
+        embedding = getattr(source, 'normed_embedding', None)
+        if embedding is None:
+            emit_error(
+                f'{model.name} needs a normalised source embedding and the '
+                f'source face has none.',
+                scope='SWAPPER',
+            )
+            return None
+
+        kps = getattr(target, 'kps', None)
+        if kps is None or len(kps) != len(_ARCFACE_TEMPLATE):
+            return None
+
+        # Umeyama rather than cv2.estimateAffinePartial2D, which is what
+        # facefusion uses here. The OpenCV estimators are randomized, and
+        # anything that varies frame to frame feeds straight into the shimmer
+        # the compositor exists to remove — same reasoning as
+        # compositor.estimate_similarity, and the same function.
+        from pipeline.processing.compositor import estimate_similarity
+
+        matrix = estimate_similarity(
+            np.asarray(kps, dtype=np.float64),
+            _ARCFACE_TEMPLATE * model.size,
+        )
+        if matrix is None:
+            return None
+
+        matrix = matrix.astype(np.float32)
+        crop = cv2.warpAffine(
+            frame, matrix, (model.size, model.size),
+            borderMode=cv2.BORDER_REPLICATE, flags=cv2.INTER_AREA,
+        )
+
+        mean = np.array(model.mean, dtype=np.float32)
+        deviation = np.array(model.standard_deviation, dtype=np.float32)
+
+        blob = crop[:, :, ::-1].astype(np.float32) / 255.0
+        blob = (blob - mean) / deviation
+        blob = np.expand_dims(blob.transpose(2, 0, 1), axis=0)
+
+        try:
+            output = session.run(None, {
+                self._source_input: np.asarray(
+                    embedding, dtype=np.float32,
+                ).reshape(1, -1),
+                self._target_input: blob,
+            })[0][0]
+        except Exception as e:
+            emit_error(
+                f'{model.name} inference failed: {type(e).__name__}: {e}',
+                exception=e, scope='SWAPPER',
+            )
+            return None
+
+        result = output.transpose(1, 2, 0) * deviation + mean
+        result = np.clip(result, 0.0, 1.0)[:, :, ::-1] * 255.0
+        return result.astype(np.uint8), matrix
+
+    def _resolve_named_model(self, filename: str) -> str:
+        """
+        Resolve a model filename against the same search path as the swapper.
+
+        Args:
+            filename: Weight filename
+
+        Returns:
+            Absolute path, which may not exist yet
+        """
+        if os.path.isdir('/workspace/models'):
+            return os.path.join('/workspace/models', filename)
+
+        package_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return os.path.join(package_dir, 'models', filename)
 
     def _resolve_model_path(self) -> str:
         """
@@ -117,6 +363,18 @@ class FaceSwapper:
             FileNotFoundError: If model not found
             RuntimeError: If swap fails
         """
+        model = self.model()
+        if model.kind != 'inswapper':
+            # These have no pasted form. `swap_aligned` is their only path, and
+            # the caller treats None as "no swap this frame" rather than pasting
+            # the raw frame — which on the live path would be the operator's own
+            # face. See ProcessingPipeline._swap_face.
+            emit_error(
+                f'{model.name} has no pasted fallback; aligned swap is required.',
+                scope='SWAPPER',
+            )
+            return frame
+
         try:
             swapper = self._get_swapper()
             return swapper.get(frame, target, source, paste_back=True)
@@ -149,6 +407,14 @@ class FaceSwapper:
             not support the unpasted form. Callers should fall back to
             `swap()` in that case.
         """
+        model = self.model()
+
+        # Non-inswapper families run on our own session: InsightFace's INSwapper
+        # knows inswapper's emap projection and 128px crop specifically, so it
+        # cannot host them.
+        if model.kind != 'inswapper':
+            return self._swap_session(model, source, target, frame)
+
         if self._aligned_unsupported:
             return None
 
@@ -228,6 +494,8 @@ class FaceSwapper:
         return False
 
     def clear(self) -> None:
-        """Clear the cached model (useful for memory cleanup)."""
+        """Clear the cached models (useful for memory cleanup)."""
         with self._lock:
             self._swapper = None
+            self._session = None
+            self._session_model = ''

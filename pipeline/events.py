@@ -138,6 +138,7 @@ FRAME_READY = 'frame_ready'  # kwargs: frame, seq, capture_ts (perf_counter_ns)
 DETECTION = 'detection'  # kwargs: detection, frame_seq
 FACE_LOST = 'face_lost'  # kwargs: reason
 DROP_RATE = 'drop_rate'  # kwargs: dropped, total, percent
+BATCH_PROGRESS = 'batch_progress'  # kwargs: done, total, percent
 
 # Status updates
 STATUS_CHANGED = 'status_changed'  # kwargs: message, scope (optional)

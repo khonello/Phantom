@@ -20,6 +20,7 @@ space rather than on whole frames, so it does not fit the FrameProcessor
 contract.
 """
 
+import os
 from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple
 
@@ -30,7 +31,7 @@ from pipeline.config import FaceSwapConfig
 from pipeline.types import Frame, Face, Detection, Matrix
 from pipeline.services.face_detection import FaceDetector
 from pipeline.services.face_swapping import FaceSwapper
-from pipeline.services.database import FaceDatabase
+from pipeline.services.database import FaceDatabase, SourceReview
 from pipeline.logging import emit_status, emit_warning
 
 
@@ -75,6 +76,10 @@ class DetectionProcessor(FrameProcessor):
         self.config = config
         self.detector = detector
         self.latest_detections: List[Detection] = []
+        # Every face found, before the primary is selected. The multi-face guard
+        # needs the count, and `latest_detections` cannot carry it: outside
+        # `many_faces` that list is deliberately trimmed to one.
+        self.all_detections: List[Detection] = []
         self._frame_count = 0
         # State-change tracking: None = unknown (first frame), True/False = last known state
         self._face_present: Optional[bool] = None
@@ -94,13 +99,19 @@ class DetectionProcessor(FrameProcessor):
         """
         self._frame_count += 1
         try:
+            # Always the full list, then trim. `detect_one` used to be called
+            # here, which threw the face count away — and the count is what the
+            # multi-face guard is. It costs nothing: `detect_one` ran exactly
+            # this detection and then discarded everything but one result.
+            self.all_detections = self.detector.detect(frame)
             if self.config.many_faces:
-                self.latest_detections = self.detector.detect(frame)
+                self.latest_detections = list(self.all_detections)
             else:
-                det = self.detector.detect_one(frame)
-                self.latest_detections = [det] if det else []
+                primary = self.detector.select_primary(self.all_detections)
+                self.latest_detections = [primary] if primary else []
         except Exception as e:
             emit_warning(f"Detection failed: {e}", scope='DETECTION')
+            self.all_detections = []
             self.latest_detections = []
 
         if self.latest_detections:
@@ -148,25 +159,57 @@ class SwappingProcessor(FrameProcessor):
         self.swapper = swapper
         self.database = database
         self.source_face: Optional[Face] = None
+        # Outcome of the last set_source, kept so the API can report which image
+        # was refused and why rather than a bare failure.
+        self.last_review: Optional[SourceReview] = None
 
     def set_source(self, paths: List[str]) -> bool:
         """
-        Load source face from paths.
+        Validate source images, then load the face from those that passed.
+
+        Guards run *before* any embedding is built, so a rejected photo never
+        contributes to the identity. One wrong pick here is decided once,
+        silently, and then applies to every subsequent frame — which is why this
+        is the one place that refuses input outright rather than degrading.
 
         Args:
             paths: List of image or .npy paths
 
         Returns:
-            True if source loaded successfully
+            True if a source face was built. Note that this is True even when
+            some images were rejected, provided at least one survived; inspect
+            `last_review` for the detail.
         """
         try:
-            self.source_face = self.database.get_source_face(paths)
-            if self.source_face:
-                emit_status(f"Source face loaded from {len(paths)} path(s)", scope='SWAPPER')
-                return True
-            else:
-                emit_warning("No face found in source paths", scope='SWAPPER')
+            review = self.database.review_sources(paths)
+            self.last_review = review
+
+            for path, _ in review.rejected:
+                emit_warning(
+                    f'Source rejected — {os.path.basename(path)}: '
+                    f'{review.messages.get(path, "")}',
+                    scope='SWAPPER',
+                )
+
+            if not review.usable:
+                emit_warning(
+                    f'No usable source face in {len(paths)} image(s)',
+                    scope='SWAPPER',
+                )
+                self.source_face = None
                 return False
+
+            self.source_face = self.database.get_source_face(review.accepted)
+            if self.source_face is None:
+                emit_warning('No face found in source paths', scope='SWAPPER')
+                return False
+
+            emit_status(
+                f'Source face loaded from {len(review.accepted)} of '
+                f'{len(paths)} image(s)',
+                scope='SWAPPER',
+            )
+            return True
         except Exception as e:
             emit_warning(f"Failed to load source: {e}", scope='SWAPPER')
             return False

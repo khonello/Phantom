@@ -28,13 +28,19 @@ isolation. When changing anything here, judge it on real footage, not stills.
 Development is focused on the **live call** path; batch follows and reuses the
 same compositor.
 
+**Next actions live in [docs/PENDING_WORK.md](docs/PENDING_WORK.md)** — a runbook
+from starting the pod through to the outstanding implementation work.
+[docs/TODO.md](docs/TODO.md) remains the backlog.
+
 - Working: realtime stream, aligned-space compositing, RunPod deployment,
-  desktop LIVE mode, batch **image**
-- **Not implemented**: batch **video** — `ProcessingPipeline._process_target_batch()`
-  handles images only. The FFmpeg helpers exist in `pipeline/io/ffmpeg.py` but are
-  not wired in. This also breaks desktop VIDEO mode and the CI end-to-end test.
+  desktop LIVE mode, batch **image** and **video**, desktop VIDEO mode
 - Not exposed: realism knobs have no desktop UI (API/CLI only)
 - No automated tests exist
+- Batch video is wired but has only been exercised against a stubbed swapper —
+  the FFmpeg plumbing, frame ordering, audio sync, cancellation and cleanup are
+  verified; a real run with the models in the loop has not been done locally
+- Large-file transfer is still the gap in batch: `upload_source` is base64
+  inside a single JSON message, fine for a face and unusable for a 2 GB video
 
 ## Quick Commands
 
@@ -46,8 +52,19 @@ same compositor.
 
 ### Development
 - **Lint**: `flake8 pipeline.py pipeline desktop`
-- **Type check**: `mypy pipeline desktop`
-- **Test**: `python pipeline.py -s=.github/examples/source.jpg -t=.github/examples/target.mp4 -o=.github/examples/output.mp4`
+- **Type check**: `mypy pipeline desktop` (CI runs `mypy pipeline` only)
+- **Unit tests**: `python -m pytest tests/ -q` — ~40s, no GPU or model weights
+  needed (the ML layer is stubbed in `tests/conftest.py`)
+- **End-to-end**: `python pipeline.py -s=.github/examples/source.jpg -t=.github/examples/target.mp4 -o=/tmp/output.mp4`
+
+### Measurement
+- **Cold start**: `python runpod/orchestrator.py start` prints a phase breakdown
+  (provision / setup / pip / model load), labelled warm or empty volume
+- **Latency budget**: reported per preset when a stream stops — p50/p95/p99 per
+  stage against the frame deadline, with a HOLDS/MISSES verdict
+- **Guard calibration**: `python pipeline.py --stream --guard-observe --guard-report r.json`
+- **Realism**: `python pipeline.py --stream --debug-frames clip/` then
+  `python tools/compare_frames.py clip/ [--against clip2/]`
 
 ### Install Dependencies
 - **CPU (local dev)**: `pip install -r requirements-pipeline-cpu.txt`
@@ -70,7 +87,8 @@ same compositor.
 - **pipeline/services/enhancement.py**: `Enhancer` (CodeFormer ONNX, or GFPGAN)
 - **pipeline/services/face_tracking.py**: `LandmarkStabilizer` (EMA on face landmarks)
 - **pipeline/services/masking.py**: `FaceMasker` (landmark hull + optional XSeg occlusion)
-- **pipeline/services/database.py**: `FaceDatabase` (embedding cache & averaging)
+- **pipeline/services/database.py**: `FaceDatabase` (embedding cache, averaging, source review)
+- **pipeline/services/guards.py**: Input guards — pure predicates plus `GuardResult`
 
 **Processing Pipeline:**
 - **pipeline/processing/frame_processor.py**: `FrameProcessor` ABC + implementations
@@ -232,6 +250,139 @@ that varies frame to frame feeds straight back into shimmer.
 | `grain` | `True` | Matches sensor noise on the composited face |
 | `occluder` | `True` | XSeg mask so hands/mics are not overpainted |
 
+### Swap models
+`pipeline/services/swapper_models.py` is a registry of swap models, each
+carrying both a **spec** (kind, alignment template, native size, normalisation,
+URL) and a **look profile** (`enhancer_weight`, `enhance_strength`,
+`aligned_min`).
+
+| | inswapper_128 | hyperswap_1a/1b/1c_256 |
+|---|---|---|
+| Source input | ArcFace embedding via `emap` | ArcFace embedding, direct |
+| Template | `arcface_128` | `arcface_128` (identical) |
+| Native size | 128 | 256 |
+| `enhance_strength` | 0.7 | 0.5 |
+| `enhancer_weight` | 0.7 | 0.8 |
+| `aligned_min` | 128 | 256 |
+
+The appearance knobs used to live in `PRESETS._LOOK`, identical in every preset.
+That reasoning was right (a preset picks compute, not looks) but the location
+was wrong: **how much restoration a face needs depends on what generated it**,
+not on the frame rate. Ownership is now:
+
+    quality preset  ->  compute     (capture, det_size, aligned ceiling, EMA)
+    model profile   ->  appearance  (restoration burden, aligned floor)
+    CLI / env       ->  explicit override of either
+    set_realism     ->  live A/B on top
+
+Select with `--swapper-model`, `SWAPPER_MODEL`, or `set_realism` at runtime —
+switching applies the new profile, drops the session and resets temporal state.
+
+Both registered families take an **embedding**, which is what preserves
+multi-photo averaging, `.npy` embeddings and the identity-outlier guard.
+`uniface_256` and `blendswap_256` take a source *image* and are deliberately
+absent for that reason. Both use the same alignment template, which is why
+switching needs no change to the compositor, masker or guards.
+
+`FaceSwapper` runs inswapper through InsightFace's `INSwapper` (which owns the
+`emap` projection) and everything else on its own onnxruntime session. Note the
+naming trap recorded there: facefusion's `embedding_norm` is the normalised
+512-d *vector*, while InsightFace's attribute of that name is a *scalar* — the
+code reads `normed_embedding` deliberately.
+
+Weights: 384 MB each, pinned to release tag `models-3.3.0` (verified; `3.0.0`
+and `3.4.0` both 404 for these files).
+
+### Input guards
+`pipeline/services/guards.py` refuses inputs that would produce a wrong swap
+instead of swapping them badly — confidently wrong output is worse than none, and
+a stranger's face swapped in *looks like it worked*. See
+[docs/INPUT_GUARDS.md](docs/INPUT_GUARDS.md).
+
+Two call sites, differing in whether a human is present to be told:
+
+- **Source images, at upload** — `FaceDatabase.review_sources` rejects multi-face,
+  no-face, too-small (<110px shorter side), blurred, extreme-pose (>±35° yaw) and
+  identity-outlier images, reporting **which** image and **why** per file.
+  Outliers use leave-one-out cosine against the mean of *the others*, three
+  images minimum; two that disagree are both refused, since there is no majority
+  to identify the intruder.
+- **Runtime, per frame** — `guards.check_frame` guards multi-face, low
+  confidence, small faces (<80px), extreme pose; occlusion is checked from the
+  coverage `FaceMasker` records during the XSeg pass it already runs.
+
+A guarded frame emits **the last good swapped frame, unchanged** — nothing drawn
+on it, since it reaches every participant on the call. Guards fail closed, and
+never update temporal state. `FaceCompositor.composite` returns `None` rather than
+the untouched frame when it cannot produce a swap: on the live path the untouched
+frame is the operator's real face. Batch instead passes the original through,
+because a batch target is a file the operator supplied, not their camera.
+
+`_run_vcam` holds and re-sends the last frame when the queue empties, so the
+virtual camera never shows the raw camera and never shows nothing — covering hour
+expiry, session end, worker death and crashes alike.
+
+Yaw prefers `face.pose` — `buffalo_l` bundles `1k3d68.onnx`, which computes it as
+a side effect of detection — and falls back to a keypoint approximation on packs
+that lack it. The two are not on the same scale, so which was used is recorded.
+
+Thresholds are `guard_*` fields on `FaceSwapConfig`, settable via `set_realism`
+(clamped, not rejected). `guards` disables the runtime guards wholesale;
+`many_faces` bypasses them.
+
+### Execution providers — fails closed
+ONNX Runtime does not error when a provider cannot initialise; it silently uses
+CPU. Every model that decides how the output looks is ONNX (swapper, CodeFormer,
+XSeg), so that fallback is seconds per frame, not a degraded live call — and on a
+rented GPU it is a bill with nothing usable attached.
+
+`pipeline/services/execution.py::verify` runs after `_warm_up_models` and
+**raises `ExecutionProviderError`** if an accelerator was requested and the
+sessions are not using it. It catches both shapes: the provider missing from the
+build entirely, and a single model falling back while others did not.
+`--execution-provider cpu` is the supported way to run without one and does not
+raise.
+
+Both deploy paths also check at build/setup time: the Dockerfile fails the build
+if `libcudnn.so.9` will not load, and `runpod/startup.sh` exits non-zero after
+installing cuDNN if it still cannot. See runpod/TROUBLESHOOTING.md section 5b —
+this shipped broken once and was found by reading, not by failing.
+
+**Do not downgrade any of these three to a warning.** Stopping is the requested
+behaviour, not a conservative default: a pod on CPU bills a full GPU hour and
+produces unusable output while appearing to work, which defeats the reason for
+renting it. ONNX Runtime already emits a warning, and that warning is exactly
+what let this ship broken — the value here is that it halts.
+
+### Guard calibration
+Nine thresholds were chosen without data. `--guard-observe` evaluates and records
+every guard **without any of them acting**, because a session that enforces
+cannot measure itself: a guarded frame emits a held frame and stops being a
+sample of what the camera was doing. `--guard-report PATH` writes the JSON.
+
+`GuardTelemetry` records the measured value behind each guard, not just the
+verdict, and reports a distribution with the percentage that would fail and the
+margin to the threshold — so a session returns a number per knob instead of "it
+guarded a lot". A negative margin means the threshold sits inside normal
+operating range and will fire on ordinary frames.
+
+`FaceDetector` probes the model pack on first detection and logs which `Face`
+attributes exist. Guards silently become no-ops when their input is missing — no
+`normed_embedding` means no identity reset, no `det_score` means no confidence
+guard — and that is indistinguishable from a guard that never had cause to fire.
+
+Three thresholds can make things actively worse if mis-set, all invisible without
+this: `guard_min_coverage` (unknown what XSeg reads on a clear face),
+`guard_identity_sim`, and `guard_min_confidence` (0.5 against a detector
+threshold of 0.35).
+
+**Realism protection in the stabilizer.** An identity change needs 3 low
+readings within the last 6 frames before smoothing is dropped — a single
+motion-blurred embedding must not reset the landmark EMA mid-movement, which is
+when shimmer is most visible. A window rather than a consecutive run, since
+alternating detections would zero a consecutive counter every other frame. See
+`LandmarkStabilizer._IDENTITY_CONFIRM`.
+
 Three ways to set them:
 - **Quality preset** — the desktop dropdown; see the table above.
 - **CLI / env** — `--enhancer-model`, `--enhancer-weight`, `--enhance-strength`,
@@ -339,8 +490,9 @@ back to the other backend or off — rather than failing.
 - `pipeline/services/face_swapping.py`: `FaceSwapper` ONNX model orchestration
 - `pipeline/services/enhancement.py`: `Enhancer` face restoration, CodeFormer (ONNX) or GFPGAN backend
 - `pipeline/services/masking.py`: `FaceMasker` landmark hull + optional XSeg occlusion
-- `pipeline/services/face_tracking.py`: `LandmarkStabilizer` EMA on kps/106 landmarks
-- `pipeline/services/database.py`: `FaceDatabase` embedding cache & averaging
+- `pipeline/services/face_tracking.py`: `LandmarkStabilizer` EMA on kps/106 landmarks, resets on identity change
+- `pipeline/services/database.py`: `FaceDatabase` embedding cache, averaging, `review_sources`
+- `pipeline/services/guards.py`: Source and runtime input guards, threshold validation
 
 ### Processing Pipeline
 - `pipeline/processing/pipeline.py`: `ProcessingPipeline` orchestrator (batch & stream modes)

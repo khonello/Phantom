@@ -29,6 +29,7 @@ from pipeline.processing.pipeline import ProcessingPipeline
 from pipeline.events import BUS
 from pipeline.logging import emit_status
 from pipeline.api.schema import PRESETS
+from pipeline.services import swapper_models
 
 warnings.filterwarnings('ignore', category=FutureWarning, module='insightface')
 warnings.filterwarnings('ignore', category=UserWarning, module='torchvision')
@@ -100,6 +101,11 @@ def parse_args() -> None:
     # a flag or environment variable explicitly overrides it. Environment
     # defaults exist because the RunPod pod is configured through .env rather
     # than a command line.
+    program.add_argument('--swapper-model',
+                        help='face swap model (also selects its realism profile)',
+                        dest='swapper_model',
+                        choices=list(swapper_models.names()),
+                        default=os.environ.get('SWAPPER_MODEL'))
     program.add_argument('--enhancer-model', help='face restoration backend',
                         dest='enhancer_model', choices=['codeformer', 'gfpgan'],
                         default=os.environ.get('ENHANCER_MODEL'))
@@ -125,6 +131,16 @@ def parse_args() -> None:
                         dest='debug_frames_stride', type=int, default=_env_int('DEBUG_FRAMES_STRIDE'))
     program.add_argument('--debug-frames-limit', help='stop after N frame pairs (0 = unlimited)',
                         dest='debug_frames_limit', type=int, default=_env_int('DEBUG_FRAMES_LIMIT'))
+    program.add_argument('--guard-observe',
+                        help='evaluate and record input guards without acting on them '
+                             '(calibration: a session that enforces cannot measure)',
+                        dest='guard_observe', action='store_true',
+                        default=_env_bool('GUARD_OBSERVE') or None)
+    program.add_argument('--guard-report',
+                        help='write guard calibration telemetry as JSON to this path',
+                        dest='guard_report', default=os.environ.get('GUARD_REPORT'))
+    program.add_argument('--no-guards', help='disable runtime input guards entirely',
+                        dest='guards', action='store_false', default=_env_bool('GUARDS'))
     program.add_argument('--input-url', help='network stream URL (RTSP/RTMP/HTTP)',
                         dest='input_url', default=None)
     program.add_argument('--control-port', help='API server port',
@@ -161,6 +177,10 @@ def parse_args() -> None:
     if args.quality in PRESETS:
         CONFIG.apply_preset(args.quality)
 
+    # Then the model's realism profile. The preset owns compute; the model owns
+    # appearance. The explicit flags below override either.
+    CONFIG.apply_model_profile(args.swapper_model or CONFIG.swapper_model)
+
     for field, value in (
         ('tracker', args.tracker),
         ('alpha', args.alpha),
@@ -178,6 +198,9 @@ def parse_args() -> None:
         ('debug_frames_dir', args.debug_frames_dir),
         ('debug_frames_stride', args.debug_frames_stride),
         ('debug_frames_limit', args.debug_frames_limit),
+        ('guards', args.guards),
+        ('guard_observe', args.guard_observe),
+        ('guard_report', args.guard_report),
     ):
         if value is not None:
             CONFIG.set(field, value)

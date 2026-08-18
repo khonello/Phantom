@@ -1,0 +1,9 @@
+# CI / testing dependencies.
+#
+# The end-to-end test runs a real CPU batch swap, so it needs the full pipeline
+# runtime rather than a reduced set. Referenced rather than duplicated so CI
+# cannot drift from what a local CPU install gets.
+#
+# Linting and type checking are installed directly by the lint job; they are
+# deliberately not here, so the test job does not pay for them.
+-r requirements-pipeline-cpu.txt

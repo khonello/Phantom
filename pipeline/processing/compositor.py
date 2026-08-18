@@ -31,6 +31,7 @@ from pipeline.config import FaceSwapConfig
 from pipeline.types import Frame, Face, Mask, Matrix, Points
 from pipeline.services.enhancement import Enhancer, CROP_SIZE
 from pipeline.services.masking import FaceMasker
+from pipeline.services import guards
 from pipeline.logging import emit_warning
 
 # FFHQ 5-point alignment template, normalized to [0, 1]. Restoration models
@@ -257,7 +258,7 @@ class FaceCompositor:
         face: Face,
         swapped: Frame,
         matrix: Matrix,
-    ) -> Frame:
+    ) -> Optional[Frame]:
         """
         Composite a swapped face crop into the frame.
 
@@ -268,8 +269,15 @@ class FaceCompositor:
             matrix: 2x3 affine mapping frame space -> the swapper's crop
 
         Returns:
-            A new frame with the face composited in. Returns `frame`
-            unchanged if compositing fails.
+            A new frame with the face composited in, or **None** if no swapped
+            frame could be produced — the occlusion guard refused it, or
+            compositing failed.
+
+            None rather than the untouched frame, because on the live path the
+            untouched frame is the operator's real face, and emitting that is the
+            exact exposure the guards exist to prevent. What to show instead is
+            the caller's decision: live holds the last good frame, batch passes
+            the original through.
         """
         try:
             return self._composite_impl(frame, face, swapped, matrix)
@@ -278,7 +286,10 @@ class FaceCompositor:
                 f'Compositing failed: {type(e).__name__}: {e}',
                 scope='COMPOSITOR',
             )
-            return frame
+            # Fail closed. Temporal state may be half-updated, so drop it rather
+            # than smooth the next frame against it.
+            self.reset()
+            return None
 
     def _composite_impl(
         self,
@@ -286,7 +297,7 @@ class FaceCompositor:
         face: Face,
         swapped: Frame,
         matrix: Matrix,
-    ) -> Frame:
+    ) -> Optional[Frame]:
         """Implementation of `composite`."""
         size = self._aligned_size(matrix, swapped.shape[0])
 
@@ -296,6 +307,18 @@ class FaceCompositor:
         aligned_matrix = (matrix.astype(np.float32) * scale)
 
         real = cv2.warpAffine(frame, aligned_matrix, (size, size))
+
+        # Built before restoration and smoothing, not after, so the occlusion
+        # guard can refuse the frame before anything mutates temporal state. The
+        # mask depends only on the face, the affine and the real crop, so this is
+        # the same mask it was when it came later.
+        mask = self.masker.build(
+            face, aligned_matrix, real, (frame.shape[0], frame.shape[1]),
+        )
+
+        if not guards.coverage_ok(self.config, self.masker.last_coverage):
+            return None
+
         fake = cv2.resize(swapped, (size, size), interpolation=cv2.INTER_CUBIC)
 
         if self.config.enhance:
@@ -306,10 +329,6 @@ class FaceCompositor:
         # would blend between different people.
         if not self.config.many_faces:
             fake = self._smooth(fake, real)
-
-        mask = self.masker.build(
-            face, aligned_matrix, real, (frame.shape[0], frame.shape[1]),
-        )
 
         if self.config.color_correction:
             fake = self._match_color(fake, real, mask)
@@ -340,21 +359,30 @@ class FaceCompositor:
             Even working resolution, within [_ALIGNED_MIN, config ceiling].
         """
         requested = int(getattr(self.config, 'aligned_size', 256) or 256)
-        ceiling = max(self._ALIGNED_MIN, min(self._ALIGNED_MAX, requested))
+        # The floor comes from the model: compositing a face below the swapper's
+        # native output size discards detail the model already produced. A 128px
+        # model can legitimately drop to 128 for a distant face; a 256px one
+        # cannot without wasting half of what it generated.
+        floor = max(
+            self._ALIGNED_MIN,
+            int(getattr(self.config, 'aligned_min', self._ALIGNED_MIN) or self._ALIGNED_MIN),
+        )
+        floor = min(floor, self._ALIGNED_MAX)
+        ceiling = max(floor, min(self._ALIGNED_MAX, requested))
 
         # A similarity transform's linear part scales area by its determinant,
         # so the face's extent in frame is the crop size divided by that scale.
         scale = float(np.sqrt(abs(float(np.linalg.det(matrix[:, :2])))))
         extent = (crop_size / scale) if scale > 1e-6 else float(ceiling)
-        target = float(np.clip(extent, self._ALIGNED_MIN, ceiling))
+        target = float(np.clip(extent, floor, ceiling))
 
         current = self._working_size
-        if current is not None and self._ALIGNED_MIN <= current <= ceiling:
+        if current is not None and floor <= current <= ceiling:
             if abs(target - current) <= current * self._ALIGNED_HYSTERESIS:
                 return current
 
-        steps = [s for s in self._ALIGNED_STEPS if self._ALIGNED_MIN <= s <= ceiling]
-        chosen = min(steps or [self._ALIGNED_MIN], key=lambda s: abs(s - target))
+        steps = [s for s in self._ALIGNED_STEPS if floor <= s <= ceiling]
+        chosen = min(steps or [floor], key=lambda s: abs(s - target))
 
         self._working_size = chosen
         return chosen

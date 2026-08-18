@@ -69,7 +69,7 @@ import socket
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import requests
 
@@ -100,11 +100,125 @@ _POD_NAME = "phantom"
 _GRAPHQL_URL = "https://api.runpod.io/graphql"
 
 # Remote paths (on the pod, under /workspace network volume) — SSH mode only
+# Pipeline settings forwarded from the local .env into the pod environment, so
+# `orchestrator.py start` produces a configured pipeline rather than a default
+# one. Every name here is read by pipeline/core.py as an argparse default.
+#
+# Deliberately a list rather than "forward everything": the pod is a different
+# machine, and blanket-forwarding would send local paths and secrets that mean
+# nothing there.
+_FORWARDED_ENV = (
+    # Model selection and realism
+    "SWAPPER_MODEL", "ENHANCER_MODEL", "ENHANCER_WEIGHT", "ENHANCE_STRENGTH",
+    "ALIGNED_SIZE", "TEMPORAL_ALPHA", "COLOR_STRENGTH",
+    "ENHANCE", "GRAIN", "OCCLUDER",
+    # Guards and their calibration
+    "GUARDS", "GUARD_OBSERVE", "GUARD_REPORT",
+    # Measurement
+    "DEBUG_FRAMES_DIR", "DEBUG_FRAMES_STRIDE", "DEBUG_FRAMES_LIMIT",
+    "LOG_LEVEL",
+    # Batch scratch location, so a long video does not fill the container disk
+    "PHANTOM_TEMP_DIR",
+)
+
 _REMOTE_PHANTOM_DIR = "/workspace/Phantom"
 _REMOTE_VENV_PYTHON = "/workspace/venv/bin/python"
 _REMOTE_STARTUP = "{}/runpod/startup.sh".format(_REMOTE_PHANTOM_DIR)
 _REMOTE_PIPELINE = "{}/pipeline.py".format(_REMOTE_PHANTOM_DIR)
 _PIPELINE_LOG = "/workspace/phantom-pipeline.log"
+
+
+class BootTimer:
+    """
+    Phase-by-phase timing for a cold start.
+
+    Stage 1 of the implementation plan calls time-to-first-frame "the only
+    number that still matters", and nobody has one. A stopwatch gives the total;
+    this gives the breakdown, which is the difference between "cold start is
+    slow" and "pip is 80% of it, so bake an image" — a decision the total alone
+    cannot support.
+
+    Phases nest: the coarse ones are measured here, and `startup.sh` reports its
+    own inner phases as `PHASE <name> <seconds>` lines in the SSH transcript,
+    which `absorb` picks up. Neither side has to agree on anything but that
+    prefix.
+    """
+
+    def __init__(self, label: str) -> None:
+        self.label = label
+        self.start = time.time()
+        self.phases: List[Tuple[str, float]] = []
+        self.volume_state = "unknown"
+        self._current: Optional[str] = None
+        self._t0 = self.start
+
+    def phase(self, name: str) -> None:
+        """Close the running phase, if any, and begin `name`."""
+        now = time.time()
+        if self._current:
+            self.phases.append((self._current, now - self._t0))
+        self._current = name
+        self._t0 = now
+        if name:
+            print("\n[phase] {}".format(name))
+
+    def absorb(self, transcript: str) -> None:
+        """
+        Take inner phase timings out of a remote script's output.
+
+        Replaces the coarse phase they occurred inside, so the breakdown does
+        not double-count: `remote-setup` is exactly the sum of what startup.sh
+        reported, and showing both would make the total meaningless.
+        """
+        inner: List[Tuple[str, float]] = []
+        for line in transcript.splitlines():
+            line = line.strip()
+            if line.startswith("PHASE "):
+                parts = line.split()
+                if len(parts) == 3 and parts[1] != "total":
+                    try:
+                        inner.append(("  " + parts[1], float(parts[2])))
+                    except ValueError:
+                        pass
+            elif line.startswith("VOLUME "):
+                self.volume_state = line.split()[-1]
+
+        if not inner:
+            return
+
+        expanded: List[Tuple[str, float]] = []
+        for name, seconds in self.phases:
+            expanded.append((name, seconds))
+            if name == "remote-setup":
+                expanded.extend(inner)
+        self.phases = expanded
+
+    def report(self) -> None:
+        """Print the breakdown, slowest phase last so it is the parting thought."""
+        self.phase("")
+        total = time.time() - self.start
+
+        print("\n" + "=" * 58)
+        print("{} — {:.0f}s total, volume: {}".format(
+            self.label, total, self.volume_state))
+        print("=" * 58)
+
+        for name, seconds in self.phases:
+            share = (seconds / total * 100.0) if total > 0 else 0.0
+            bar = "#" * int(round(share / 4))
+            # Indented names are inner phases already counted in their parent.
+            marker = " " if name.startswith("  ") else "*"
+            print("{} {:<22} {:>6.1f}s  {:>5.1f}%  {}".format(
+                marker, name.strip(), seconds, share, bar))
+
+        print("-" * 58)
+        print("{} {:<22} {:>6.1f}s".format("*", "total", total))
+        outer = [p for p in self.phases if not p[0].startswith("  ")]
+        if outer:
+            worst = max(outer, key=lambda p: p[1])
+            print("\nSlowest phase: {} ({:.0f}s, {:.0f}% of total)".format(
+                worst[0], worst[1], worst[1] / total * 100.0 if total else 0))
+        print("Rows marked * are exclusive; indented rows break down the row above.")
 
 
 def _get_deploy_mode() -> str:
@@ -632,6 +746,14 @@ def _deploy_new_pod(mode: str) -> str:
                     "RUNPOD_MAX_UPTIME": os.getenv("RUNPOD_MAX_UPTIME", "120"),
                     "RUNPOD_STOP_WARNING": os.getenv("RUNPOD_STOP_WARNING", "5"),
                 }
+                # Forward whatever pipeline settings are set locally. Without
+                # this the pipeline the orchestrator auto-starts runs on stock
+                # defaults, and configuring a run means SSHing in and restarting
+                # it by hand — which is most of a measurement session.
+                for key in _FORWARDED_ENV:
+                    value = os.getenv(key)
+                    if value:
+                        pod_env[key] = value
                 create_kwargs = dict(
                     name=_POD_NAME,
                     image_name=image,
@@ -739,8 +861,17 @@ def _wait_for_pipeline_tcp(ws_address: str) -> None:
 
 # ── SSH helpers (development mode) ────────────────────────────────────────────
 
-def _require_paramiko() -> "module":  # type: ignore[name-defined]
-    """Lazy-import paramiko so Docker mode never needs it installed."""
+def _require_paramiko() -> Any:
+    """
+    Lazy-import paramiko so Docker mode never needs it installed.
+
+    Returns:
+        The paramiko module
+
+    Note the return type is `Any` rather than the string "module", which is not
+    a name that exists at runtime or in typing — flake8 reported it as F821 and
+    it only ever type-checked because of the ignore comment beside it.
+    """
     try:
         import paramiko
         return paramiko
@@ -836,7 +967,7 @@ def _open_shell(client: object) -> object:
     return channel
 
 
-def _shell_run(channel: object, command: str, label: str) -> None:
+def _shell_run(channel: object, command: str, label: str) -> str:
     """Send a command through an interactive shell session, stream output, check exit code.
 
     Appends a sentinel + exit-code echo after the command so we know when
@@ -914,8 +1045,13 @@ def _shell_run(channel: object, command: str, label: str) -> None:
         print("ERROR: '{}' failed (exit {}).".format(label, exit_code))
         sys.exit(1)
 
+    # Returned so callers can mine it. startup.sh reports its own phase timings
+    # as `PHASE <name> <seconds>` lines, which is how the cold-start breakdown
+    # gets past the coarse "remote-setup took four minutes".
+    return buf
 
-def _ssh_setup_and_start(ssh_address: str, key_path: str) -> None:
+
+def _ssh_setup_and_start(ssh_address: str, key_path: str, timer: Optional["BootTimer"] = None) -> None:
     """
     SSH into the pod, clone repo if missing, run startup.sh, start pipeline via nohup.
 
@@ -987,7 +1123,9 @@ def _ssh_setup_and_start(ssh_address: str, key_path: str) -> None:
             )
 
         # Run startup.sh — installs ffmpeg, creates venv on first run
-        _shell_run(shell, "bash {}".format(_REMOTE_STARTUP), "startup")
+        transcript = _shell_run(shell, "bash {}".format(_REMOTE_STARTUP), "startup")
+        if timer is not None:
+            timer.absorb(transcript)
 
         # Kill any leftover pipeline process from a previous run
         _shell_run(
@@ -997,8 +1135,14 @@ def _ssh_setup_and_start(ssh_address: str, key_path: str) -> None:
         )
 
         # Start pipeline with nohup (no tmux dependency, survives SSH disconnect)
+        # Sourced explicitly for the same reason startup.sh does it: these are
+        # the settings that decide what the session runs as, and inheriting
+        # them through .bashrc is a convention rather than a guarantee. Each
+        # _shell_run executes in a subshell, so this has to be part of the
+        # command that actually launches the pipeline.
         pipeline_cmd = (
-            "nohup {python} {pipeline} --execution-provider cuda"
+            "[ -f /etc/rp_environment ] && . /etc/rp_environment;"
+            " nohup {python} {pipeline} --execution-provider cuda"
             " > {log} 2>&1 &"
         ).format(
             python=_REMOTE_VENV_PYTHON,
@@ -1014,15 +1158,26 @@ def _ssh_setup_and_start(ssh_address: str, key_path: str) -> None:
 
 # ── Commands ───────────────────────────────────────────────────────────────────
 
-def _boot_pod(active_pod_id: str, mode: str) -> None:
+def _boot_pod(active_pod_id: str, mode: str, timer: Optional["BootTimer"] = None) -> None:
     """Shared boot sequence: wait for ports → setup → wait for pipeline → update .env."""
     if mode == "ssh":
+        if timer:
+            timer.phase("wait-for-ssh")
         ssh_address, ws_address = _wait_for_ports_ssh(active_pod_id)
         key_path = os.getenv("RUNPOD_SSH_KEY_PATH", "~/.ssh/id_ed25519")
-        _ssh_setup_and_start(ssh_address, key_path)
+        if timer:
+            timer.phase("remote-setup")
+        _ssh_setup_and_start(ssh_address, key_path, timer)
     else:
+        if timer:
+            timer.phase("wait-for-container")
         ws_address = _wait_for_port_docker(active_pod_id)
 
+    # Everything before this is the machine getting ready; this phase is the
+    # models loading, which is the part no image bake can remove while the
+    # weights live on the network volume.
+    if timer:
+        timer.phase("pipeline-ready")
     _wait_for_pipeline(ws_address)
 
     # Proxy URLs use wss:// (port 443); direct IPs use ws://
@@ -1039,8 +1194,12 @@ def cmd_start() -> None:
     """Deploy a fresh pod and boot it. Always creates a new pod."""
     mode = _get_deploy_mode()
     print("Deploy mode: {}".format(mode))
+
+    timer = BootTimer("Cold start ({})".format(mode))
+    timer.phase("provision")
     active_pod_id = _deploy_new_pod(mode)
-    _boot_pod(active_pod_id, mode)
+    _boot_pod(active_pod_id, mode, timer)
+    timer.report()
 
 
 def cmd_resume(pod_id: str) -> None:
@@ -1053,6 +1212,9 @@ def cmd_resume(pod_id: str) -> None:
         print("ERROR: Pod {} not found.".format(pod_id))
         sys.exit(1)
 
+    timer = BootTimer("Resume ({})".format(mode))
+    timer.phase("resume")
+
     print("Resuming pod {}...".format(pod_id))
     try:
         runpod.resume_pod(pod_id, gpu_count=1)
@@ -1060,7 +1222,8 @@ def cmd_resume(pod_id: str) -> None:
         print("ERROR: Resume failed: {}".format(exc))
         sys.exit(1)
 
-    _boot_pod(pod_id, mode)
+    _boot_pod(pod_id, mode, timer)
+    timer.report()
 
 
 def cmd_stop(pod_id: str) -> None:

@@ -12,18 +12,40 @@ Responsibilities:
 - Manage I/O sources and sinks
 """
 
+import os
 import queue
 import threading
 import time
-from typing import Any, Optional, Tuple, Union
+from typing import Any, List, Optional, Tuple, Union
 
 import cv2
 import numpy as np
 
 from pipeline.config import FaceSwapConfig
 from pipeline.types import Frame
-from pipeline.events import FRAME_READY, DETECTION, PIPELINE_STARTED, PIPELINE_STOPPED
+from pipeline.events import (
+    BATCH_PROGRESS,
+    FRAME_READY,
+    DETECTION,
+    PIPELINE_STARTED,
+    PIPELINE_STOPPED,
+)
 from pipeline.logging import emit_status, emit_error, get_logger
+from pipeline.io.ffmpeg import (
+    clean_temp,
+    create_video,
+    detect_fps,
+    extract_frames,
+    get_temp_frame_paths,
+    get_temp_output_path,
+    has_audio,
+    has_image_extension,
+    is_image,
+    is_video,
+    move_temp,
+    reset_temp,
+    restore_audio,
+)
 
 from pipeline.services.face_detection import FaceDetector
 from pipeline.services.face_swapping import FaceSwapper
@@ -31,6 +53,9 @@ from pipeline.services.enhancement import Enhancer
 from pipeline.services.database import FaceDatabase
 from pipeline.services.masking import FaceMasker
 from pipeline.services.face_tracking import LandmarkStabilizer
+from pipeline.services import guards
+from pipeline.services import execution
+from pipeline.services.latency import LatencyBudget
 
 from pipeline.processing.compositor import FaceCompositor
 from pipeline.processing.frame_processor import (
@@ -60,6 +85,9 @@ class ProcessingPipeline:
 
     # Frames between per-stage timing reports (debug log level only).
     _TIMING_INTERVAL = 30
+
+    # Minimum seconds between batch progress reports.
+    _PROGRESS_INTERVAL = 1.0
 
     def __init__(self, config: FaceSwapConfig, bus: Any) -> None:
         """
@@ -91,6 +119,16 @@ class ProcessingPipeline:
         # State
         self._running = False
         self._stop_event = threading.Event()
+
+        # Guard state. `_last_good_frame` is what a guarded frame emits — the
+        # last frame that was actually swapped, held unchanged. `_guard_reason`
+        # is the currently-reported reason, so a guard that holds for seconds is
+        # reported once rather than every frame.
+        self._last_good_frame: Optional[Frame] = None
+        self._guard_reason: str = ''
+        self._guard_starved = 0
+        self._telemetry = guards.GuardTelemetry()
+        self._latency = LatencyBudget()
 
         # Set by WebSocketAPIServer to enable push mode: desktop sends JPEG
         # frames via WebSocket instead of the pipeline capturing a local device.
@@ -126,7 +164,7 @@ class ProcessingPipeline:
     def _get_database(self) -> FaceDatabase:
         """Get or create FaceDatabase."""
         if self._database is None:
-            self._database = FaceDatabase(self._get_detector())
+            self._database = FaceDatabase(self._get_detector(), self.config)
         return self._database
 
     def _get_masker(self) -> FaceMasker:
@@ -149,7 +187,10 @@ class ProcessingPipeline:
         self._preprocessing_proc = PreprocessingProcessor(self.config)
 
         self._compositor = FaceCompositor(self.config, enhancer, masker)
-        self._stabilizer = LandmarkStabilizer(alpha=self.config.alpha)
+        self._stabilizer = LandmarkStabilizer(
+            alpha=self.config.alpha,
+            identity_sim=self.config.guard_identity_sim,
+        )
 
     def _reset_temporal_state(self) -> None:
         """
@@ -164,6 +205,20 @@ class ProcessingPipeline:
         if self._compositor:
             self._compositor.reset()
 
+    def _reset_guard_state(self) -> None:
+        """
+        Drop the held frame as well as the temporal state.
+
+        Separate from `_reset_temporal_state` because a guard must *keep* the
+        held frame — that frame is what it emits. This is for the cases where the
+        held frame is no longer the right thing to show at all: a new source
+        identity, or a new session on the same pipeline.
+        """
+        self._reset_temporal_state()
+        self._last_good_frame = None
+        self._guard_reason = ''
+        self._guard_starved = 0
+
     def _on_config_changed(self, field: str, value: Any) -> None:
         """
         Handle configuration changes.
@@ -172,31 +227,49 @@ class ProcessingPipeline:
             field: Config field name
             value: New value
         """
-        # Source path changed → drop temporal state and load new source
+        # Source path changed -> drop temporal state and load new source. The
+        # held frame goes too: it carries the previous identity, and holding it
+        # after a source change would show the old face on the next guard.
         if field == 'source_path' or field == 'source_paths':
-            self._reset_temporal_state()
+            self._reset_guard_state()
             if self._swapping_proc:
                 sources = self.config.source_paths or (
                     [self.config.source_path] if self.config.source_path else []
                 )
                 self._swapping_proc.set_source(sources)
 
-        # Landmark smoothing factor changed → rebuild the stabilizer
-        elif field == 'alpha':
-            self._stabilizer = LandmarkStabilizer(alpha=self.config.alpha)
+        # Landmark smoothing factor or identity floor changed -> rebuild the
+        # stabilizer. Both are constructor arguments, and the identity floor is
+        # one an operator sweeps live while calibrating it.
+        elif field in ('alpha', 'guard_identity_sim'):
+            self._stabilizer = LandmarkStabilizer(
+                alpha=self.config.alpha,
+                identity_sim=self.config.guard_identity_sim,
+            )
 
-        # Working resolution changed → previously smoothed pixels are the
+        # Working resolution changed -> previously smoothed pixels are the
         # wrong shape. The compositor detects that and recovers on its own,
         # but dropping it here avoids a frame of unsmoothed output.
         elif field == 'aligned_size':
             if self._compositor:
                 self._compositor.reset()
 
-        # Restoration backend changed → drop the loaded model so the new one
+        # Restoration backend changed -> drop the loaded model so the new one
         # is picked up on the next frame.
         elif field in ('enhancer_model',):
             if self._enhancer:
                 self._enhancer.clear()
+
+        # Swap model changed -> drop the session, apply the model's realism
+        # profile, and drop temporal state. The profile matters: the appearance
+        # knobs are tuned per model, and carrying 128px tuning onto a 256px model
+        # would make the better model look worse. Temporal state goes because the
+        # smoothed buffer holds output from the previous model.
+        elif field == 'swapper_model':
+            if self._swapper:
+                self._swapper.clear()
+            self.config.apply_model_profile(value)
+            self._reset_temporal_state()
 
     def run_stream(self) -> None:
         """
@@ -223,6 +296,9 @@ class ProcessingPipeline:
         finally:
             self._running = False
             self._stop_event.set()
+            # Before PIPELINE_STOPPED, so the summary is in the log above the
+            # line a reader will scroll to when the session ends.
+            self._report_telemetry()
             self.bus.emit(PIPELINE_STOPPED)
 
     def _warm_up_models(self) -> None:
@@ -276,6 +352,19 @@ class ProcessingPipeline:
 
         emit_status('Models ready', scope='MODEL_LOAD')
 
+        # Everything is loaded, so this is the first moment the question can be
+        # answered honestly: is each session actually on the device we asked
+        # for? ONNX Runtime does not fail when a provider cannot initialise — it
+        # quietly uses CPU, and every model that decides how the output looks is
+        # ONNX. Checked here rather than trusted, because the last time it went
+        # wrong it was found by reading a Dockerfile, not by anything failing.
+        execution.verify(self.config, [
+            ('detection', self._detector),
+            ('swap', self._swapper),
+            ('restoration', self._enhancer),
+            ('occluder', self._masker),
+        ])
+
     def _run_stream_impl(self) -> None:
         """Implementation of stream mode."""
         self._build_processors()
@@ -303,7 +392,7 @@ class ProcessingPipeline:
         else:
             self._stream_loop_capture()
 
-    def _swap_face(self, frame: Frame, face: Any) -> Frame:
+    def _swap_face(self, frame: Frame, face: Any) -> Optional[Frame]:
         """
         Swap and composite a single face.
 
@@ -316,7 +405,10 @@ class ProcessingPipeline:
             face: Fresh (optionally stabilized) face for this frame
 
         Returns:
-            Frame with the face composited in
+            Frame with the face composited in, or None if no swap could be
+            produced — the occlusion guard refused it or compositing failed.
+            Callers must decide what to show instead; returning `frame` here
+            would put the operator's real face on the call.
         """
         result = self._swapping_proc.swap_aligned(frame, face)
         if result is None:
@@ -325,8 +417,41 @@ class ProcessingPipeline:
         crop, matrix = result
         return self._compositor.composite(frame, face, crop, matrix)
 
+    def _guard_frame(self, reason: str, detail: str) -> None:
+        """
+        Drop everything that carries across frames, and report once.
+
+        A guarded frame must not enter either EMA. If it did, whatever the guard
+        objected to — a stranger's face, a half-occluded one — would be blended
+        into the smoothed history and leak back out over the frames that follow,
+        which is precisely the output the guard existed to prevent.
+
+        Reported on transition only. A guard that holds for several seconds is
+        one event, not one per frame, and at 20fps the per-frame version would
+        push 20 messages a second at every client.
+
+        Args:
+            reason: Guard reason code
+            detail: Measured value behind it
+        """
+        self._reset_temporal_state()
+
+        if self._guard_reason != reason:
+            self._guard_reason = reason
+            emit_status(
+                f'Frame guarded — {guards.describe(reason)}'
+                + (f' ({detail})' if detail else ''),
+                scope='GUARD', level='warning',
+            )
+
+    def _clear_guard(self) -> None:
+        """Note that frames are being emitted normally again."""
+        if self._guard_reason:
+            self._guard_reason = ''
+            emit_status('Guard cleared — swapping again', scope='GUARD')
+
     def _process_and_emit(self, frame: Frame, seq: int, capture_ts: int = 0) -> None:
-        """Run preprocess → detect → swap → composite → emit for one frame.
+        """Run preprocess -> detect -> swap -> composite -> emit for one frame.
 
         Detection runs on every frame, so the swap is always warped with
         current landmarks. Temporal continuity comes from EMA on those
@@ -351,6 +476,23 @@ class ProcessingPipeline:
         detections = self._detection_proc.latest_detections
         detected = time.perf_counter()
 
+        # Guards read what detection already produced, so this costs a handful
+        # of comparisons. `all_detections` rather than `latest_detections`,
+        # because outside many_faces the latter has already been trimmed to one
+        # and the face *count* is what the multi-face guard is.
+        verdict = guards.check_frame(self.config, self._detection_proc.all_detections)
+        self._record_telemetry(verdict)
+
+        # In observe mode every guard is still evaluated and recorded, but none
+        # of them act. The thresholds were chosen without data, and a session
+        # that enforces them cannot measure them: a guarded frame emits a held
+        # frame, which is no longer a sample of what the camera was doing.
+        if not verdict.ok and not self.config.guard_observe:
+            self._guard_frame(verdict.reason, verdict.detail)
+            self._emit_guarded(seq, capture_ts, debug_input)
+            self._log_timing(seq, started, detected, time.perf_counter())
+            return
+
         if not detections:
             self._stabilizer.mark_missing()
         elif self._swapping_proc.source_face is not None:
@@ -360,8 +502,21 @@ class ProcessingPipeline:
                 # several faces the per-frame detection order is not stable.
                 if not self.config.many_faces:
                     face = self._stabilizer.stabilize(face)
-                frame = self._swap_face(frame, face)
 
+                swapped_frame = self._swap_face(frame, face)
+                if swapped_frame is None:
+                    # Occlusion guard, or a compositing failure. Either way there
+                    # is no swapped frame for this face, and the partially
+                    # composited result must not be emitted.
+                    self._guard_frame(guards.OCCLUDED, '')
+                    self._emit_guarded(seq, capture_ts, debug_input)
+                    self._log_timing(seq, started, detected, time.perf_counter())
+                    return
+
+                frame = swapped_frame
+
+            self._clear_guard()
+            self._last_good_frame = frame
             self.bus.emit(DETECTION, detection=detections[0].to_dict(), seq=seq)
 
         swapped = time.perf_counter()
@@ -372,6 +527,93 @@ class ProcessingPipeline:
         self.bus.emit(FRAME_READY, frame=frame, seq=seq, capture_ts=capture_ts)
 
         self._log_timing(seq, started, detected, swapped)
+
+    def _record_telemetry(self, verdict: 'guards.GuardResult') -> None:
+        """
+        Record what this frame measured, for threshold calibration.
+
+        Coverage and identity similarity come from the previous frame's work —
+        the masker and stabilizer each record what they last computed, so this
+        adds no inference. Coverage therefore lags by one frame, which does not
+        matter for a distribution.
+
+        Args:
+            verdict: What `check_frame` decided for this frame
+        """
+        coverage = self._masker.last_coverage if self._masker else None
+        similarity = self._stabilizer.last_similarity if self._stabilizer else None
+
+        self._telemetry.observing = self.config.guard_observe
+        self._telemetry.record(
+            self._detection_proc.all_detections,
+            verdict,
+            coverage=coverage,
+            identity_sim=similarity,
+        )
+
+    def _report_telemetry(self) -> None:
+        """
+        Emit the guard calibration summary, and write it if asked.
+
+        Called once when the stream stops. The text form goes to the log so a
+        session is self-documenting; `guard_report` additionally writes JSON,
+        which is what a calibration run should keep.
+        """
+        if not self._telemetry.frames:
+            return
+
+        if self._detector is not None:
+            self._telemetry.capabilities = dict(self._detector.capabilities)
+
+        emit_status(self._telemetry.format_report(self.config), scope='GUARD')
+        emit_status(self._latency.format_report(self.config), scope='PERF')
+
+        path = self.config.guard_report
+        if path and self._telemetry.write(path, self.config):
+            emit_status(f'Guard telemetry written to {path}', scope='GUARD')
+        elif path:
+            emit_error(f'Could not write guard telemetry to {path}', scope='GUARD')
+
+    def _emit_guarded(
+        self,
+        seq: int,
+        capture_ts: int,
+        debug_input: Optional[Frame],
+    ) -> None:
+        """
+        Emit the last good swapped frame, unchanged.
+
+        Nothing is drawn on it — no banner, border, text or tint. This frame
+        goes to the virtual camera and therefore to everyone on the call, so
+        anything added would be visible to every participant. A held frame reads
+        as a network hiccup, which is the most innocuous way this can fail in
+        front of other people.
+
+        With no good frame yet — guarded from the very first frame — nothing is
+        emitted at all. That is deliberate: the alternative is the raw camera,
+        and the operator is on the call precisely because they do not want their
+        own face transmitted.
+
+        Args:
+            seq: Frame sequence number
+            capture_ts: Capture timestamp in nanoseconds
+            debug_input: The unprocessed frame, when debug capture is on
+        """
+        held = self._last_good_frame
+        if held is None:
+            self._guard_starved += 1
+            if self._guard_starved == 1:
+                emit_status(
+                    'Guarded before any frame was swapped — nothing to hold, so '
+                    'nothing is sent. The raw camera is never a fallback.',
+                    scope='GUARD', level='warning',
+                )
+            return
+
+        if debug_input is not None:
+            self._queue_debug_pair(seq, debug_input, held)
+
+        self.bus.emit(FRAME_READY, frame=held, seq=seq, capture_ts=capture_ts)
 
     # ------------------------------------------------------------------
     # Debug frame capture
@@ -480,15 +722,22 @@ class ProcessingPipeline:
             detected: perf_counter after detection
             swapped: perf_counter after swap and compositing
         """
+        detect_ms = (detected - started) * 1000.0
+        swap_ms = (swapped - detected) * 1000.0
+        total_ms = (swapped - started) * 1000.0
+
+        # Recorded for every frame regardless of log level. The per-line debug
+        # output below answers "how long did frame 240 take"; whether the preset
+        # holds is a question about the distribution, and a 1-in-30 sample taken
+        # only at debug level cannot answer it.
+        self._latency.record(detect_ms, swap_ms, total_ms)
+
         if self.config.log_level != 'debug' or seq % self._TIMING_INTERVAL:
             return
 
         get_logger('PERF').debug(
             'seq=%d detect=%.0fms swap+composite=%.0fms total=%.0fms',
-            seq,
-            (detected - started) * 1000.0,
-            (swapped - detected) * 1000.0,
-            (swapped - started) * 1000.0,
+            seq, detect_ms, swap_ms, total_ms,
         )
 
     @staticmethod
@@ -638,29 +887,232 @@ class ProcessingPipeline:
             target_path: Path to target image or video
             output_path: Where to save output (optional)
         """
-        # Simple implementation for images
-        if target_path.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp')):
-            frame = cv2.imread(target_path)
-            if frame is None:
-                emit_error(f"Failed to load image: {target_path}", scope='PIPELINE')
+        if not os.path.isfile(target_path):
+            emit_error(f"Target file not found: {target_path}", scope='PIPELINE')
+            return
+
+        if is_image(target_path) or has_image_extension(target_path):
+            self._process_image_batch(target_path, output_path)
+        elif is_video(target_path):
+            self._process_video_batch(target_path, output_path)
+        else:
+            emit_error(
+                f"Unsupported target, neither image nor video: {target_path}",
+                scope='PIPELINE',
+            )
+
+    def _swap_frame_faces(self, frame: Frame, stabilize: bool) -> Frame:
+        """
+        Run preprocess -> detect -> swap -> composite for one batch frame.
+
+        Shared by the image and video paths so the two cannot drift apart, and
+        the same compositor as stream mode so batch output matches live.
+
+        Args:
+            frame: Input frame
+            stabilize: Smooth landmarks across frames. True for video, where
+                       frames are consecutive; False for a lone image
+
+        Returns:
+            Frame with every detected face swapped
+        """
+        frame = self._preprocessing_proc.process(frame)
+        frame = self._detection_proc.process(frame)
+        detections = self._detection_proc.latest_detections
+
+        if not detections:
+            if stabilize:
+                self._stabilizer.mark_missing()
+            return frame
+
+        # Batch guards pass the original frame through rather than holding the
+        # last good one. The privacy argument that forces a held frame on the
+        # live path does not apply: the target here is a file the operator
+        # supplied, not their camera, and freezing a frame mid-clip would be a
+        # more visible defect than one unswapped frame.
+        verdict = guards.check_frame(self.config, self._detection_proc.all_detections)
+        if not verdict.ok:
+            self._reset_temporal_state()
+            return frame
+
+        for detection in detections:
+            face = detection.face
+            # Landmark smoothing needs a stable subject identity; with several
+            # faces the per-frame detection order is not stable.
+            if stabilize and not self.config.many_faces:
+                face = self._stabilizer.stabilize(face)
+
+            swapped = self._swap_face(frame, face)
+            if swapped is None:
+                self._reset_temporal_state()
+                return frame
+            frame = swapped
+
+        return frame
+
+    def _process_image_batch(self, target_path: str, output_path: Optional[str]) -> None:
+        """
+        Swap faces in a single image.
+
+        Args:
+            target_path: Path to target image
+            output_path: Where to save output
+        """
+        frame = cv2.imread(target_path)
+        if frame is None:
+            emit_error(f"Failed to load image: {target_path}", scope='PIPELINE')
+            return
+
+        # There is no previous frame to smooth against — but the compositor's
+        # pixel EMA would otherwise still hold whatever the last job left in it,
+        # so the image has to be given a clean slate rather than assumed one.
+        self._reset_temporal_state()
+        frame = self._swap_frame_faces(frame, stabilize=False)
+
+        if output_path:
+            cv2.imwrite(output_path, frame)
+            emit_status(f"Batch output saved to: {output_path}", scope='PIPELINE')
+
+    def _process_video_batch(self, target_path: str, output_path: Optional[str]) -> None:
+        """
+        Swap faces through a video, then reassemble it with its audio.
+
+        Frames are extracted to lossless PNG, swapped in place and re-encoded.
+        Working through files rather than streaming costs disk — roughly 4 MB per
+        1080p frame — but it keeps each frame lossless between decode and encode,
+        so the only generational loss is the final encode, and it makes
+        `keep_frames` and a resumable job possible.
+
+        Args:
+            target_path: Path to target video
+            output_path: Where to save output
+        """
+        if not output_path:
+            emit_error('No output path specified for video batch', scope='PIPELINE')
+            return
+
+        # The source rate is needed either way: it is what the extracted frames
+        # are read back at, and reading them at anything else would rescale the
+        # clip against the audio restored afterwards. `keep_fps` decides only
+        # whether the result is then re-timed.
+        source_fps = detect_fps(target_path)
+        output_fps = None if self.config.keep_fps else 30.0
+
+        reset_temp(target_path)
+
+        try:
+            emit_status(
+                f"Extracting frames from {target_path} at {source_fps:.3f}fps",
+                scope='PIPELINE',
+            )
+            extract_frames(self.config, target_path)
+
+            frame_paths = get_temp_frame_paths(target_path)
+            if not frame_paths:
+                emit_error(
+                    f"No frames extracted from {target_path} — is FFmpeg installed "
+                    f"and the file readable?",
+                    scope='PIPELINE',
+                )
                 return
 
-            # Process — same compositing path as stream mode, so batch and
-            # realtime output cannot drift apart. Temporal smoothing is a
-            # no-op here since there is no previous frame.
-            frame = self._preprocessing_proc.process(frame)
-            frame = self._detection_proc.process(frame)
-            detections = self._detection_proc.latest_detections
+            if not self._process_frame_files(frame_paths):
+                emit_status('Batch cancelled', scope='PIPELINE')
+                return
 
-            for detection in detections:
-                frame = self._swap_face(frame, detection.face)
+            emit_status(f"Encoding {len(frame_paths)} frames", scope='PIPELINE')
+            create_video(self.config, target_path, source_fps, output_fps)
 
-            # Save
-            if output_path:
-                cv2.imwrite(output_path, frame)
+            if not os.path.isfile(get_temp_output_path(target_path)):
+                emit_error('Video encoding produced no output', scope='PIPELINE')
+                return
+
+            if self.config.keep_audio and has_audio(target_path):
+                restore_audio(self.config, target_path, output_path)
+            else:
+                move_temp(target_path, output_path)
+
+            if os.path.isfile(output_path):
                 emit_status(f"Batch output saved to: {output_path}", scope='PIPELINE')
-        else:
-            emit_error('Video batch processing not yet implemented', scope='PIPELINE')
+            else:
+                emit_error(f"Output file was not written: {output_path}", scope='PIPELINE')
+        finally:
+            clean_temp(self.config, target_path)
+
+    def _process_frame_files(self, frame_paths: List[str]) -> bool:
+        """
+        Swap every extracted frame in place.
+
+        Args:
+            frame_paths: Extracted frame paths, in playback order
+
+        Returns:
+            True if all frames were processed, False if the job was stopped
+        """
+        total = len(frame_paths)
+
+        # Consecutive frames of one clip, so temporal smoothing applies — but it
+        # must not begin against state left by a previous run.
+        self._reset_temporal_state()
+
+        # Progress is rate-limited two ways, because either alone fails at one
+        # end of the range: a 1% step is every frame on a 90-frame clip, and a
+        # time gate alone is thousands of messages across a feature-length job.
+        report_every = max(1, total // 100)
+        started = time.perf_counter()
+        last_report = 0.0
+
+        for index, frame_path in enumerate(frame_paths):
+            if self._stop_event.is_set():
+                return False
+
+            frame = cv2.imread(frame_path)
+            if frame is None:
+                # A frame that will not decode is passed through rather than
+                # dropped: dropping one shifts every later frame against the
+                # audio, and a single unswapped frame is the smaller fault.
+                emit_status(
+                    f"Skipping unreadable frame: {frame_path}",
+                    scope='PIPELINE', level='warning',
+                )
+                continue
+
+            frame = self._swap_frame_faces(frame, stabilize=True)
+            cv2.imwrite(frame_path, frame)
+
+            now = time.perf_counter()
+            final = index == total - 1
+            if final or (index % report_every == 0 and now - last_report >= self._PROGRESS_INTERVAL):
+                last_report = now
+                self._emit_batch_progress(index + 1, total, started)
+
+        return True
+
+    def _emit_batch_progress(self, done: int, total: int, started: float) -> None:
+        """
+        Report batch progress, with an estimate of the time remaining.
+
+        Goes out as a status message, which the desktop already displays in
+        batch modes, rather than as a new event needing its own plumbing.
+
+        Args:
+            done: Frames completed
+            total: Frames in the job
+            started: perf_counter when frame processing began
+        """
+        percent = (done / total) * 100.0 if total else 100.0
+        elapsed = time.perf_counter() - started
+
+        remaining = ''
+        if done and elapsed > 1.0:
+            eta = (elapsed / done) * (total - done)
+            remaining = f", {int(eta // 60)}m{int(eta % 60):02d}s left"
+
+        emit_status(
+            f"Processing frame {done}/{total} ({percent:.0f}%{remaining})",
+            scope='PIPELINE',
+        )
+        self.bus.emit(BATCH_PROGRESS, done=done, total=total, percent=percent)
 
     def stop(self) -> None:
         """Stop the pipeline."""

@@ -1,0 +1,22 @@
+# Line endings.
+#
+# These files execute on Linux. Git on Windows would otherwise check them out
+# with CRLF, and a shell script with CRLF fails as:
+#     /usr/bin/env: 'bash\r': No such file or directory
+# which is a failed pod provision discovered after paying for a GPU.
+*.sh            text eol=lf
+Dockerfile      text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+
+# Python runs either way, but keeping it uniform avoids diffs that are entirely
+# line endings.
+*.py            text eol=lf
+
+# Never touched.
+*.onnx          binary
+*.pth           binary
+*.npy           binary
+*.mp4           binary
+*.jpg           binary
+*.png           binary

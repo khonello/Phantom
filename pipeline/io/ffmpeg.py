@@ -17,10 +17,11 @@ import platform
 import shutil
 import ssl
 import subprocess
+import tempfile
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from tqdm import tqdm
 
@@ -33,6 +34,67 @@ if platform.system().lower() == 'darwin':
 
 TEMP_FILE = 'temp.mp4'
 TEMP_DIRECTORY = 'temp'
+
+# Frame filename width. Six digits rather than four because `get_temp_frame_paths`
+# orders frames by sorting their names: at four digits ffmpeg rolls over to five
+# after 9999 and '10000.png' sorts before '9999.png', silently reordering every
+# frame past the five-minute mark of a 30fps clip.
+FRAME_PATTERN = '%06d.png'
+
+# Scratch space is keyed by session, not by target filename — two sessions
+# handed the same filename must not share a directory, and the target may live
+# somewhere unwritable (or, on a pod, inside the upload directory). Defaults to
+# a per-process token, which is exactly one session while max_sessions is 1;
+# the control plane calls set_temp_scope() with a real session id.
+_TEMP_SCOPE: Optional[str] = None
+
+
+def set_temp_scope(session_id: Optional[str]) -> None:
+    """
+    Bind batch scratch directories to a session.
+
+    Args:
+        session_id: Session identifier, or None to fall back to the default
+                    per-process scope
+    """
+    global _TEMP_SCOPE
+    _TEMP_SCOPE = session_id
+
+
+def get_temp_scope() -> str:
+    """
+    Get the current scratch scope.
+
+    Returns:
+        The session id set by set_temp_scope(), else PHANTOM_SESSION_ID from the
+        environment, else a per-process token
+    """
+    return _TEMP_SCOPE or os.environ.get('PHANTOM_SESSION_ID') or f'pid-{os.getpid()}'
+
+
+def get_temp_root() -> str:
+    """
+    Get the root directory holding all scratch space.
+
+    Batch video extracts every frame as lossless PNG, which is roughly 4 MB per
+    1080p frame — about 36 GB for a five-minute clip at 30fps. On a pod the
+    system temp lives on the *container* disk, which defaults to 20 GB and is
+    shared with the OS, so a long job would fill it and fail partway through.
+    The network volume is the disk the operator actually sized, so scratch goes
+    there when one is mounted.
+
+    Returns:
+        PHANTOM_TEMP_DIR if set; else a directory on the network volume when one
+        is mounted; else a 'phantom' directory under the system temp
+    """
+    override = os.environ.get('PHANTOM_TEMP_DIR')
+    if override:
+        return override
+
+    if os.path.isdir('/workspace'):
+        return '/workspace/tmp/phantom'
+
+    return os.path.join(tempfile.gettempdir(), 'phantom')
 
 
 def run_ffmpeg(config: FaceSwapConfig, args: List[str]) -> bool:
@@ -98,6 +160,36 @@ def detect_fps(video_path: str) -> float:
         return 30.0
 
 
+def has_audio(video_path: str) -> bool:
+    """
+    Check whether a video carries at least one audio stream.
+
+    Asked before restoring audio so a silent target takes the copy path
+    deliberately, rather than by letting an FFmpeg stream-mapping error fail.
+
+    Args:
+        video_path: Path to video file
+
+    Returns:
+        True if an audio stream is present
+    """
+    try:
+        command = [
+            'ffprobe',
+            '-v', 'error',
+            '-select_streams', 'a:0',
+            '-show_entries', 'stream=codec_type',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            video_path,
+        ]
+        output = subprocess.check_output(command, stderr=subprocess.DEVNULL).decode().strip()
+        return output == 'audio'
+    except Exception:
+        # Unknown is treated as absent: the copy path always produces a file,
+        # where a bad stream map produces nothing.
+        return False
+
+
 def extract_frames(config: FaceSwapConfig, target_path: str) -> None:
     """
     Extract frames from a video file.
@@ -109,7 +201,7 @@ def extract_frames(config: FaceSwapConfig, target_path: str) -> None:
         target_path: Path to video file
     """
     temp_directory_path = get_temp_directory_path(target_path)
-    output_pattern = os.path.join(temp_directory_path, '%04d.png')
+    output_pattern = os.path.join(temp_directory_path, FRAME_PATTERN)
 
     emit_status(f'Extracting frames to {temp_directory_path}', scope='FFMPEG')
     run_ffmpeg(
@@ -118,23 +210,42 @@ def extract_frames(config: FaceSwapConfig, target_path: str) -> None:
     )
 
 
-def create_video(config: FaceSwapConfig, target_path: str, fps: float = 30.0) -> None:
+def create_video(
+    config: FaceSwapConfig,
+    target_path: str,
+    fps: float = 30.0,
+    output_fps: Optional[float] = None,
+) -> None:
     """
     Create a video file from extracted frames.
 
     Uses config.video_encoder and config.video_quality settings.
 
+    `fps` is the rate the frames are *read* at, so it must be the source rate:
+    every extracted frame is one source frame, and reading them at any other
+    rate rescales the clip's duration, which desynchronises the audio restored
+    afterwards. Retiming is `output_fps`, applied as a filter so frames are
+    dropped or duplicated and the duration survives.
+
     Args:
         config: FaceSwapConfig with encoder and quality settings
         target_path: Original target path (for temp directory lookup)
-        fps: Output video FPS
+        fps: Rate the frames were captured at — the source video's FPS
+        output_fps: Re-time the result to this rate, preserving duration.
+                    None encodes at the source rate
     """
     temp_output_path = get_temp_output_path(target_path)
     temp_directory_path = get_temp_directory_path(target_path)
-    input_pattern = os.path.join(temp_directory_path, '%04d.png')
+    input_pattern = os.path.join(temp_directory_path, FRAME_PATTERN)
+
+    filters = ['colorspace=bt709:iall=bt601-6-625:fast=1']
+    if output_fps and abs(output_fps - fps) > 0.01:
+        filters.append(f'fps={output_fps}')
 
     emit_status(
-        f'Creating video from frames (encoder: {config.video_encoder}, quality: {config.video_quality})',
+        f'Creating video from frames (encoder: {config.video_encoder}, '
+        f'quality: {config.video_quality}, {fps:.3f}fps'
+        + (f' -> {output_fps:.3f}fps' if len(filters) > 1 else '') + ')',
         scope='FFMPEG',
     )
 
@@ -146,7 +257,7 @@ def create_video(config: FaceSwapConfig, target_path: str, fps: float = 30.0) ->
             '-c:v', config.video_encoder,
             '-crf', str(config.video_quality),
             '-pix_fmt', 'yuv420p',
-            '-vf', 'colorspace=bt709:iall=bt601-6-625:fast=1',
+            '-vf', ','.join(filters),
             '-y',
             temp_output_path,
         ],
@@ -202,7 +313,10 @@ def get_temp_frame_paths(target_path: str) -> List[str]:
 
 def get_temp_directory_path(target_path: str) -> str:
     """
-    Get path to temp directory for a target.
+    Get path to temp directory for a target, scoped to the current session.
+
+    The target name is kept as the leaf so one session can process several
+    targets without collision.
 
     Args:
         target_path: Original target path
@@ -211,8 +325,7 @@ def get_temp_directory_path(target_path: str) -> str:
         Temp directory path
     """
     target_name, _ = os.path.splitext(os.path.basename(target_path))
-    target_directory_path = os.path.dirname(target_path)
-    return os.path.join(target_directory_path, TEMP_DIRECTORY, target_name)
+    return os.path.join(get_temp_root(), get_temp_scope(), TEMP_DIRECTORY, target_name)
 
 
 def get_temp_output_path(target_path: str) -> str:
@@ -261,6 +374,23 @@ def create_temp(target_path: str) -> None:
     Path(temp_directory_path).mkdir(parents=True, exist_ok=True)
 
 
+def reset_temp(target_path: str) -> None:
+    """
+    Empty and recreate a target's temp directory.
+
+    Unconditional, unlike clean_temp: frames left by an aborted run would
+    otherwise be re-encoded as part of the next one, and `keep_frames` must not
+    be able to turn that into silent corruption.
+
+    Args:
+        target_path: Original target path
+    """
+    temp_directory_path = get_temp_directory_path(target_path)
+    if os.path.isdir(temp_directory_path):
+        shutil.rmtree(temp_directory_path, ignore_errors=True)
+    Path(temp_directory_path).mkdir(parents=True, exist_ok=True)
+
+
 def move_temp(target_path: str, output_path: str) -> None:
     """
     Move temp output to final location.
@@ -291,15 +421,24 @@ def clean_temp(config: FaceSwapConfig, target_path: str) -> None:
         target_path: Original target path
     """
     temp_directory_path = get_temp_directory_path(target_path)
-    parent_directory_path = os.path.dirname(temp_directory_path)
 
     # Remove frame directory if keep_frames is False
     if not config.keep_frames and os.path.isdir(temp_directory_path):
-        shutil.rmtree(temp_directory_path)
+        shutil.rmtree(temp_directory_path, ignore_errors=True)
 
-    # Remove parent if empty
-    if os.path.exists(parent_directory_path) and not os.listdir(parent_directory_path):
-        os.rmdir(parent_directory_path)
+    # Prune the now-empty scope directories back towards the root, so a session
+    # that processed several targets does not leave a tree of empty folders.
+    # Stops at the root itself, which is shared and not ours to remove.
+    root = os.path.normpath(get_temp_root())
+    directory = os.path.dirname(os.path.normpath(temp_directory_path))
+    while directory.startswith(root) and directory != root:
+        try:
+            if os.listdir(directory):
+                break
+            os.rmdir(directory)
+        except OSError:
+            break
+        directory = os.path.dirname(directory)
 
 
 # ============================================================================

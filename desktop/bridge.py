@@ -209,6 +209,7 @@ class Bridge(QObject):
         self._output_path: str = ''
         self._batch_running: bool = False
         self._batch_complete: bool = False
+        self._batch_error: str = ''
         self._webcam_version = 0
         self._live_version = 0
         self._quality = 'optimal'
@@ -520,17 +521,56 @@ class Bridge(QObject):
                     return
 
             result = self._client.upload_source(images)
-            if result.get('success', False):
-                self._set_embedding_pending(False)
-                self._set_status(
-                    'embedding ready' if multi else f'face set: {self._source_label}'
-                )
-            else:
-                error = result.get('error', 'upload failed')
-                self._set_embedding_pending(False)
-                self._set_status(f'upload error: {error}')
+            self._set_embedding_pending(False)
+
+            if not result.get('success', False):
+                # The error already names each refused image and why — the
+                # handler builds it that way precisely so it can be shown.
+                self._set_source_set(False)
+                self._set_status(f'upload error: {result.get("error", "upload failed")}')
+                return
+
+            self._report_upload(result, len(images), multi)
 
         threading.Thread(target=_do_upload, args=(valid,), daemon=True).start()
+
+    def _report_upload(self, result: Dict[str, Any], uploaded: int, multi: bool) -> None:
+        """
+        Report the outcome of a source upload, including partial rejection.
+
+        A source built from 1 of 3 photos still succeeds, and saying only
+        "embedding ready" hides the fact that two were thrown out — while the
+        label would go on claiming all three were averaged. Someone choosing
+        photos needs to know which one to replace, so the count is corrected and
+        the first reason is named.
+
+        Args:
+            result: The upload_source response payload
+            uploaded: How many images were sent
+            multi: Whether this was a multi-image (averaged) upload
+        """
+        data = result.get('data') or {}
+        rejected = data.get('rejected') or []
+        accepted_paths = data.get('accepted') or data.get('paths') or []
+        accepted = int(data.get('count', uploaded))
+
+        if not rejected:
+            self._set_status('embedding ready' if multi else f'face set: {self._source_label}')
+            return
+
+        # Correct the label. It was written before the server had an opinion, so
+        # it still claims every uploaded photo went into the average.
+        if accepted > 1:
+            self._source_label = f'{accepted} faces · averaged'
+        elif accepted_paths:
+            self._source_label = os.path.basename(str(accepted_paths[0]))
+        self.sourceLabelChanged.emit(self._source_label)
+
+        first = rejected[0]
+        summary = f'{first.get("name", "")}: {first.get("message", first.get("reason", ""))}'
+        if len(rejected) > 1:
+            summary += f' (+{len(rejected) - 1} more refused)'
+        self._set_status(f'{accepted} of {uploaded} accepted — {summary}')
 
     @Slot()
     def resetSource(self) -> None:
@@ -640,6 +680,7 @@ class Bridge(QObject):
             self.outputPathChanged.emit(self._output_path)
 
         self._batch_complete = False
+        self._batch_error = ''
         self.batchCompleteChanged.emit(False)
         self._set_status('processing...')
         self._client.set_target(self._target_path)
@@ -691,6 +732,7 @@ class Bridge(QObject):
         self._output_path = ''
         self._batch_running = False
         self._batch_complete = False
+        self._batch_error = ''
         self.targetSetChanged.emit(False)
         self.targetLabelChanged.emit('')
         self.targetThumbnailChanged.emit('')
@@ -888,7 +930,11 @@ class Bridge(QObject):
                     self._set_detection_status('no face detected')
                 else:
                     self._set_detection_status('')
-            # Show general status messages only when the pipeline is not running
+            # Remember a failure so PIPELINE_STOPPED is not read as success.
+            # A batch reports completion by stopping, so the stop event alone
+            # cannot tell a finished job from a failed one.
+            if level == 'error' and self._batch_running:
+                self._batch_error = message
             if message and not self._pipeline_running:
                 self._set_status(message)
         elif event == 'PIPELINE_STARTED':
@@ -905,12 +951,17 @@ class Bridge(QObject):
                 self._set_pipeline_running(False)
                 self._set_status('stopped')
             else:
-                # Batch job finished — mark complete
+                # Batch job finished. Complete only if nothing reported an
+                # error — a failed job stops exactly like a successful one.
                 self._batch_running = False
                 self.batchRunningChanged.emit(False)
-                self._batch_complete = True
-                self.batchCompleteChanged.emit(True)
-                self._set_status('done')
+                if self._batch_error:
+                    self._set_status(f'failed: {self._batch_error}')
+                    self._batch_error = ''
+                else:
+                    self._batch_complete = True
+                    self.batchCompleteChanged.emit(True)
+                    self._set_status('done')
         elif event == 'auto_stop_warning':
             minutes = (data.get('data') or {}).get('minutes_remaining', 5)
             self.autoStopWarning.emit(minutes)
@@ -1034,17 +1085,43 @@ class Bridge(QObject):
         if self._vcam_platform:
             kwargs['backend'] = self._vcam_platform
 
+        # The invariant this loop exists to hold:
+        #
+        #   The virtual camera shows the last augmented frame, or an augmented
+        #   frame. Never the raw camera, and never nothing.
+        #
+        # It previously only called `cam.send()` when a frame arrived, so when
+        # frames stopped the device stalled rather than froze — and a call
+        # application can report a stalled device as a *disconnected camera*,
+        # which is a louder and stranger signal to the other participants than a
+        # frozen picture. Holding and re-sending keeps the stream alive at its
+        # normal rate; it simply stops moving, which reads as a network hiccup.
+        #
+        # This covers every way frames can stop, not just guarded ones: the paid
+        # hour expiring, the session ending, the worker dying, the pipeline
+        # crashing. Expiry is the one most likely to be got wrong because it is
+        # the only one that is *expected*, and it must behave exactly like the
+        # failures — the operator's real face must not appear on the call the
+        # moment their time runs out.
+        held: Optional[np.ndarray] = None
+
         try:
             with pyvirtualcam.Camera(**kwargs) as cam:
                 self._set_virtual_cam_active(True)
                 self._set_status(f'virtual camera active · {cam.device}')
                 while not stop_event.is_set():
                     try:
-                        frame: np.ndarray = self._vcam_queue.get(timeout=0.1)
-                        cam.send(frame)
-                        cam.sleep_until_next_frame()
+                        held = self._vcam_queue.get(timeout=0.1)
                     except queue.Empty:
-                        continue
+                        # Nothing new. Re-send the previous frame rather than
+                        # sending nothing. Until the first frame arrives there is
+                        # genuinely nothing to send — and the raw camera is never
+                        # the fallback, so the device simply waits.
+                        if held is None:
+                            continue
+
+                    cam.send(held)
+                    cam.sleep_until_next_frame()
         except Exception as e:
             self._set_status(f'virtual camera error: {e}')
         finally:

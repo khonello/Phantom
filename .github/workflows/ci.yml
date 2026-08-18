@@ -14,12 +14,21 @@ jobs:
      python-version: 3.9
   - run: pip install flake8
   - run: pip install mypy
-  - run: flake8 pipeline.py pipeline desktop
+  # `runpod`, `tests` and `tools` were outside this command, which is how an
+  # F821 sat in orchestrator.py unnoticed — the deploy tooling was the one part
+  # of the repo nothing checked.
+  - run: flake8 pipeline.py pipeline desktop tests tools runpod
   # `pipeline.py` and `pipeline/` are both module "pipeline", so mypy refuses to
   # check them together ("Duplicate module named 'pipeline'") and exits before
   # checking anything at all. The entry point is nine lines that set an env var
   # and call core.run_headless(), so the package is what matters here.
   - run: mypy pipeline
+  - name: Shell syntax
+    # These run on the pod. A syntax error is a failed provision, discovered
+    # after paying for a GPU.
+    run: |
+      bash -n runpod/startup.sh
+      bash -n runpod/entrypoint.sh
  test:
   runs-on: ubuntu-latest
   steps:
@@ -32,6 +41,56 @@ jobs:
     with:
      python-version: 3.9
   - run: pip install -r requirements-ci.txt
-  - run: python pipeline.py -s=.github/examples/source.jpg -t=.github/examples/target.mp4 -o=.github/examples/output.mp4
-  - run: ffmpeg -i .github/examples/snapshot.mp4 -i .github/examples/output.mp4 -filter_complex psnr -f null -
+  # Written outside the repo on purpose. `.github/examples/output.mp4` is a
+  # tracked file, so producing the output there lets a run that swapped nothing
+  # pass by comparing the committed copy against the snapshot.
+  - run: python pipeline.py -s=.github/examples/source.jpg -t=.github/examples/target.mp4 -o=$RUNNER_TEMP/output.mp4
+  - name: Check the output was produced
+    run: test -s "$RUNNER_TEMP/output.mp4"
+  - name: Compare against the reference render
+    run: ffmpeg -i .github/examples/snapshot.mp4 -i "$RUNNER_TEMP/output.mp4" -filter_complex psnr -f null -
 
+ # Fast tests: the ML layer is stubbed into sys.modules, so this needs no GPU,
+ # no model weights and no multi-gigabyte install. It covers the parts that fail
+ # silently — guard predicates, the FFmpeg plumbing, execution-provider
+ # verification and the realism metrics — and runs in under a minute.
+ #
+ # Deliberately separate from the `test` job below, which installs the real
+ # runtime and does an end-to-end swap. That one proves the models work; this
+ # one proves the logic around them does, and stays green on every push.
+ unit:
+  runs-on: ubuntu-latest
+  steps:
+  - name: Checkout
+    uses: actions/checkout@v2
+  - name: Set up ffmpeg
+    uses: FedericoCarboni/setup-ffmpeg@v2
+  - name: Set up Python 3.9
+    uses: actions/setup-python@v2
+    with:
+     python-version: 3.9
+  - run: pip install pytest numpy opencv-python-headless tqdm
+  - run: python -m pytest tests/ -q
+
+ # The production deploy path only works if something exercises it. It was
+ # written once and left alone, and by the time anyone looked it had a base
+ # image tag that does not exist and no cuDNN — so it could not pull, and would
+ # have run every ONNX model on CPU if it had. Both were discovered by reading,
+ # not by failing, which is the problem this job removes.
+ #
+ # Build only: no registry, no credentials, no push. That is enough to catch a
+ # dead tag, a package that no longer resolves, a missing COPY target, and the
+ # cuDNN check baked into the image.
+ docker:
+  runs-on: ubuntu-latest
+  steps:
+  - name: Checkout
+    uses: actions/checkout@v2
+  - name: Free disk space
+    # The CUDA base image is ~7 GB and the default runner does not have room
+    # for it alongside its preinstalled toolchains.
+    run: |
+      sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+      df -h /
+  - name: Build the pipeline image
+    run: docker build -t phantom-pipeline:ci .

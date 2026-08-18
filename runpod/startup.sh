@@ -24,15 +24,58 @@ PIP="${VENV_DIR}/bin/pip"
 REQUIREMENTS="${PHANTOM_DIR}/requirements-pipeline-gpu.txt"
 REQUIREMENTS_SNAPSHOT="${VENV_DIR}/.requirements-snapshot"
 
+# RunPod exposes pod-level environment variables (everything orchestrator.py
+# forwards) through this file. An SSH session usually inherits them via .bashrc,
+# but "usually" is not good enough for settings that decide what a paid session
+# measures — and _shell_run wraps each command in a subshell, so sourcing from
+# the orchestrator side would not survive into this script anyway.
+if [ -f /etc/rp_environment ]; then
+    # shellcheck disable=SC1091
+    . /etc/rp_environment
+fi
+
 echo "=== Phantom RunPod Startup ==="
 echo "Workspace:  ${WORKSPACE}"
 echo "Venv:       ${VENV_DIR}"
 echo "Models dir: ${MODELS_DIR}"
 echo "Phantom:    ${PHANTOM_DIR}"
 
+# ── Phase timing ──────────────────────────────────────────────────────────────
+# Cold start is the only number that still matters for this product, and nobody
+# has one. Timing it with a stopwatch tells you the total; this tells you which
+# part to attack, which is the difference between "cold start is slow" and
+# "pip is 80% of cold start, so bake an image".
+#
+# Emitted as `PHASE <name> <seconds>` so the orchestrator can parse it out of
+# the SSH transcript without the two having to agree on anything else.
+_PHASE_CUR=""
+_PHASE_T0=0
+_PHASE_LINES=""
+_RUN_T0=$(date +%s)
+
+_phase() {
+    local now
+    now=$(date +%s)
+    if [ -n "${_PHASE_CUR}" ]; then
+        _PHASE_LINES="${_PHASE_LINES}PHASE ${_PHASE_CUR} $((now - _PHASE_T0))"$'
+'
+    fi
+    _PHASE_CUR="$1"
+    _PHASE_T0="${now}"
+}
+
+# Whether this volume already had the expensive artefacts on it. The whole point
+# of measuring cold start is comparing these two cases, so the run has to say
+# which one it was rather than leaving it to be remembered.
+VOLUME_STATE="empty"
+if [ -d "${VENV_DIR}" ] && [ -d "${MODELS_DIR}" ]; then
+    VOLUME_STATE="warm"
+fi
+
 # ── 1. Install system packages (re-installs on each new container) ────────────
 echo ""
 echo "--- System Packages ---"
+_phase "apt-get"
 NEED_INSTALL=false
 if ! command -v ffmpeg &>/dev/null; then
     echo "Installing ffmpeg..."
@@ -44,6 +87,7 @@ fi
 # ── 2. Pull latest code ───────────────────────────────────────────────────────
 echo ""
 echo "--- Code Sync ---"
+_phase "git-pull"
 if [ -d "${PHANTOM_DIR}/.git" ]; then
     echo "Pulling latest changes..."
     git -C "${PHANTOM_DIR}" pull --ff-only 2>&1 || echo "WARNING: git pull failed — using existing code."
@@ -54,6 +98,7 @@ fi
 # ── 3. Check CUDA ──────────────────────────────────────────────────────────────
 echo ""
 echo "--- CUDA ---"
+_phase "cuda-check"
 if command -v nvidia-smi &>/dev/null; then
     GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "unknown")
     DRIVER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 || echo "unknown")
@@ -66,6 +111,7 @@ fi
 # ── 4. Create model cache directory ───────────────────────────────────────────
 echo ""
 echo "--- Model Cache ---"
+_phase "model-cache"
 if [ -d "${MODELS_DIR}" ]; then
     echo "Exists: ${MODELS_DIR}"
     ls -lh "${MODELS_DIR}/" 2>/dev/null || echo "  (empty)"
@@ -80,6 +126,7 @@ fi
 # whenever requirements-pipeline-gpu.txt changes.
 echo ""
 echo "--- Python Venv ---"
+_phase "venv"
 if [ -d "${VENV_DIR}" ]; then
     # Ensure venv has system-site-packages enabled (needed for image's PyTorch/CUDA)
     CFG="${VENV_DIR}/pyvenv.cfg"
@@ -104,6 +151,7 @@ fi
 # If they differ (or no snapshot exists), run pip install to sync.
 echo ""
 echo "--- Dependencies ---"
+_phase "pip-install"
 if [ -f "${REQUIREMENTS}" ]; then
     if [ -f "${REQUIREMENTS_SNAPSHOT}" ] && diff -q "${REQUIREMENTS}" "${REQUIREMENTS_SNAPSHOT}" &>/dev/null; then
         echo "Requirements unchanged — skipping pip install."
@@ -128,6 +176,7 @@ fi
 # without letting pip's dependency resolver upgrade torch or other packages.
 echo ""
 echo "--- cuDNN 9 ---"
+_phase "cudnn"
 CUDNN_OK=$(${PYTHON} -c "
 import ctypes
 try: ctypes.CDLL('libcudnn.so.9'); print('yes')
@@ -155,12 +204,36 @@ if [ -n "${CUDNN_LIB_DIR}" ] && [ -d "${CUDNN_LIB_DIR}" ]; then
         > /etc/profile.d/cudnn.sh
     echo "LD_LIBRARY_PATH: ${CUDNN_LIB_DIR}"
 else
-    echo "WARNING: cuDNN lib dir not found — ONNX may fall back to CPU."
+    echo "WARNING: cuDNN lib dir not found."
+fi
+
+# Verify rather than assume. Every step above can succeed and still leave the
+# library unloadable, and a silent CPU fallback is the most expensive failure on
+# this path: the swapper, CodeFormer and XSeg are all ONNX, so it is seconds per
+# frame instead of a live call, with nothing raised to notice.
+#
+# Fatal on purpose. Failing here is obvious and costs a redeploy; booting anyway
+# spends a paid GPU hour producing output nobody can use, which is the entire
+# reason for renting the pod in the first place.
+CUDNN_FINAL=$(${PYTHON} -c "
+import ctypes
+try: ctypes.CDLL('libcudnn.so.9'); print('yes')
+except Exception: print('no')
+" 2>/dev/null || echo "no")
+
+if [ "${CUDNN_FINAL}" = "yes" ]; then
+    echo "Verified: libcudnn.so.9 loads."
+else
+    echo "ERROR: libcudnn.so.9 cannot be loaded after installation."
+    echo "       onnxruntime-gpu would silently fall back to CPU."
+    echo "       See runpod/TROUBLESHOOTING.md section 5b."
+    exit 1
 fi
 
 # ── 7. GFPGAN model download ──────────────────────────────────────────────────
 echo ""
 echo "--- GFPGAN Model ---"
+_phase "gfpgan-download"
 GFPGAN_PATH="${MODELS_DIR}/GFPGANv1.4.pth"
 GFPGAN_URL="https://github.com/TencentARC/GFPGAN/releases/download/v1.3.4/GFPGANv1.4.pth"
 if [ -f "${GFPGAN_PATH}" ]; then
@@ -174,38 +247,34 @@ fi
 # ── 8. Model pre-warm ─────────────────────────────────────────────────────────
 echo ""
 echo "--- Model Pre-Warm ---"
+_phase "model-load"
 if [ -f "${PHANTOM_DIR}/pipeline/__init__.py" ]; then
     echo "Loading models into cache..."
     cd "${PHANTOM_DIR}"
-    ${PYTHON} -c "
-import sys
-sys.path.insert(0, '.')
-try:
-    from pipeline.config import CONFIG
-    from pipeline.services.face_detection import FaceDetector
-    det = FaceDetector(CONFIG)
-    det._get_analyser()
-    print('InsightFace model ready.')
-except Exception as e:
-    print(f'InsightFace warmup skipped: {e}')
-
-try:
-    from pipeline.services.enhancement import Enhancer
-    enh = Enhancer()
-    if enh.available:
-        print('GFPGAN enhancement ready.')
-    else:
-        print('GFPGAN not available (model missing or gfpgan not installed).')
-except Exception as e:
-    print(f'GFPGAN warmup skipped: {e}')
-" 2>&1 || echo "Warmup failed (models will load on first request)."
+    # A separate script rather than an inline heredoc: this needs to import the
+    # pipeline, apply the configured model profile and load four models, and
+    # that is past the point where quoting it inside bash stays readable.
+    #
+    # Non-fatal by design. A pre-warm failure means a slow first frame, not a
+    # broken pod, and the pipeline downloads on demand anyway. The cuDNN check
+    # above is the one that genuinely must stop the deploy.
+    if ! ${PYTHON} "${PHANTOM_DIR}/runpod/prewarm.py" 2>&1; then
+        echo "WARNING: pre-warm incomplete — models will load on first request."
+    fi
 else
     echo "Phantom not found at ${PHANTOM_DIR} — skipping warmup."
 fi
 
 # ── 9. Summary ─────────────────────────────────────────────────────────────────
 echo ""
+_phase ""
+
 echo "=== Startup Complete ==="
+echo ""
+echo "--- Phase Timings (volume: ${VOLUME_STATE}) ---"
+printf "%b" "${_PHASE_LINES}"
+echo "PHASE total $(( $(date +%s) - _RUN_T0 ))"
+echo "VOLUME ${VOLUME_STATE}"
 echo ""
 echo "To start the pipeline (always use the workspace venv):"
 echo "  cd ${PHANTOM_DIR}"

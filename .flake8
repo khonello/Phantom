@@ -18,9 +18,13 @@ extend-exclude =
 #   api/schema.py         — WebSocket message types are declared in their own
 #                           section below the command tables
 #   desktop/main.py       — Qt attributes must be set before QtQuick is imported
+#   tests/*               — the ML layer is stubbed into sys.modules before
+#                           pipeline.* is imported; that is the whole reason
+#                           the suite runs without a GPU box
 per-file-ignores =
     pipeline/core.py:E402
     pipeline.py:E402
     pipeline/api/handlers.py:E402
     pipeline/api/schema.py:E402
     desktop/main.py:E402
+    tests/*:E402

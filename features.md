@@ -16,6 +16,11 @@ imperfection that the models remove.
 - InsightFace FaceAnalysis (buffalo_l model) with configurable detection threshold (0.35)
 - Single-face or multi-face detection modes
 - Runs on **every frame**, so the swap is always warped with current landmarks
+- Primary face is the **largest**, via `select_primary`. Previously the leftmost,
+  which is an arbitrary tie-break rather than a heuristic — nothing about how
+  images are composed makes the smallest x coordinate the subject
+- The full detection list is kept alongside the trimmed one, because the face
+  *count* is what the multi-face guard is
 - No-face streak detection with warnings after 3 consecutive empty frames
 - Thread-safe lazy initialization with execution provider selection (CUDA, CPU, ROCm, DML)
 
@@ -35,6 +40,24 @@ imperfection that the models remove.
   every frame a tracker only added latency and a stale warp
 - Resets on face loss (3 consecutive misses) and on large centroid jumps, so
   re-acquisition does not interpolate from a stale position
+- Also resets when the face is a **different person**, compared via the
+  recognition embedding detection already computed. This is what the centroid
+  test cannot see: two people standing still beside each other are only a few
+  pixels apart, so selection flipping between them produces no jump at all and
+  the two get blended into one smoothed face
+- The change must be **confirmed** — 3 low readings within the last 6 frames —
+  before smoothing is dropped. A single frame is not evidence: an embedding comes
+  from a crop that can be motion-blurred for one frame and recover, and resetting
+  on that drops the landmark EMA during movement, which is when shimmer is most
+  visible. A guard that reinstated the shimmer it exists to remove would be a
+  realism regression caused by a safety feature
+- A *window* rather than a consecutive run, because a detector flickering between
+  two people gives good, bad, good, bad — which zeroes a consecutive counter on
+  every good frame and never fires
+- The remembered identity survives `reset()`, since it answers "who was I
+  following" rather than being smoothing state — and it is *held* while a change
+  is unconfirmed, so the comparison keeps asking whether this is still the
+  tracked person rather than merely whether it matches the previous frame
 - Bypassed in multi-face mode, where per-frame detection order is not stable
 
 ### Face Restoration
@@ -87,6 +110,75 @@ anything that varies frame to frame feeds straight back into shimmer.
 
 Degrades to hull + valid-region if the XSeg model is unavailable.
 
+### Input Guards
+`guards.py` refuses inputs that would produce a wrong swap rather than swapping
+them badly. A frame with no face is obviously broken and gets fixed; a frame with
+a **stranger's** face swapped in looks like it worked, which is worse.
+
+**Source guards**, at upload, before any embedding exists:
+
+| Guard | Rule |
+|---|---|
+| Multiple faces | Rejected — which person was meant is unknowable |
+| No face | Rejected |
+| Too small | Under 110px on the shorter side |
+| Blurred | Below a Laplacian-variance floor |
+| Extreme pose | Beyond ±35° yaw, approximated from the five keypoints |
+| Identity outlier | Leave-one-out cosine against the mean of the *others*, 3+ images |
+
+Each rejection names the file and the fix ("more than one face — use a photo of
+one person alone"), because there is a person choosing photos who needs to know
+which one to replace. Partial rejection is reported too: a source built from 1 of
+3 photos succeeds, but the label stops claiming three were averaged.
+
+Two images that disagree are **both** refused — with no majority there is no way
+to tell which is the intruder, and rejecting the wrong one would be worse.
+
+**Runtime guards**, per frame, from data detection already produced: multiple
+faces, low confidence, faces under 80px, extreme pose, and heavy occlusion (XSeg
+coverage under 40% of the hull, measured from the inference the masker already
+runs — no second pass).
+
+Zero faces is *not* guarded. That is someone stepping out of shot, and holding a
+frame there would keep a stale face over an empty chair.
+
+**A guarded frame emits the last good swapped frame, unchanged.** No banner,
+border, text or tint — it goes to the virtual camera and therefore to everyone on
+the call, so anything drawn would be visible to every participant. A held frame
+reads as a network hiccup. Guards fail closed, and never update either EMA, or
+whatever they objected to would leak back out over the following frames.
+
+The raw frame is never a fallback: the operator is on the call precisely because
+they do not want their own face transmitted. `_run_vcam` holds and re-sends the
+last frame when the queue empties, so the device freezes rather than stalling —
+covering hour expiry, session end, worker death and crashes alike.
+
+Yaw prefers the detector's own `face.pose` — `buffalo_l` bundles `1k3d68.onnx`,
+which computes it during detection — falling back to a keypoint approximation on
+packs that lack it.
+
+Thresholds are `guard_*` fields on `FaceSwapConfig`, live-settable through
+`set_realism` (clamped rather than rejected). `guards = False` disables the
+runtime guards; `many_faces` bypasses them.
+
+### Guard Calibration
+Nine guard thresholds were chosen without data behind them.
+
+- `--guard-observe` evaluates and records every guard **without any of them
+  acting**. A session that enforces cannot measure itself: a guarded frame emits
+  the held frame and stops being a sample of what the camera was doing
+- `--guard-report PATH` writes the telemetry as JSON; a text summary always goes
+  to the log when the stream stops
+- Per metric: count, min, p1, p5, p50, p95, p99, max, the percentage that would
+  fail its threshold, and the **margin** between them. A negative margin means
+  the threshold sits inside normal operating range and will fire on ordinary
+  frames
+- Guards are attributed by reason, and the yaw source (`pose` vs `keypoints`) is
+  counted, since the two are not on the same scale
+- A startup capability probe reports which `Face` attributes the model pack
+  provides, because a guard whose input is missing is a silent no-op that looks
+  identical to one that never had cause to fire
+
 ---
 
 ## Pipeline Modes
@@ -110,20 +202,33 @@ The primary mode, and where development is focused.
 - Output to file
 
 ### Batch — Video
-> **Not yet implemented.** `ProcessingPipeline._process_target_batch()` handles
-> images only and reports an error for video. The FFmpeg building blocks all
-> exist in `pipeline/io/ffmpeg.py` (`extract_frames`, `create_video`,
-> `restore_audio`, `clean_temp`) but are not yet wired into the pipeline.
->
-> Affects: desktop VIDEO mode (fully built UI-side, errors on start), the CLI
-> `-t <video>` path, and the CI end-to-end test.
->
-> Planned once the live-call path meets its quality target. Because batch reuses
-> the same compositor, most of the work is frame iteration and audio/FPS
-> restoration rather than new image processing.
+- Frames extracted to lossless PNG, swapped through the **same** compositor as
+  live, re-encoded, and the original audio remuxed back on. Working through files
+  rather than streaming costs disk — roughly 4 MB per 1080p frame — but nothing
+  is lost between decode and encode, so the only generational loss is the final
+  encode
+- Landmark smoothing is **on**, unlike the image path: the frames are consecutive,
+  so the same EMA that steadies a live call applies. State is dropped before each
+  job so one clip cannot smooth against the last
+- Cancellable between frames; progress reported with a running ETA, rate-limited
+  by both a 1% step and a one-second floor so neither a 90-frame clip nor a
+  feature-length one floods the event bus
+- A frame that will not decode is passed through unswapped rather than dropped —
+  dropping one shifts every later frame against the audio
+- Scratch space is cleared before and after every job, on all exit paths
 
-Settings already in place for it: audio preservation, FPS preservation, encoder
-selection (libx264, libx265, libvpx-vp9), CRF quality (0–51, default 18).
+Settings honoured: audio preservation (skipped automatically when the source has
+no audio stream), FPS preservation, encoder selection (libx264, libx265,
+libvpx-vp9), CRF quality (0–51, default 18), `keep_frames`.
+
+`keep_fps = False` re-times the output to 30fps as a filter, so frames are
+dropped or duplicated and the duration — and therefore audio sync — is preserved.
+Frames are always *read back* at the source rate, because each extracted frame is
+one source frame.
+
+> Exercised against a stubbed swapper: FFmpeg plumbing, frame ordering, audio
+> sync in both FPS modes, cancellation, stale-frame isolation and cleanup are
+> covered. A run with the real models in the loop has not been done yet.
 
 ---
 

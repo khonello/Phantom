@@ -122,6 +122,69 @@ Exposing `8888/http` causes RunPod to initialize JupyterLab, which adds startup 
 
 ---
 
+## 5b. Docker Mode Ran Every ONNX Model on CPU
+
+**Problem**: The Docker image had no cuDNN, so `onnxruntime-gpu` could not find
+`libcudnn.so.9` and fell back to CPU — for the swapper, CodeFormer and XSeg
+alike, which is every model that decides how the output looks. Seconds per
+frame rather than a live call, and no error: ONNX Runtime reports a provider
+fallback as a warning and carries on.
+
+**Root cause**: `startup.sh` step 6b installs `nvidia-cudnn-cu12` because the
+RunPod base images do not ship it. That step exists **only on the SSH path**.
+`Dockerfile` never had an equivalent and `requirements-pipeline-gpu.txt` does
+not list it, so the production path was missing a dependency the development
+path installs by hand.
+
+This is the characteristic failure of keeping two deploy modes: the one nobody
+runs drifts, and the drift is invisible until the day it matters.
+
+**Solution**: The image now installs it, registers the library directory with
+`ldconfig`, and **fails the build** if `libcudnn.so.9` cannot be loaded.
+
+- `--no-deps`, matching startup.sh, so the resolver cannot touch the image's
+  torch/CUDA build
+- `ldconfig` rather than `LD_LIBRARY_PATH`, because `CMD` does not run a login
+  shell, so an `/etc/profile.d` script would never be sourced — and because the
+  site-packages path moves with the base image's Python version
+- A `ctypes.CDLL('libcudnn.so.9')` check at build time, so this cannot regress
+  into shipping a CPU image again
+
+**Why it was not caught**: nothing built the image. CI now runs `docker build`
+on every push — no registry and no push, just enough to catch a dead tag, an
+unresolvable package, a missing `COPY` target, and the cuDNN check above.
+
+**Runtime guarantee**: build-time checks only cover the ways this went wrong
+before. `pipeline/services/execution.py` asks the question no future variation
+can dodge — once the models are loaded, what is each session *actually* running
+on — and **raises** if an accelerator was requested and is not in use. The
+pipeline refuses to run rather than billing a GPU hour at seconds per frame.
+
+Both failure shapes are caught: the provider missing from the onnxruntime build
+at all, and the provider present but a particular model falling back anyway.
+
+`--execution-provider cpu` is the supported way to run without an accelerator
+and does not raise, since that is an explicit choice rather than a silent
+fallback.
+
+---
+
+## 5c. Keep `Dockerfile` and `RUNPOD_IMAGE` on the Same Tag
+
+**Problem**: `Dockerfile` was built `FROM` a 2.4.0 / py3.11 / cuda12.4.1 base
+while `.env` deployed 2.2.0 / py3.10 / cuda12.1.1 — a different Python, torch
+and CUDA in production than anything ever tested over SSH.
+
+**Solution**: Both now pin `runpod/pytorch:2.2.0-py3.10-cuda12.1.1-devel-ubuntu22.04`.
+Change them together or the two modes stop being comparable, and an SSH session
+stops being evidence about what production does.
+
+**Related**: `_MAX_SUPPORTED_COMPUTE_CAP` in `orchestrator.py` is tied to this
+base image's torch/ONNX. Raising the tag is what allows newer GPU
+architectures — it is not a reason to build a custom image.
+
+---
+
 ## 6. WebSocket URL: Proxy vs Direct IP
 
 **Problem**: Without a public IP, there's no `ip:port` for the WebSocket connection.
@@ -192,8 +255,12 @@ RUNPOD_MAX_PRICE=1.00
 # Or manual override (optional):
 # RUNPOD_GPU_TYPES=RTX 4090,RTX 3090
 
-# Image must be devel — runtime tag doesn't exist
-RUNPOD_IMAGE=runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
+# Image must be devel — runtime tag doesn't exist (section 5).
+# Keep this in step with Dockerfile's FROM (section 5c).
+# 2.4.0-py3.11-cuda12.4.1-devel is also valid and newer; treat moving to it as a
+# deliberate upgrade, since it changes Python, torch and CUDA at once — and it
+# is what would let _MAX_SUPPORTED_COMPUTE_CAP rise past sm_90.
+RUNPOD_IMAGE=runpod/pytorch:2.2.0-py3.10-cuda12.1.1-devel-ubuntu22.04
 
 # Auto-stop: stop pod after N minutes (0 = disabled), warning M minutes before
 RUNPOD_MAX_UPTIME=120

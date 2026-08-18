@@ -174,15 +174,20 @@ its quality target, and reuses the same compositor.
 | RunPod deployment, auto-stop, orchestrator | Working |
 | Desktop LIVE mode, audio, voice, virtual camera | Working |
 | Batch — image | Working |
-| **Batch — video** | **Not implemented** |
+| Batch — video | Working |
+| **Large file transfer** | **Not implemented** |
 | Realism knobs in the desktop UI | Not exposed (API only) |
 | RTMP output sink | Placeholder |
 | Automated tests | None |
 
-Video batch is stubbed at `ProcessingPipeline._process_target_batch()`. The
-FFmpeg building blocks exist in `pipeline/io/ffmpeg.py`; they are not yet wired
-in. This also means the CI end-to-end test and the desktop VIDEO mode do not
-currently pass.
+Batch video extracts frames, swaps each one through the same compositor as live,
+re-encodes and restores the original audio. Progress is reported as it goes and a
+job can be cancelled between frames.
+
+What is still missing is getting a large file to the worker in the first place:
+`upload_source` is base64 inside a single JSON message, which is fine for a
+200 KB face and unusable for a 2 GB video. Until that exists, batch video is
+practical over the CLI against a local path, not over the API.
 
 ### Where this is going
 
