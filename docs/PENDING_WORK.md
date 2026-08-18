@@ -47,8 +47,11 @@ which is exactly how an `F821` sat undetected in `orchestrator.py`. It also runs
 `bash -n` on both shell scripts, since a syntax error there is a failed
 provision discovered after paying for a GPU.
 
-**No run has been observed yet.** This is the cheapest possible verification, so
-do it before the pod.
+**First run: `unit` and `test` passed; `lint` and `docker` failed and are
+fixed.** Details below — both failures were real and both were worth catching
+here rather than on a pod.
+
+This is the cheapest possible verification, so keep doing it before the pod.
 
 Expect four jobs: `lint`, `unit`, `test`, `docker`.
 
@@ -60,8 +63,25 @@ Expect four jobs: `lint`, `unit`, `test`, `docker`.
 | `docker` | image build. Catches a dead base tag, an unresolvable package, or the cuDNN check failing |
 
 The `test` job matters more than its name suggests: it is the first time the
-batch-video path runs with real InsightFace and ONNX rather than a stub. If it
-passes, batch video is verified on CPU and only the GPU path remains open.
+batch-video path runs with real InsightFace and ONNX rather than a stub.
+
+**It passed.** Batch video is therefore verified on CPU with real models —
+extraction, per-frame swap, encode, audio restore, and a PSNR comparison against
+the reference render. Only the GPU path remains open for it.
+
+What the first run caught, both fixed:
+
+- **`lint`** — `mypy pipeline` exits non-zero on any error, and the 11
+  pre-existing errors were enough. That job had been failing on `main` all
+  along. All 11 are now fixed at their sites rather than blanket-ignored, and
+  `mypy pipeline` reports clean.
+- **`docker`** — the cuDNN step used `nvidia.cudnn.__file__`, which is **None**
+  for a namespace package, so `os.path.dirname` raised TypeError and the build
+  failed. `startup.sh` had the identical bug, hidden behind `2>/dev/null`, where
+  it would have produced an unset library path and a silent CPU fallback — and
+  with the new fatal cuDNN check, a failed provision. Both now use
+  `runpod/cudnn_path.py`, which handles namespace and regular packages and
+  reports rather than swallowing.
 
 ### 0.3 Have a source face ready
 

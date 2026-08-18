@@ -85,7 +85,9 @@ class FileOutput(OutputSink):
         os.makedirs(os.path.dirname(file_path) or '.', exist_ok=True)
 
         # Set up VideoWriter
-        fourcc = cv2.VideoWriter_fourcc(*codec)
+        # Present at runtime; absent from the opencv type stubs, which do not
+        # model the cv2 module's dynamic attributes.
+        fourcc = cv2.VideoWriter_fourcc(*codec)  # type: ignore[attr-defined]
         self._writer = cv2.VideoWriter(file_path, fourcc, fps, (width, height))
 
         if not self._writer.isOpened():

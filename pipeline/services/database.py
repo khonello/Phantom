@@ -98,7 +98,7 @@ class FaceDatabase:
         """
         self.detector = detector
         self.config = config
-        self._cache: dict = {}  # path -> Face
+        self._cache: Dict[str, Face] = {}
 
     def get_source_face(self, paths: List[str]) -> Optional[Face]:
         """

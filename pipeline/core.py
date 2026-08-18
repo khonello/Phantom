@@ -287,8 +287,13 @@ def limit_resources() -> None:
             kernel32 = ctypes.windll.kernel32
             kernel32.SetProcessWorkingSetSize(-1, ctypes.c_size_t(memory), ctypes.c_size_t(memory))
         else:
+            # POSIX only, which is why it is imported inside the non-Windows
+            # branch. mypy checks against the current platform's stubs, so on
+            # Windows it cannot see either name.
             import resource
-            resource.setrlimit(resource.RLIMIT_DATA, (memory, memory))
+            resource.setrlimit(  # type: ignore[attr-defined]
+                resource.RLIMIT_DATA, (memory, memory),  # type: ignore[attr-defined]
+            )
 
 
 def release_resources() -> None:

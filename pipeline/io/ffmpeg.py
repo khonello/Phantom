@@ -30,7 +30,10 @@ from pipeline.logging import emit_status, emit_warning
 
 # Monkey patch SSL for macOS
 if platform.system().lower() == 'darwin':
-    ssl._create_default_https_context = ssl._create_unverified_context
+    # The two factories accept different keyword sets, so this is not a clean
+    # type substitution — but every call site here passes no arguments, which
+    # both accept. Deliberate, and narrower than disabling the check.
+    ssl._create_default_https_context = ssl._create_unverified_context  # type: ignore[assignment] # noqa: E501
 
 TEMP_FILE = 'temp.mp4'
 TEMP_DIRECTORY = 'temp'

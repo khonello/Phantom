@@ -25,6 +25,9 @@ RUN apt-get update -qq \
 # Python dependencies — cached layer, only rebuilds when requirements change
 WORKDIR /app
 COPY requirements-pipeline-gpu.txt .
+# Just this helper, ahead of the full COPY, so the cuDNN layer below stays
+# cacheable across code changes.
+COPY runpod/cudnn_path.py /tmp/cudnn_path.py
 RUN pip install --no-cache-dir -r requirements-pipeline-gpu.txt
 
 # cuDNN 9 for ONNX Runtime. The SSH path installs this in startup.sh step 6b;
@@ -43,8 +46,7 @@ RUN pip install --no-cache-dir -r requirements-pipeline-gpu.txt
 # The CDLL check fails the build rather than shipping an image that quietly
 # runs on CPU — the whole point is that this cannot go wrong unnoticed.
 RUN pip install --no-cache-dir --no-deps 'nvidia-cudnn-cu12>=9.0' \
-    && python -c "import os, nvidia.cudnn; print(os.path.join(os.path.dirname(nvidia.cudnn.__file__), 'lib'))" \
-        > /etc/ld.so.conf.d/cudnn.conf \
+    && python /tmp/cudnn_path.py > /etc/ld.so.conf.d/cudnn.conf \
     && ldconfig \
     && python -c "import ctypes; ctypes.CDLL('libcudnn.so.9')" \
     && echo "cuDNN 9 resolved."

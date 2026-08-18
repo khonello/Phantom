@@ -34,7 +34,16 @@ Small, independent, and they stop the other stages building on sand.
         file, so a run that produced nothing could still pass by comparing the
         committed copy against the snapshot. Output now goes to `$RUNNER_TEMP`
         and is checked for existence before the comparison
-- [ ] **Clear the remaining mypy errors** — `Queue` and `dict` type arguments,
+- [x] **Clear the remaining mypy errors** — `mypy pipeline` is clean. This was
+      not cosmetic: the CI `lint` job runs it and exits non-zero on any error, so
+      that job had been failing on every push. Each was fixed at its site rather
+      than blanket-ignored — a real `Dict[str, Face]` annotation, parameterised
+      `Queue`s, and narrow per-line ignores where the cause is a missing stub
+      (`cv2.VideoWriter_fourcc`, the runpod SDK) or a platform-only module
+      (`resource`, POSIX). `mypy pipeline desktop` still reports 25, all in
+      `desktop/`, which CI does not check.
+
+      Superseded detail, kept because the count was quoted in planning: — `Queue` and `dict` type arguments,
       platform-specific module attributes, a `cv2` constant. All trivial; none
       are in code written recently. **11**, not 12 — and that is `mypy pipeline`,
       which is what CI runs. The command in CLAUDE.md, `mypy pipeline desktop`,

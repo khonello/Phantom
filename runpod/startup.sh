@@ -194,10 +194,10 @@ fi
 # Ensure the cuDNN .so is on LD_LIBRARY_PATH for onnxruntime.
 # Export for this session (inherited by nohup pipeline) and persist
 # to /etc/profile.d/ for manual SSH sessions.
-CUDNN_LIB_DIR=$(${PYTHON} -c "
-import os, nvidia.cudnn
-print(os.path.join(os.path.dirname(nvidia.cudnn.__file__), 'lib'))
-" 2>/dev/null || echo "")
+# The same helper the Docker build uses, so the two cannot diverge again.
+# Errors are shown rather than swallowed: the previous `2>/dev/null` turned
+# a real TypeError into an empty result and a misleading warning.
+CUDNN_LIB_DIR=$(${PYTHON} "${PHANTOM_DIR}/runpod/cudnn_path.py" || echo "")
 if [ -n "${CUDNN_LIB_DIR}" ] && [ -d "${CUDNN_LIB_DIR}" ]; then
     export LD_LIBRARY_PATH="${CUDNN_LIB_DIR}:${LD_LIBRARY_PATH:-}"
     echo "export LD_LIBRARY_PATH=\"${CUDNN_LIB_DIR}:\${LD_LIBRARY_PATH:-}\"" \

@@ -191,6 +191,16 @@ check('startup.sh fails hard when cuDNN cannot load',
 check('the Docker build fails hard when cuDNN cannot load',
       'libcudnn.so.9' in dockerfile,
       'the SSH path checks at setup; the image must check at build')
+check('both paths resolve the cuDNN directory with the same helper',
+      'cudnn_path.py' in dockerfile and 'cudnn_path.py' in startup,
+      'they previously had the same bug and fixed it in neither')
+check('neither path still uses nvidia.cudnn.__file__',
+      '__file__' not in dockerfile
+      and 'nvidia.cudnn.__file__' not in startup,
+      'it is None for a namespace package, which broke the Docker build')
+check('startup.sh no longer swallows the cuDNN resolution error',
+      'cudnn_path.py" || echo' in startup,
+      'the old 2>/dev/null turned a TypeError into a misleading warning')
 # Follow the chain rather than grepping one file: Dockerfile -> entrypoint ->
 # prewarm. Asserting only on the Dockerfile would pass for the wrong reasons.
 entrypoint_path = _os.path.join(_REPO_ROOT, 'runpod', 'entrypoint.sh')

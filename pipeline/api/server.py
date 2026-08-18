@@ -75,7 +75,11 @@ class WebSocketAPIServer:
 
         # Frame queue for WebSocket push mode — desktop sends JPEG frames here,
         # pipeline reads from it instead of opening a local VideoCapture.
-        self.pipeline.frame_queue: queue.Queue = queue.Queue(maxsize=10)  # type: ignore[assignment]
+        # Built locally then assigned: an annotation on another object's
+        # attribute is not valid Python, and `frame_queue` is already typed on
+        # ProcessingPipeline, so this needs no annotation of its own.
+        frame_queue: 'queue.Queue[Any]' = queue.Queue(maxsize=10)
+        self.pipeline.frame_queue = frame_queue
 
         self._running = False
         self._stop_event = threading.Event()
@@ -498,9 +502,11 @@ class WebSocketAPIServer:
 
         if pod_id and api_key:
             try:
+                # The runpod SDK ships no type information, so mypy sees a
+                # module without these attributes.
                 import runpod
-                runpod.api_key = api_key
-                runpod.stop_pod(pod_id)
+                runpod.api_key = api_key  # type: ignore[attr-defined]
+                runpod.stop_pod(pod_id)  # type: ignore[attr-defined]
                 print(
                     f'[AUTO_STOP] Pod {pod_id} stopped via RunPod API.',
                     file=sys.stderr,

@@ -9,7 +9,7 @@ Extracted from stream.py:_enhancement_worker().
 
 import queue
 import threading
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 from pipeline.processing.frame_processor import FrameProcessor
 from pipeline.types import Frame
@@ -45,8 +45,8 @@ class AsyncProcessor:
 
         # Queues are size 3 to allow burst smoothing while still dropping
         # under sustained overload. Size 1 caused too many silent drops.
-        self._input_queue: queue.Queue = queue.Queue(maxsize=3)
-        self._output_queue: queue.Queue = queue.Queue(maxsize=3)
+        self._input_queue: 'queue.Queue[Any]' = queue.Queue(maxsize=3)
+        self._output_queue: 'queue.Queue[Any]' = queue.Queue(maxsize=3)
 
         self._thread: Optional[threading.Thread] = None
         self._running = False
