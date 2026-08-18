@@ -13,3 +13,4 @@ Python_3_12_0venv
 
 *.jpeg
 *.npy
+.env.backup-*

@@ -25,19 +25,18 @@ All local, all free. Twenty minutes.
 ```bash
 python -m pytest tests/ -q                              # expect: 7 passed, ~50s
 flake8 pipeline.py pipeline desktop tests tools runpod  # expect: silent
-mypy pipeline                                           # expect: 11 errors (baseline)
+mypy pipeline                                           # expect: clean
 bash -n runpod/startup.sh && bash -n runpod/entrypoint.sh
 ```
 
-Seven test modules, ~245 checks. `tests/test_wiring.py` is the one to watch: it
+Eight test modules, ~250 checks. `tests/test_wiring.py` is the one to watch: it
 asserts the seams *between* files — that every forwarded env var is read, that
 `Dockerfile` and `.env.example` pin the same image, that both deploy paths
 pre-warm. Every historical break in this repo lived in one of those gaps.
 
-The 11 mypy errors are known and unrelated to recent work — `Queue` and `dict`
-type arguments, platform-specific attributes. `mypy pipeline desktop` reports 36;
-the extra 25 are all in `desktop/` which CI does not check. Do not treat either
-number as a regression unless it moves.
+`mypy pipeline` is clean — all 11 pre-existing errors were fixed, which also
+turned the CI `lint` job green for the first time. `mypy pipeline desktop` still
+reports 25, all in `desktop/`, which CI does not check.
 
 ### 0.2 Push and watch CI
 
@@ -95,38 +94,132 @@ someone else.
 
 ---
 
-## Phase 1 — Decide the cold-start experiment
+## Phase 1 — Set up the cold-start experiment
 
-Read this before starting anything, because one of the two measurements is
-destructive and the choice affects what Phase 2 can answer.
+Cold start needs timing under two conditions, and they cost very differently:
 
-Cold start needs timing under two conditions:
-
-| Condition | Cost | How |
+| Condition | What it measures | Cost |
 |---|---|---|
-| **Warm volume** | Free | Your existing volume already has venv, models and repo. Just `start` |
-| **Empty volume** | A full re-provision | Requires a volume with nothing on it |
+| **Warm volume** | What a returning customer waits for. The common case | Free — the existing volume already has venv, models and repo |
+| **Empty volume** | First-ever deploy into a region. Also what a *fallback* region costs | A full re-provision, and a second volume or a wipe |
 
-`RUNPOD_DATACENTERS` currently lists **one** datacenter, so there is no second
-region whose volume is already empty to measure for free.
+Current config is a single datacenter: `RUNPOD_DATACENTERS=EU-RO-1:z8now7p5ts`.
+Its volume is warm, so there is no second region whose volume is already empty to
+measure for free.
 
-Three options, in order of preference:
+### 1.1 Check what already exists
 
-1. **Add a second datacenter and volume.** Gets the empty-volume number as a side
-   effect of the regional redundancy Stage 4 wants anyway, and leaves the working
-   volume untouched. Costs a small standing storage charge (see the note on
-   volume billing below).
-2. **Measure warm only for now.** Perfectly reasonable. The warm number is what a
-   returning customer experiences and is the more common case. Record that the
-   empty case is unmeasured rather than guessing at it.
-3. **Wipe the existing volume.** Cheapest in storage, worst in risk: everything
-   re-downloads, and a failed re-provision leaves nothing to fall back to. Only
-   do this deliberately.
+```bash
+python runpod/orchestrator.py status        # is there a pod, and is it running?
+python runpod/orchestrator.py datacenters   # every datacenter RunPod offers
+python runpod/orchestrator.py gpus          # GPUs matching MIN_VRAM / MAX_PRICE
+```
 
-> **Volume billing.** Network volumes bill at $0.07/GB/month **whether or not any
-> pod is running**. Egress is free (confirmed in RunPod's pricing docs), so
-> bandwidth is not the cost line to watch — idle per-region volumes are. If a
-> second datacenter is added for option 1, that volume bills continuously.
+`status` reads `RUNPOD_POD_ID` from `.env`. Three possible answers:
+
+- **RUNNING** — a pod is live and billing. `stop` it before measuring, or the
+  cold-start number is meaningless
+- **EXITED / STOPPED** — the pod exists with its container disk intact. `resume`
+  is the fast path; it is *not* a cold start
+- **not found** — it was terminated. `start` is the only option, and that is a
+  genuine cold start
+
+> `start` **always creates a new pod**. `resume` restarts the existing one. They
+> measure different things: `resume` skips provisioning and keeps the container
+> disk, so `apt-get` does not re-run.
+
+### 1.2 Warm-volume measurement — do this one regardless
+
+Nothing to set up. It is the common case and it costs one pod session.
+
+```bash
+python runpod/orchestrator.py status
+python runpod/orchestrator.py stop      # only if it reports RUNNING
+python runpod/orchestrator.py start     # always a fresh pod
+```
+
+The phase table prints at the end and says `volume: warm`. Save the output.
+
+Note this still runs `apt-get` and re-clones nothing — the container disk is new
+even though the volume is warm, which is exactly the case a returning customer
+hits.
+
+### 1.3 Empty-volume measurement — pick one
+
+**Option A — a second datacenter and volume (recommended).** Leaves the working
+volume untouched, and the second region is the regional redundancy Stage 4 wants
+anyway.
+
+1. `python runpod/orchestrator.py datacenters` and pick one that is **not**
+   `EU-RO-1`. `EU-SE-1`, `US-KS-2` and `CA-MTL-1` are commonly available; the
+   command prints what actually exists.
+2. RunPod dashboard → **Storage** → **New Network Volume**. Choose that
+   datacenter, size it **at least 30 GB** (see the sizing note below). Copy the
+   volume ID it gives you.
+3. Put the new pair **first** in `.env`, because the orchestrator tries
+   datacenters in the order listed and only falls through when no GPU is free.
+   Listing it second would land you back on the warm volume:
+
+   ```env
+   RUNPOD_DATACENTERS=<NEW_DC>:<NEW_VOL_ID>,EU-RO-1:z8now7p5ts
+   ```
+
+4. `python runpod/orchestrator.py start`. The phase table reports
+   `volume: empty`, and `pip-install` will dominate it.
+5. Afterwards, put `EU-RO-1` back first so normal sessions use the warm volume:
+
+   ```env
+   RUNPOD_DATACENTERS=EU-RO-1:z8now7p5ts,<NEW_DC>:<NEW_VOL_ID>
+   ```
+
+   Keep both entries — that is the fallback working as intended, and the second
+   volume is now warm too.
+
+**Option B — measure warm only.** Entirely reasonable. Record that the empty
+case is unmeasured rather than estimating it. The main thing you lose is knowing
+what a fallback region costs the first time it is used.
+
+**Option C — wipe the existing volume.** Cheapest in storage, worst in risk:
+
+```bash
+# On the pod, over SSH. Everything below re-downloads.
+rm -rf /workspace/venv /workspace/models /workspace/Phantom
+```
+
+A failed re-provision then leaves nothing to fall back to. Only do this
+deliberately, and not while anything else depends on the pod.
+
+### 1.4 Two sizing notes before you create anything
+
+**`RUNPOD_VOLUME_DISK=20` is tight for this session.** Rough budget:
+
+| Item | Size |
+|---|---|
+| venv (torch, tensorflow, onnxruntime) | ~6–8 GB |
+| Models (inswapper, CodeFormer, XSeg, GFPGAN, buffalo_l) | ~1.6 GB |
+| hyperswap_1a_256 | 0.4 GB |
+| Debug frames at stride 3, limit 1500 | ~2 GB |
+| Batch scratch, if a video is processed | 4 MB per 1080p frame |
+
+That is ~12 GB before any batch job. **30 GB** is the safer figure, and batch
+video on a long 1080p clip wants considerably more — scratch now lands on
+`/workspace/tmp`, which is this volume.
+
+**Volumes bill while stopped**, at $0.07/GB/month regardless of whether a pod
+runs. Egress is free, so bandwidth is not the cost line — idle per-region
+volumes are. A second 30 GB volume is about $2.10/month standing.
+
+### 1.5 What you should have at the end
+
+- A phase table labelled `volume: warm`
+- Optionally a second labelled `volume: empty`
+- Both saved somewhere — they are the Stage 1 deliverable and are printed, not
+  written to a file
+
+Those two numbers are what settle the Docker question in Phase 3.4: if
+`pip-install` dominates, bake an image; if model download dominates, do not,
+because the Dockerfile deliberately leaves weights on the volume and the real
+fix is pre-seeding regional volumes instead.
 
 ---
 
