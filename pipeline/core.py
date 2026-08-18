@@ -284,7 +284,11 @@ def limit_resources() -> None:
             memory = CONFIG.max_memory * 1024 ** 6
         if platform.system().lower() == 'windows':
             import ctypes
-            kernel32 = ctypes.windll.kernel32
+            # Windows-only, and this branch only runs there. mypy checks against
+            # the current platform's stubs, so on Linux — where CI runs — it
+            # cannot see this attribute. The mirror of the `resource` ignore
+            # below, which is invisible on Windows for the same reason.
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
             kernel32.SetProcessWorkingSetSize(-1, ctypes.c_size_t(memory), ctypes.c_size_t(memory))
         else:
             # POSIX only, which is why it is imported inside the non-Windows

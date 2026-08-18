@@ -13,7 +13,12 @@ jobs:
     with:
      python-version: 3.9
   - run: pip install flake8
-  - run: pip install mypy
+  # numpy, so mypy can resolve `npt.NDArray[Any]` and see `Frame` as a type
+  # alias rather than a bare variable. Without it the whole types module
+  # degrades to Any and mypy reports errors that do not reproduce locally,
+  # where numpy is installed. The heavy dependencies stay out — they are
+  # covered by ignore_missing_imports.
+  - run: pip install mypy numpy
   # `runpod`, `tests` and `tools` were outside this command, which is how an
   # F821 sat in orchestrator.py unnoticed — the deploy tooling was the one part
   # of the repo nothing checked.
