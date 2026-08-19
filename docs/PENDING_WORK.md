@@ -82,7 +82,32 @@ What the first run caught, both fixed:
   `runpod/cudnn_path.py`, which handles namespace and regular packages and
   reports rather than swallowing.
 
-### 0.3 Have a source face ready
+### 0.3 Model weights
+
+`pipeline/models/` is gitignored, so weights travel by disk image rather than by
+clone. Present locally:
+
+| Weight | Size | Why it is kept locally |
+|---|---|---|
+| `inswapper_128.onnx` | 529 MB | The incumbent swapper |
+| `hyperswap_1a_256.onnx` | 384 MB | The candidate Phase 2 compares against it |
+
+Keeping hyperswap on disk is **archival, not a speed optimisation**. The pod
+downloads it straight from GitHub, and uploading a local copy from here would be
+slower than letting it do that. The reason to hold it is supply chain: the
+release tag is load-bearing and demonstrably mutable — `models-3.0.0` and
+`models-3.4.0` both 404 for these exact files, and only `models-3.3.0` serves
+them. If facefusion retags or removes that release, a pipeline that depends on
+those weights has no way to obtain them.
+
+`1b` and `1c` are not held. They are one `curl` away and nothing depends on them
+until there is a reason to compare all three:
+
+```bash
+curl -L -o pipeline/models/hyperswap_1b_256.onnx   https://github.com/facefusion/facefusion-assets/releases/download/models-3.3.0/hyperswap_1b_256.onnx
+```
+
+### 0.4 Have a source face ready
 
 One clear, frontal, well-lit photo of one person, face at least 110px on the
 shorter side. The source guards will reject anything else, which is the point —
@@ -101,11 +126,16 @@ Cold start needs timing under two conditions, and they cost very differently:
 | Condition | What it measures | Cost |
 |---|---|---|
 | **Warm volume** | What a returning customer waits for. The common case | Free — the existing volume already has venv, models and repo |
-| **Empty volume** | First-ever deploy into a region. Also what a *fallback* region costs | A full re-provision, and a second volume or a wipe |
+| **Empty volume** | First-ever deploy into a region. Also what a *fallback* region costs | A second volume that bills continuously — **deferred, see 1.4** |
 
 Current config is a single datacenter: `RUNPOD_DATACENTERS=EU-RO-1:z8now7p5ts`.
 Its volume is warm, so there is no second region whose volume is already empty to
 measure for free.
+
+**Do the warm measurement now; defer the empty one.** A second volume bills from
+the moment it exists, and paying for regional redundancy before the pipeline is
+proven on a GPU is buying resilience you cannot use yet. The warm number is the
+one that describes what a returning customer waits for.
 
 ### 1.1 Check what already exists
 
@@ -128,7 +158,44 @@ python runpod/orchestrator.py gpus          # GPUs matching MIN_VRAM / MAX_PRICE
 > measure different things: `resume` skips provisioning and keeps the container
 > disk, so `apt-get` does not re-run.
 
-### 1.2 Warm-volume measurement — do this one regardless
+### 1.2 Resize the volume — do this before provisioning anything
+
+`RUNPOD_VOLUME_DISK=20` is too small for this session. Budget:
+
+| Item | Size |
+|---|---|
+| venv (torch, tensorflow, onnxruntime) | ~6–8 GB |
+| Models (inswapper, CodeFormer, XSeg, GFPGAN, buffalo_l) | ~1.6 GB |
+| hyperswap_1a_256, if measured | 0.4 GB |
+| Debug frames at stride 3, limit 1500 | ~2 GB |
+| Batch scratch, if a video is processed | 4 MB per 1080p frame |
+
+That is **~12 GB before any batch job**, and batch scratch now lands on
+`/workspace/tmp`, which is this volume. A five-minute 1080p clip alone wants
+~36 GB of scratch.
+
+**Do this:**
+
+1. RunPod dashboard → **Storage** → volume `z8now7p5ts` → **Edit** → raise to
+   **30 GB**. Volumes can be grown in place and cannot be shrunk, so 30 is a
+   deliberate middle: comfortable for this session, not paying for batch
+   headroom you may never use.
+2. Update `.env` so a future `start` requests the same:
+
+   ```env
+   RUNPOD_VOLUME_DISK=30
+   ```
+
+Cost: $0.07/GB/month, billed **whether or not a pod is running**. 30 GB is
+about $2.10/month. Going to 100 GB "just in case" would be $7/month standing for
+capacity that sits idle — worth avoiding until a real batch job needs it.
+
+> If you later run long 1080p batch jobs, raise it again or point
+> `PHANTOM_TEMP_DIR` at the container disk for that job. Scratch is transient, so
+> it does not need to live on the persistent volume — it lives there only because
+> the container disk is the smaller of the two.
+
+### 1.3 Warm-volume measurement — the one to actually run
 
 Nothing to set up. It is the common case and it costs one pod session.
 
@@ -144,82 +211,69 @@ Note this still runs `apt-get` and re-clones nothing — the container disk is n
 even though the volume is warm, which is exactly the case a returning customer
 hits.
 
-### 1.3 Empty-volume measurement — pick one
+### 1.4 Empty-volume measurement — deferred on purpose
 
-**Option A — a second datacenter and volume (recommended).** Leaves the working
-volume untouched, and the second region is the regional redundancy Stage 4 wants
-anyway.
+The empty-volume number tells you what a *first-ever* deploy into a region
+costs, which matters for two things: the Docker decision, and knowing what a
+fallback region costs the first time it is used.
 
-1. `python runpod/orchestrator.py datacenters` and pick one that is **not**
-   `EU-RO-1`. `EU-SE-1`, `US-KS-2` and `CA-MTL-1` are commonly available; the
-   command prints what actually exists.
-2. RunPod dashboard → **Storage** → **New Network Volume**. Choose that
-   datacenter, size it **at least 30 GB** (see the sizing note below). Copy the
-   volume ID it gives you.
-3. Put the new pair **first** in `.env`, because the orchestrator tries
-   datacenters in the order listed and only falls through when no GPU is free.
-   Listing it second would land you back on the warm volume:
+Getting it needs a second network volume in a second datacenter — **and that
+volume bills continuously from the moment it exists, whether or not anything
+uses it.**
+
+**Do not do this yet.** Spending on regional redundancy before the pipeline is
+proven is paying for resilience you cannot yet use. The warm number is the one
+that describes what a returning customer actually waits for, and it is free.
+
+Revisit when **both** are true:
+
+- The pipeline is confirmed working end to end on a GPU — hyperswap produces a
+  face, guards behave, latency holds
+- You are either taking real sessions, or `provision` has actually failed to
+  find a GPU in `EU-RO-1` and the fallback is no longer theoretical
+
+When that day comes, the procedure is:
+
+1. `python runpod/orchestrator.py datacenters`, pick one that is **not**
+   `EU-RO-1`
+2. RunPod dashboard → **Storage** → **New Network Volume** in that datacenter,
+   30 GB. Copy the volume ID
+3. Put the new pair **first**, because the orchestrator tries datacenters in the
+   order listed and only falls through when no GPU is free. Listing it second
+   would land you back on the warm volume and silently measure the wrong thing:
 
    ```env
    RUNPOD_DATACENTERS=<NEW_DC>:<NEW_VOL_ID>,EU-RO-1:z8now7p5ts
    ```
 
-4. `python runpod/orchestrator.py start`. The phase table reports
-   `volume: empty`, and `pip-install` will dominate it.
-5. Afterwards, put `EU-RO-1` back first so normal sessions use the warm volume:
+4. `python runpod/orchestrator.py start` → the phase table reports
+   `volume: empty`
+5. Swap the order back so normal sessions use the warm volume. Keep both
+   entries — that is the fallback working as intended, and the second volume is
+   warm now too
 
-   ```env
-   RUNPOD_DATACENTERS=EU-RO-1:z8now7p5ts,<NEW_DC>:<NEW_VOL_ID>
-   ```
+**In the meantime**, record the empty case as unmeasured rather than estimating
+it. An invented number in the cold-start budget is worse than an admitted gap.
 
-   Keep both entries — that is the fallback working as intended, and the second
-   volume is now warm too.
-
-**Option B — measure warm only.** Entirely reasonable. Record that the empty
-case is unmeasured rather than estimating it. The main thing you lose is knowing
-what a fallback region costs the first time it is used.
-
-**Option C — wipe the existing volume.** Cheapest in storage, worst in risk:
+**The one alternative that costs nothing** is wiping the existing volume, and it
+is worse than waiting: everything re-downloads, and a failed re-provision leaves
+nothing to fall back to.
 
 ```bash
-# On the pod, over SSH. Everything below re-downloads.
+# Only if you have decided the number is worth the risk. On the pod, over SSH.
 rm -rf /workspace/venv /workspace/models /workspace/Phantom
 ```
 
-A failed re-provision then leaves nothing to fall back to. Only do this
-deliberately, and not while anything else depends on the pod.
-
-### 1.4 Two sizing notes before you create anything
-
-**`RUNPOD_VOLUME_DISK=20` is tight for this session.** Rough budget:
-
-| Item | Size |
-|---|---|
-| venv (torch, tensorflow, onnxruntime) | ~6–8 GB |
-| Models (inswapper, CodeFormer, XSeg, GFPGAN, buffalo_l) | ~1.6 GB |
-| hyperswap_1a_256 | 0.4 GB |
-| Debug frames at stride 3, limit 1500 | ~2 GB |
-| Batch scratch, if a video is processed | 4 MB per 1080p frame |
-
-That is ~12 GB before any batch job. **30 GB** is the safer figure, and batch
-video on a long 1080p clip wants considerably more — scratch now lands on
-`/workspace/tmp`, which is this volume.
-
-**Volumes bill while stopped**, at $0.07/GB/month regardless of whether a pod
-runs. Egress is free, so bandwidth is not the cost line — idle per-region
-volumes are. A second 30 GB volume is about $2.10/month standing.
-
 ### 1.5 What you should have at the end
 
-- A phase table labelled `volume: warm`
-- Optionally a second labelled `volume: empty`
-- Both saved somewhere — they are the Stage 1 deliverable and are printed, not
+- A phase table labelled `volume: warm`, saved somewhere — it is printed, not
   written to a file
+- The empty-volume row explicitly marked *not measured*, with the reason
 
-Those two numbers are what settle the Docker question in Phase 3.4: if
-`pip-install` dominates, bake an image; if model download dominates, do not,
-because the Dockerfile deliberately leaves weights on the volume and the real
-fix is pre-seeding regional volumes instead.
+That warm number plus the phase breakdown is what settles the Docker question in
+Phase 3.4. It is a weaker input than having both, and that is the right trade
+for now: if `pip-install` dominates even a warm start, the answer is already
+clear without paying for a second volume to confirm it.
 
 ---
 
