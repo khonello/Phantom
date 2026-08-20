@@ -15,6 +15,8 @@ from PySide6.QtQuick import QQuickPaintedItem
 
 from pipeline.io.ffmpeg import is_image
 from pipeline.api.schema import MAX_PHOTO_BYTES, MAX_PHOTO_TARGETS, PRESETS
+from desktop import effects as overlay_effects
+from desktop import filters as look_filters
 from desktop.controller import PipelineClient
 from desktop.audio import AudioCapture, AudioPlayback, JitterBuffer
 from desktop.voice import VoiceTransformer
@@ -183,6 +185,10 @@ class Bridge(QObject):
     batchRunningChanged = Signal(bool)
     batchCompleteChanged = Signal(bool)
     mediaTabChanged = Signal(str)
+    filterPanelChanged = Signal(bool)
+    filterChanged = Signal(str)
+    effectChanged = Signal(str)
+    filtersEnabledChanged = Signal(bool)
     templatesChanged = Signal()
     selectedTemplateChanged = Signal(str)
     photoTargetsChanged = Signal()
@@ -234,6 +240,14 @@ class Bridge(QObject):
         self._templates: List[Dict[str, Any]] = []
         self._selected_template: str = ''
         self._templates_loading = False
+        # Whether the filter controls are showing. They do not replace the
+        # body — the body shrinks and they appear beneath it — so this is the
+        # same view in every mode rather than a separate page that would need
+        # its own idea of what to display.
+        self._filter_panel: bool = False
+        self._filter: str = 'none'
+        self._effect: str = 'none'
+        self._filters_enabled: bool = False
         self._webcam_version = 0
         self._live_version = 0
         self._quality = 'optimal'
@@ -712,6 +726,125 @@ class Bridge(QObject):
         """How many photos one job accepts."""
         return MAX_PHOTO_TARGETS
 
+    # -- Filter panel ----------------------------------------------
+    #
+    # The filter controls sit under the body rather than replacing it. A
+    # separate window would need its own idea of what to preview, and got that
+    # wrong the moment the image tab was open: it showed the live camera in a
+    # mode that has no live camera. Shrinking the body sidesteps the question -
+    # whatever the mode was already showing is what a filter is judged against.
+
+    @Property(bool, notify=filterPanelChanged)
+    def filterPanel(self) -> bool:
+        """Whether the filter controls are showing."""
+        return self._filter_panel
+
+    @Property(list, constant=True)
+    def filterList(self) -> List[Dict[str, str]]:
+        """Every available filter as {key, name}."""
+        return look_filters.names()
+
+    @Property(str, notify=filterChanged)
+    def activeFilter(self) -> str:
+        """Key of the selected filter."""
+        return self._filter
+
+    @Property(list, constant=True)
+    def effectList(self) -> List[Dict[str, str]]:
+        """Every available overlay effect as {key, name}."""
+        return overlay_effects.names()
+
+    @Property(str, notify=effectChanged)
+    def activeEffect(self) -> str:
+        """Key of the selected overlay effect."""
+        return self._effect
+
+    @Property(bool, notify=filtersEnabledChanged)
+    def filtersEnabled(self) -> bool:
+        """Whether the selected filter is actually being applied."""
+        return self._filters_enabled
+
+    @Slot()
+    def toggleFilterPanel(self) -> None:
+        """Show or hide the filter controls."""
+        self._filter_panel = not self._filter_panel
+        self.filterPanelChanged.emit(self._filter_panel)
+
+    @Slot(str)
+    def selectFilter(self, key: str) -> None:
+        """
+        Choose a filter.
+
+        Choosing is not applying: the enable toggle is separate so a look can
+        be auditioned on the filter page without it reaching the call.
+        """
+        if look_filters.get(key) is None or key == self._filter:
+            return
+        self._filter = key
+        self.filterChanged.emit(key)
+
+    @Slot(str)
+    def selectEffect(self, key: str) -> None:
+        """Choose an overlay effect. Applying is still the APPLY button."""
+        if overlay_effects.get(key) is None or key == self._effect:
+            return
+        self._effect = key
+        self.effectChanged.emit(key)
+
+    @Slot()
+    def toggleFilters(self) -> None:
+        """Turn the selected filter on or off everywhere."""
+        self._filters_enabled = not self._filters_enabled
+        self.filtersEnabledChanged.emit(self._filters_enabled)
+
+    def _filter_key(self) -> str:
+        """The filter to apply right now, or '' for none."""
+        if not self._filters_enabled:
+            return ''
+        return self._filter
+
+    def _effect_key(self) -> str:
+        """The overlay effect to draw right now, or '' for none."""
+        if not self._filters_enabled:
+            return ''
+        return self._effect
+
+    def _decorating(self) -> bool:
+        """
+        Whether anything decorative is switched on.
+
+        Checked before decoding, so a frame nobody is grading keeps the cheap
+        path where Qt loads the JPEG itself and no decode happens in Python.
+        """
+        return bool(self._filter_key()) or bool(self._effect_key())
+
+    def _decorate(self, frame: Any) -> Any:
+        """
+        Apply the decorative layers, in order: grade, then overlay.
+
+        Filter first because it regrades the whole picture; the effect is drawn
+        on top of the result rather than being graded along with it. One method
+        so the display, the virtual camera and a saved photo cannot end up
+        applying them in different orders.
+
+        The overlay is a function of the clock rather than of how many times
+        this has been called, which is what lets the webcam thread and the
+        display timer both render without doubling the animation's speed.
+
+        Args:
+            frame: BGR frame, already swapped
+
+        Returns:
+            The decorated frame, or the input untouched when nothing is on
+        """
+        filter_key = self._filter_key()
+        if filter_key:
+            frame = look_filters.apply(frame, filter_key)
+        effect_key = self._effect_key()
+        if effect_key:
+            frame = overlay_effects.render(frame, effect_key, time.perf_counter())
+        return frame
+
     # -- Templates -------------------------------------------------
     #
     # A template is a target we ship: the same swap as an uploaded photo, but
@@ -1065,8 +1198,21 @@ class Bridge(QObject):
                         self._output_dir(), '%s_swapped%s' % (base, ext or '.png')
                     )
                 try:
-                    with open(out_path, 'wb') as fh:
-                        fh.write(base64.b64decode(data))
+                    image_bytes = base64.b64decode(data)
+                    if self._decorating():
+                        # The same last layer the live path applies, so a photo
+                        # and a call graded with one filter look alike.
+                        decoded = cv2.imdecode(
+                            np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR
+                        )
+                        if decoded is not None:
+                            cv2.imwrite(out_path, self._decorate(decoded))
+                        else:
+                            with open(out_path, 'wb') as fh:
+                                fh.write(image_bytes)
+                    else:
+                        with open(out_path, 'wb') as fh:
+                            fh.write(image_bytes)
                     record['output'] = out_path
                 except (OSError, ValueError) as e:
                     record['ok'] = False
@@ -1302,9 +1448,24 @@ class Bridge(QObject):
         eligible = self._jitter_buffer.pop_eligible()
         if eligible is not None:
             _capture_ts, jpeg_bytes = eligible
-            live_buffer.update_from_bytes(jpeg_bytes)
-            if self._virtual_cam_active:
-                self._push_to_vcam(jpeg_bytes)
+            if self._decorating():
+                # Decoded once and shared. The unfiltered path stays exactly as
+                # it was, so a filter nobody enabled costs nothing at all -
+                # Qt loads the JPEG itself and no decode happens here.
+                frame = cv2.imdecode(
+                    np.frombuffer(jpeg_bytes, dtype=np.uint8), cv2.IMREAD_COLOR
+                )
+                if frame is None:
+                    live_buffer.update_from_bytes(jpeg_bytes)
+                else:
+                    frame = self._decorate(frame)
+                    live_buffer.update_from_numpy(frame)
+                    if self._virtual_cam_active:
+                        self._push_frame_to_vcam(frame)
+            else:
+                live_buffer.update_from_bytes(jpeg_bytes)
+                if self._virtual_cam_active:
+                    self._push_to_vcam(jpeg_bytes)
 
         if live_buffer.is_dirty():
             live_buffer.promote()
@@ -1548,12 +1709,19 @@ class Bridge(QObject):
                 continue
 
             capture_ts = time.perf_counter_ns()
-            webcam_buffer.update_from_numpy(frame)
 
+            # Upstream gets the **raw** frame. A filter is the last layer, so
+            # grading before the swap would have the compositor matching the
+            # face to an already-graded frame and then grading it again.
             if self._ws_push_active.is_set():
                 _, jpeg = cv2.imencode('.jpg', frame, encode_params)
                 header = struct.pack('<q', capture_ts)
                 self._client.send_frame(header + jpeg.tobytes())
+
+            # The local preview does get it, so a look can be auditioned before
+            # any pipeline is running — which is when someone would be choosing
+            # one.
+            webcam_buffer.update_from_numpy(self._decorate(frame))
 
         cap.release()
 
@@ -1641,6 +1809,19 @@ class Bridge(QObject):
         frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
         if frame is None:
             return
+        self._push_frame_to_vcam(frame)
+
+    def _push_frame_to_vcam(self, frame: Any) -> None:
+        """
+        Queue an already-decoded frame for the virtual camera.
+
+        Split out so the filtered path does not decode the same JPEG twice -
+        once for the display and again here.
+
+        Args:
+            frame: BGR frame
+        """
+        import cv2
         if frame.shape[0] != 540 or frame.shape[1] != 960:
             frame = cv2.resize(frame, (960, 540))
         if self._vcam_queue.full():

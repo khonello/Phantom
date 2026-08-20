@@ -1246,7 +1246,11 @@ Window {
 
             // ══ REALTIME VIEWPORT ══════════════════════════════════════
             Item {
-                anchors.fill: parent
+                anchors {
+                    fill: parent
+                    bottomMargin: filterStrip.reserved
+                    rightMargin: effectRail.reserved
+                }
                 visible: bridge.currentMode === "realtime"
 
                 // Background feed: webcam when idle, processed when pipeline running
@@ -1428,7 +1432,11 @@ Window {
 
             // ══ BATCH VIEWPORT ═════════════════════════════════════════
             Item {
-                anchors.fill: parent
+                anchors {
+                    fill: parent
+                    bottomMargin: filterStrip.reserved
+                    rightMargin: effectRail.reserved
+                }
                 visible: bridge.currentMode !== "realtime"
 
                 // Two-panel layout: target | result
@@ -1693,7 +1701,178 @@ Window {
                         }
                     }
                 }
+
             }
+
+            // ══ FILTER STRIP ═══════════════════════════════════════════
+            // The filter controls sit *under* the body rather than replacing
+            // it, so the same thing is on screen in every mode and a look is
+            // judged against whatever that mode was already showing. A
+            // separate window had to invent a preview of its own, and got it
+            // wrong the moment the image tab was open — it showed the live
+            // camera in a mode that has no live camera.
+            Item {
+                id: filterStrip
+                // What the body gives up. One number, read by both viewports,
+                // so the body and the strip cannot disagree about the split.
+                property int reserved: bridge.filterPanel ? height + 12 : 0
+
+                anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
+                height: 46
+                visible: bridge.filterPanel
+
+                Row {
+                    anchors { left: parent.left; leftMargin: 20; bottom: parent.bottom; bottomMargin: 16 }
+                    spacing: 6
+
+                    Repeater {
+                        model: bridge.filterList
+
+                        Rectangle {
+                            width: 76; height: 30; radius: 6
+                            property bool isActive: bridge.activeFilter === modelData.key
+                            color: isActive ? "#1a1a30" : (fh.containsMouse ? "#111120" : "#0d0d18")
+                            border.color: isActive ? "#2e2e55" : "#14142a"
+                            border.width: 1
+                            Behavior on color { ColorAnimation { duration: 120 } }
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: modelData.name
+                                color: isActive ? "#c4b5fd" : "#475569"
+                                font.pixelSize: 10; font.letterSpacing: 0.8
+                            }
+
+                            HoverHandler { id: fh }
+                            MouseArea {
+                                anchors.fill: parent
+                                onClicked: bridge.selectFilter(modelData.key)
+                                cursorShape: Qt.PointingHandCursor
+                            }
+                        }
+                    }
+
+                }
+
+                // Choosing is not applying: a look can be picked and seen here
+                // without it reaching a call until this is pressed. Sits beside
+                // the show/hide control rather than at the end of the chips,
+                // because it acts on the whole panel and not on any one chip.
+                Rectangle {
+                    anchors { right: parent.right; rightMargin: 124; bottom: parent.bottom; bottomMargin: 16 }
+                    width: 76; height: 30; radius: 6
+                    color: bridge.filtersEnabled ? "#0d2e1a" : "#1a1a30"
+                    border.color: bridge.filtersEnabled ? "#14532d" : "#2e2e55"
+                    border.width: 1
+                    opacity: applyArea.enabled ? 1.0 : 0.3
+                    Behavior on color { ColorAnimation { duration: 160 } }
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: bridge.filtersEnabled ? "APPLIED" : "APPLY"
+                        color: bridge.filtersEnabled ? "#86efac" : "#c4b5fd"
+                        font.pixelSize: 9; font.letterSpacing: 1.0
+                    }
+
+                    MouseArea {
+                        id: applyArea
+                        anchors.fill: parent
+                        enabled: bridge.activeFilter !== "none"
+                                 || bridge.activeEffect !== "none"
+                                 || bridge.filtersEnabled
+                        onClicked: bridge.toggleFilters()
+                        cursorShape: Qt.PointingHandCursor
+                    }
+                }
+            }
+
+            // ══ EFFECT RAIL ════════════════════════════════════════════
+            // The overlays — confetti and the rest. Vertical on the right,
+            // because they are a different kind of thing from a grade: one
+            // changes the colour of the picture, the other puts something on
+            // top of it. Shown and hidden by the same control as the strip,
+            // since they are two halves of one panel.
+            Item {
+                id: effectRail
+                property int reserved: bridge.filterPanel ? width + 12 : 0
+
+                anchors {
+                    top: parent.top; right: parent.right
+                    bottom: parent.bottom; bottomMargin: filterStrip.height
+                }
+                width: 96
+                visible: bridge.filterPanel
+
+                Column {
+                    anchors { top: parent.top; topMargin: 20; horizontalCenter: parent.horizontalCenter }
+                    spacing: 6
+
+                    Repeater {
+                        model: bridge.effectList
+
+                        Rectangle {
+                            width: 76; height: 30; radius: 6
+                            property bool isActive: bridge.activeEffect === modelData.key
+                            color: isActive ? "#1a1a30" : (eh.containsMouse ? "#111120" : "#0d0d18")
+                            border.color: isActive ? "#2e2e55" : "#14142a"
+                            border.width: 1
+                            Behavior on color { ColorAnimation { duration: 120 } }
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: modelData.name
+                                color: isActive ? "#c4b5fd" : "#475569"
+                                font.pixelSize: 10; font.letterSpacing: 0.8
+                            }
+
+                            HoverHandler { id: eh }
+                            MouseArea {
+                                anchors.fill: parent
+                                onClicked: bridge.selectEffect(modelData.key)
+                                cursorShape: Qt.PointingHandCursor
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ══ FILTER TOGGLE ══════════════════════════════════════════
+            // Same shape as every other control here — a rounded rectangle,
+            // not a pill.
+            Rectangle {
+                anchors { right: parent.right; bottom: parent.bottom; margins: 16 }
+                width: 96; height: 30; radius: 6
+                color: panelHover.containsMouse ? "#1a1a30" : "#0d0d18"
+                border.color: bridge.filtersEnabled ? "#2e2e55" : "#14142a"
+                border.width: 1
+                Behavior on color { ColorAnimation { duration: 130 } }
+
+                Row {
+                    anchors.centerIn: parent; spacing: 6
+
+                    Rectangle {
+                        width: 5; height: 5; radius: 2.5
+                        anchors.verticalCenter: parent.verticalCenter
+                        color: bridge.filtersEnabled ? "#a78bfa" : "#333355"
+                        Behavior on color { ColorAnimation { duration: 200 } }
+                    }
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: bridge.filterPanel ? "HIDE" : "FILTERS"
+                        color: panelHover.containsMouse ? "#c4b5fd" : "#64748b"
+                        font.pixelSize: 9; font.letterSpacing: 1.4; font.weight: Font.Medium
+                        Behavior on color { ColorAnimation { duration: 130 } }
+                    }
+                }
+
+                HoverHandler { id: panelHover }
+                MouseArea {
+                    anchors.fill: parent
+                    onClicked: bridge.toggleFilterPanel()
+                    cursorShape: Qt.PointingHandCursor
+                }
+            }
+
         }
     }
 

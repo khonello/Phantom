@@ -434,6 +434,76 @@ readers looking for a multi-file feature that never existed. The code still says
 `run_batch`, correctly — there it means "not streaming", and it now covers
 photos and templates too.
 
+### Filters and effects — the last layers
+Two decorative layers over the finished swap, in this order:
+
+    swap  ->  filter (regrades the picture)  ->  effect (draws on top of it)
+
+A **filter** (`desktop/filters.py`) is a grade — Warm, Mono, Noir. An **effect**
+(`desktop/effects.py`) is an overlay — Confetti, Snow, Hearts, Bubbles, Sparkle.
+Filter first, because an effect is meant to sit *on* the picture rather than be
+part of it; grading confetti would tint it to match a look it is supposed to be
+separate from.
+
+Both are shown by one control. Pressing FILTERS shrinks the viewport and reveals
+a **horizontal strip** of grades along the bottom and a **vertical rail** of
+overlays down the right; HIDE gives the space back. APPLY sits beside HIDE
+rather than at the end of the chips, since it acts on the whole panel and not on
+any one chip.
+
+**Effects are a function of the clock, not of call count.** Every particle's
+position is computed from a timestamp and wraps with a modulo, so nothing holds
+state between frames. That is what makes the overlay safe to render from two
+places at two different rates — the webcam thread's local preview and the
+display timer's pipeline frames — which a `step()`-style animator could not be:
+advanced by both, it would run at the sum of their rates. Nothing is loaded from
+disk either; these are drawn, not decoded, so there are no assets to bundle and
+no GIF to keep in step with a frame rate.
+
+Measured at 960x540: filters worst 7.5ms (Soft), effects worst 2.8ms (Bubbles),
+against a 33ms display tick — and **zero** when nothing is on, since the
+undecorated path still lets Qt load the JPEG itself.
+
+That layout is not a style choice. The first version was a separate window with
+its own preview, and it was wrong the moment the image tab was open — it showed
+the live camera in a mode that has no live camera. A strip has nothing to
+preview: whatever the mode was already showing is what a filter is judged
+against, so the body is identical in every mode and only the panels move.
+`filterStrip.reserved` and `effectRail.reserved` are the single numbers both
+viewports read, so the body and the panels cannot disagree about the split.
+
+Showing the strip persists across a media-tab switch — it is a preference, not
+a detour.
+
+Two properties do the work for both:
+
+- **Last, always.** A filter is applied after the swap has fully composited.
+  Grading first would have `FaceCompositor` match the face to an already-graded
+  frame and then grade it again; applied last, a filter cannot break the swap
+  underneath it. The webcam frame sent *upstream* is deliberately ungraded for
+  the same reason — only the local preview gets the filter.
+- **Desktop-side, never the pipeline.** Filters need nothing the face models
+  provide, so they must not compete for a latency budget the swap has not been
+  measured against, and changing one should be a local variable rather than a
+  round trip to a rented GPU. `desktop/filters.py` is lookup tables and one
+  cached multiply — worst case ~7ms at 960x540 against a 33ms timer, and
+  **exactly zero** when nothing is enabled, since the unfiltered path still
+  lets Qt decode the JPEG itself.
+
+Choosing is not applying. The picker sets the look and the preview shows it, but
+nothing leaves the machine until **APPLY** is pressed — so a look can be
+auditioned without it reaching a call. The same key is read by the display, the
+virtual camera and a saved photo through one accessor, so those three can never
+disagree about whether a filter is on.
+
+Filters default **off**, and should stay off during the pod session: that
+session exists to judge whether the swap reads as real, and a grade on top
+changes what is being looked at.
+
+Not covered: **RENDER**. A video is written pipeline-side, so the desktop never
+holds those frames. Filtering a render needs either a pipeline stage or a local
+FFmpeg pass, and neither is built.
+
 ### Template targets
 Bundled scenes the source face is swapped into — **the target is ours, the face
 is theirs**. Not a new job shape: `set_template` points `target_paths` at a
