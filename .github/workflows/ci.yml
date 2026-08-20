@@ -54,6 +54,19 @@ jobs:
     run: test -s "$RUNNER_TEMP/output.mp4"
   - name: Compare against the reference render
     run: ffmpeg -i .github/examples/snapshot.mp4 -i "$RUNNER_TEMP/output.mp4" -filter_complex psnr -f null -
+  # First coverage of the *image* target path with real models — the video run
+  # above shares `_swap_frame_detail` with it but never exercises the read,
+  # write or result handling around it. `source.jpg` stands in as its own
+  # target: what is being proved is that detection, swap, composite and write
+  # all run, not whose face it is.
+  #
+  # This step is also the check on failing closed. An image that cannot be
+  # swapped now writes nothing at all, where it used to write a copy of the
+  # input, so a regression there shows up here as a missing file rather than
+  # as a passing run that produced an unswapped photo.
+  - run: python pipeline.py -s=.github/examples/source.jpg -t=.github/examples/source.jpg -o=$RUNNER_TEMP/photo.png
+  - name: Check the photo output was produced
+    run: test -s "$RUNNER_TEMP/photo.png"
 
  # Fast tests: the ML layer is stubbed into sys.modules, so this needs no GPU,
  # no model weights and no multi-gigabyte install. It covers the parts that fail

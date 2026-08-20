@@ -2,6 +2,9 @@
 .env
 
 models
+# Template assets follow the model weights: fetched or mounted, never
+# committed. A library of scenes would bloat every clone and every image build.
+templates
 temp
 __pycache__
 

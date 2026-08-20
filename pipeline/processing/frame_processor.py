@@ -32,6 +32,7 @@ from pipeline.types import Frame, Face, Detection, Matrix
 from pipeline.services.face_detection import FaceDetector
 from pipeline.services.face_swapping import FaceSwapper
 from pipeline.services.database import FaceDatabase, SourceReview
+from pipeline.services import templates
 from pipeline.logging import emit_status, emit_warning
 
 
@@ -107,7 +108,15 @@ class DetectionProcessor(FrameProcessor):
             if self.config.many_faces:
                 self.latest_detections = list(self.all_detections)
             else:
-                primary = self.detector.select_primary(self.all_detections)
+                # A template names the face to replace, so its choice wins over
+                # "the largest one" — which is only ever a guess at what the
+                # operator meant.
+                chosen = templates.select_by_point(
+                    self.all_detections,
+                    self.config.target_face_point,
+                    (int(frame.shape[0]), int(frame.shape[1])),
+                )
+                primary = chosen or self.detector.select_primary(self.all_detections)
                 self.latest_detections = [primary] if primary else []
         except Exception as e:
             emit_warning(f"Detection failed: {e}", scope='DETECTION')

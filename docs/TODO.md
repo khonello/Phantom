@@ -132,6 +132,10 @@ A session is sold as "live **or** batch". Batch now runs end to end for both
 images and video; what remains is getting large files to and from the worker, and
 deciding what a job that outlives its session costs.
 
+Photo mode has since closed the *image* half of the transfer problem, and is the
+only target shape that reaches a remote worker at all today. Video is unchanged
+and still blocked on a real transfer path.
+
 - [x] **Wire `_process_target_batch()` for video.** Extract → swap in place →
       encode → restore audio, reusing the FFmpeg helpers and the same compositor
       as live. Splits into `_process_image_batch` and `_process_video_batch` over
@@ -139,9 +143,95 @@ deciding what a job that outlives its session costs.
       is on for video (consecutive frames) and off for a lone image. Honours
       `_stop_event` between frames, reports throttled progress with an ETA, and
       cleans its scratch space on every exit path.
-- [ ] **Build a real file transfer path**: chunked, resumable,
+- [x] **Photo mode** — one to four target photos, each swapped independently,
+      failures skipped. No new pipeline stage: it loops the existing image path,
+      so every photo goes through the same guards and the same compositor as a
+      live frame. `upload_target` carries them base64, capped at 4 x 6 MB and
+      enforced on both sides, which sidesteps the transfer problem rather than
+      solving it — photos are small, video is not.
+
+      Two things fell out of building it, both worth more than the feature:
+
+      - **`set_target` never worked against a pod.** It validates with
+        `os.path.exists` on the *pipeline's* filesystem, so a desktop-chosen
+        file only ever resolved when the pipeline ran locally. Photo targets are
+        the first that reach a remote worker.
+      - **A refused still used to produce an output file.** `_process_image_batch`
+        wrote unconditionally, so a guarded or faceless target left a copy of the
+        input named like a result — the exact failure the guards exist to
+        prevent, and invisible to whoever opens the folder. It now writes nothing
+        and reports the reason. Video still passes frames through, which is
+        correct there; the two now differ deliberately.
+
+      Covered by `tests/test_photo_batch.py` (59 checks) and a CI step that runs
+      the image path with real models for the first time.
+- [ ] **Build a real file transfer path** for **video**: chunked, resumable,
       progress-reporting, both directions. `upload_source` is base64 inside one
-      JSON message — fine for a 200 KB face, unusable for a 2 GB video.
+      JSON message — fine for a 200 KB face, unusable for a 2 GB video. Photo
+      mode does not change this; it only removes stills from its scope.
+- [x] **Template targets.** Bundled scenes the source face is swapped into —
+      the target is ours, the face is theirs. It adds no job shape: a template
+      runs as a photo job of one, through the same guards, compositor and
+      result path photo mode already proved.
+
+      Cheaper than photo mode was, for one structural reason: templates live on
+      the pipeline's filesystem, so there is nothing to transfer. The upload
+      machinery photo mode needed simply does not apply.
+
+      Three decisions worth keeping:
+
+      - **`face_point` is a normalised point, not an index.** Detection order is
+        not a stable contract, and an index that comes to mean a different
+        person is a silent wrong-person swap — no error, no crash.
+      - **A named face stands the multi-face guard down.** The guard refuses a
+        crowd because the question has no safe default; a template answers it
+        offline, so a scene we shipped on purpose is not refused.
+      - **Outputs never land in the library.** Writing beside a shared asset
+        would leave one user's face there for the next job.
+
+      `tools/validate_templates.py` runs the real guards over the library and
+      exits non-zero, so a scene that would be refused never ships. Covered by
+      `tests/test_templates.py` (45 checks).
+
+      **Not done: the templates themselves.** The machinery runs against an
+      empty library. The assets are a content decision — including where they
+      come from and how they are licensed for this use — and that, not the
+      code, is the real cost of this feature.
+- [ ] **Face selection as a shared predicate.** *Deferred deliberately — recorded
+      here so the reasoning is not re-derived later.*
+
+      Every mode already answers "which face?" and answers it the same silent
+      way: `select_primary` takes the largest detection, in live, render and
+      photo alike. Making that an operator choice belongs **below** the mode
+      layer, not inside photo mode — it is a predicate to any augmentation, not
+      a feature of one job shape.
+
+      It also resolves the multi-face guard properly. The guard fires because
+      "which face did you mean?" has no safe default; today the only escape is
+      `many_faces`, which swaps *every* face. A first-class selection makes the
+      answer "the one they picked", in every mode.
+
+      One concept, two implementations, and only the first is cheap:
+
+      - **Still** — one act, stable answer, a click on a box. Local-testable.
+      - **Video / live** — detection order is not stable frame to frame (which
+        is why temporal EMA is bypassed under `many_faces`), so this is picking
+        an *identity* and re-identifying it every frame. The primitive already
+        exists: `LandmarkStabilizer._identity_changed` runs a cosine over
+        `normed_embedding` with a 3-of-6 window. Selecting and following is the
+        same dot product asked the other way round.
+
+      Build the selection as something the pipeline consults instead of calling
+      `select_primary` directly, do the still case first, and let the video case
+      land behind the same interface once there is real footage to tune the hold
+      through occlusions against.
+
+      **Partly borrowed already.** Template targets needed the same predicate
+      and took the cheap half of it: `config.target_face_point`, consulted by
+      `DetectionProcessor` ahead of `select_primary`, plus the guard standing
+      down when a face is named. What is still missing is the *operator* naming
+      one — a picker on a still, and identity-following on a stream. The seam
+      is in place; only the ways of filling it are not.
 - [ ] **Decide and implement the overflow policy** for a batch job that outlives
       its session: refuse / bill overflow / absorb / detach and hold the result.
 - [ ] **Decide whether upload time is billed.** Overlapping transfer with worker

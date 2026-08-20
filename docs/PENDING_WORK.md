@@ -14,6 +14,13 @@ until a single pod session has confirmed it does what it claims. Phase 2 is
 therefore the whole of the near-term plan, and it is roughly one hour of pod
 time.
 
+**Photo mode has since been added**, deliberately *beside* that work rather than
+on top of it: it loops the existing image path instead of adding a stage, so it
+does not depend on anything the pod session is meant to settle. It earns its
+place in the session for a different reason — it is the only target shape that
+can reach a remote worker at all, because `set_target` resolves paths on the
+pipeline's own filesystem. See 2.2b.
+
 ---
 
 ## Phase 0 — Before spending anything
@@ -23,13 +30,13 @@ All local, all free. Twenty minutes.
 ### 0.1 Confirm the tree is green
 
 ```bash
-python -m pytest tests/ -q                              # expect: 7 passed, ~50s
+python -m pytest tests/ -q                              # expect: 9 passed, ~36s
 flake8 pipeline.py pipeline desktop tests tools runpod  # expect: silent
 mypy pipeline                                           # expect: clean
 bash -n runpod/startup.sh && bash -n runpod/entrypoint.sh
 ```
 
-Eight test modules, ~250 checks. `tests/test_wiring.py` is the one to watch: it
+Nine test modules, ~310 checks. `tests/test_wiring.py` is the one to watch: it
 asserts the seams *between* files — that every forwarded env var is read, that
 `Dockerfile` and `.env.example` pin the same image, that both deploy paths
 pre-warm. Every historical break in this repo lived in one of those gaps.
@@ -368,6 +375,31 @@ Check, in order:
 Then a long clip — over 9999 frames, i.e. more than ~5m34s at 30fps — to confirm
 frame ordering past the four-digit rollover that was fixed. If a long clip is
 inconvenient, this is the one check that can be deferred.
+
+### 2.2b Verify photo mode, and that a refusal writes nothing
+
+Cheap — seconds of GPU, not minutes — and it checks the one thing no other step
+does: that a target chosen on the desktop actually arrives at the worker.
+
+Run it **from the desktop, not over SSH**. Over SSH the files are already on the
+pod and the upload path is never exercised, which is the entire point of the
+check.
+
+- [ ] IMAGE tab, pick two to four photos, PROCESS
+- [ ] Each tile resolves on its own as its photo finishes, rather than all at
+      the end
+- [ ] The swapped photos land beside the originals with `_swapped` in the name
+- [ ] Include one photo that **should** be refused — two faces in frame is the
+      easiest — and confirm it is reported with a reason **and leaves no output
+      file**. A file appearing there is the regression this mode exists to
+      prevent
+- [ ] Include one large camera original (over 6 MB) and confirm it still
+      uploads, having been re-encoded rather than rejected
+
+Also worth one look: a photo swap has no frame deadline, so it composites at the
+full `aligned_size` ceiling. If stills look noticeably better than the live path
+at the same settings, that is the compositing ceiling talking, and it sizes what
+a higher preset would buy.
 
 ### 2.3 Compare swap models on one clip
 

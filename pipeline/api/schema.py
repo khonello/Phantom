@@ -92,11 +92,27 @@ PRESETS: Dict[str, Dict[str, Any]] = {
     },
 }
 
+# Photo mode limits. Defined here so the desktop and the pipeline read the same
+# numbers, the way both read PRESETS for capture settings — a client-side limit
+# the server does not also enforce is not a limit.
+#
+# The byte ceiling is per image and applies to what arrives over the socket. It
+# is deliberately generous: a photo that already fits is forwarded untouched, so
+# the cap only ever bites on camera originals, and re-encoding is a last resort
+# rather than routine. Photos only — video targets need a real transfer path,
+# not a bigger message.
+MAX_PHOTO_TARGETS = 4
+MAX_PHOTO_BYTES = 6 * 1024 * 1024
+
 # Commands accepted by the control server (POST /control)
 COMMANDS: Dict[str, Dict[str, Any]] = {
     # Source / target / output
     'set_source':      {'path': str},
     'set_target':      {'path': str},
+    'upload_target':   {'images': list},
+    'list_templates':  {},
+    'set_template':    {'id': str},
+    'get_photo_results': {},
     'set_output':      {'path': str},
     # Processing settings
     'set_keep_fps':    {'value': bool},
@@ -203,6 +219,10 @@ class ResponseMessage(APIMessage):
 # Command type constants
 CMD_SET_SOURCE = 'set_source'
 CMD_SET_TARGET = 'set_target'
+CMD_UPLOAD_TARGET = 'upload_target'
+CMD_LIST_TEMPLATES = 'list_templates'
+CMD_SET_TEMPLATE = 'set_template'
+CMD_GET_PHOTO_RESULTS = 'get_photo_results'
 CMD_SET_OUTPUT = 'set_output'
 CMD_START = 'start'
 CMD_START_STREAM = 'start_stream'

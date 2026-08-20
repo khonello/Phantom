@@ -22,10 +22,11 @@ import cv2
 import numpy as np
 
 from pipeline.config import FaceSwapConfig
-from pipeline.types import Frame
+from pipeline.types import Frame, PhotoResult
 from pipeline.events import (
     BATCH_PROGRESS,
     FRAME_READY,
+    PHOTO_RESULT,
     DETECTION,
     PIPELINE_STARTED,
     PIPELINE_STOPPED,
@@ -54,6 +55,7 @@ from pipeline.services.database import FaceDatabase
 from pipeline.services.masking import FaceMasker
 from pipeline.services.face_tracking import LandmarkStabilizer
 from pipeline.services import guards
+from pipeline.services import templates
 from pipeline.services import execution
 from pipeline.services.latency import LatencyBudget
 
@@ -119,6 +121,8 @@ class ProcessingPipeline:
         # State
         self._running = False
         self._stop_event = threading.Event()
+        # Per-photo outcomes of the last batch, read back by the API.
+        self._photo_results: List[PhotoResult] = []
 
         # Guard state. `_last_good_frame` is what a guarded frame emits — the
         # last frame that was actually swapped, held unchanged. `_guard_reason`
@@ -860,8 +864,14 @@ class ProcessingPipeline:
         emit_status('Batch pipeline started', scope='PIPELINE')
         self.bus.emit(PIPELINE_STARTED)
 
+        # Photo mode is several image targets, each swapped on its own; the
+        # single-file path stays exactly as it was. Which one this is comes
+        # from which field was set, not from a mode flag, so the two cannot be
+        # in disagreement.
+        photos = list(self.config.target_paths)
+
         # Validate inputs
-        if not self.config.target_path:
+        if not photos and not self.config.target_path:
             emit_error('No target path specified', scope='PIPELINE')
             return
 
@@ -875,7 +885,10 @@ class ProcessingPipeline:
 
         # Process
         try:
-            self._process_target_batch(self.config.target_path, self.config.output_path)
+            if photos:
+                self._process_photos_batch(photos)
+            else:
+                self._process_target_batch(self.config.target_path, self.config.output_path)
         except Exception as e:
             emit_error(f"Batch processing failed: {e}", exception=e, scope='PIPELINE')
 
@@ -892,7 +905,16 @@ class ProcessingPipeline:
             return
 
         if is_image(target_path) or has_image_extension(target_path):
-            self._process_image_batch(target_path, output_path)
+            result = self._process_image_batch(target_path, output_path)
+            self._photo_results = [result]
+            if not result.ok:
+                # A single-image job reports through the error channel, which
+                # is what the desktop reads to tell a failed batch from a
+                # finished one. Photo mode reports per item instead.
+                emit_error(
+                    f"{os.path.basename(target_path)}: {result.reason}",
+                    scope='PIPELINE',
+                )
         elif is_video(target_path):
             self._process_video_batch(target_path, output_path)
         else:
@@ -901,12 +923,19 @@ class ProcessingPipeline:
                 scope='PIPELINE',
             )
 
-    def _swap_frame_faces(self, frame: Frame, stabilize: bool) -> Frame:
+    def _swap_frame_detail(self, frame: Frame, stabilize: bool) -> Tuple[Frame, str, int]:
         """
-        Run preprocess -> detect -> swap -> composite for one batch frame.
+        Run preprocess -> detect -> swap -> composite for one batch frame, and
+        say whether a swap actually happened.
 
         Shared by the image and video paths so the two cannot drift apart, and
         the same compositor as stream mode so batch output matches live.
+
+        The frame is returned unswapped on every failure path, which is what
+        the video path wants — one unswapped frame mid-clip beats a hole. A
+        still image has no such context: an unswapped photo is simply a copy of
+        the input wearing the output's name, so the photo path needs to know
+        the difference. Hence the reason, rather than a bare frame.
 
         Args:
             frame: Input frame
@@ -914,7 +943,9 @@ class ProcessingPipeline:
                        frames are consecutive; False for a lone image
 
         Returns:
-            Frame with every detected face swapped
+            (frame, reason, faces) — `reason` is empty when every detected face
+            was swapped, and `faces` counts them. On failure the frame is the
+            input, unmodified apart from preprocessing.
         """
         frame = self._preprocessing_proc.process(frame)
         frame = self._detection_proc.process(frame)
@@ -923,7 +954,7 @@ class ProcessingPipeline:
         if not detections:
             if stabilize:
                 self._stabilizer.mark_missing()
-            return frame
+            return frame, 'no face detected', 0
 
         # Batch guards pass the original frame through rather than holding the
         # last good one. The privacy argument that forces a held frame on the
@@ -933,8 +964,9 @@ class ProcessingPipeline:
         verdict = guards.check_frame(self.config, self._detection_proc.all_detections)
         if not verdict.ok:
             self._reset_temporal_state()
-            return frame
+            return frame, verdict.message or verdict.reason, 0
 
+        swapped_count = 0
         for detection in detections:
             face = detection.face
             # Landmark smoothing needs a stable subject identity; with several
@@ -945,33 +977,168 @@ class ProcessingPipeline:
             swapped = self._swap_face(frame, face)
             if swapped is None:
                 self._reset_temporal_state()
-                return frame
+                return frame, 'the compositor produced no swap', swapped_count
             frame = swapped
+            swapped_count += 1
 
+        return frame, '', swapped_count
+
+    def _swap_frame_faces(self, frame: Frame, stabilize: bool) -> Frame:
+        """
+        Frame-only view of `_swap_frame_detail`, for the video path.
+
+        Video processes thousands of frames and passes the unswapped ones
+        through, so it has no use for the reason. Kept as a separate method so
+        that stays true by construction rather than by every call site
+        remembering to discard two values.
+
+        Args:
+            frame: Input frame
+            stabilize: Smooth landmarks across frames
+
+        Returns:
+            Frame with every detected face swapped, or the input frame
+        """
+        frame, _reason, _faces = self._swap_frame_detail(frame, stabilize)
         return frame
 
-    def _process_image_batch(self, target_path: str, output_path: Optional[str]) -> None:
+    def _process_image_batch(self, target_path: str, output_path: Optional[str]) -> PhotoResult:
         """
         Swap faces in a single image.
 
+        Writes an output file only when a swap actually happened. Previously
+        this wrote unconditionally, so a guarded or faceless target produced a
+        file that was byte-for-byte the input but named like a result — the
+        exact "confidently wrong output" the guards exist to prevent, and
+        indistinguishable from success to whoever opens the folder.
+
         Args:
             target_path: Path to target image
-            output_path: Where to save output
+            output_path: Where to save output, or None to derive one
+
+        Returns:
+            PhotoResult describing what happened to this image
         """
         frame = cv2.imread(target_path)
         if frame is None:
-            emit_error(f"Failed to load image: {target_path}", scope='PIPELINE')
-            return
+            reason = 'could not be read as an image'
+            emit_error(f"{os.path.basename(target_path)}: {reason}", scope='PIPELINE')
+            return PhotoResult.skipped(target_path, reason)
 
         # There is no previous frame to smooth against — but the compositor's
         # pixel EMA would otherwise still hold whatever the last job left in it,
         # so the image has to be given a clean slate rather than assumed one.
         self._reset_temporal_state()
-        frame = self._swap_frame_faces(frame, stabilize=False)
+        frame, reason, faces = self._swap_frame_detail(frame, stabilize=False)
 
-        if output_path:
-            cv2.imwrite(output_path, frame)
-            emit_status(f"Batch output saved to: {output_path}", scope='PIPELINE')
+        if reason:
+            emit_status(
+                f"Skipped {os.path.basename(target_path)}: {reason}",
+                scope='PIPELINE',
+            )
+            return PhotoResult.skipped(target_path, reason)
+
+        # A template can carry an authored layer that belongs in front of the
+        # face. Applied after the swap and before writing, so it occludes the
+        # result exactly as it occluded the original.
+        if self.config.target_foreground:
+            frame = templates.composite_foreground(frame, self.config.target_foreground)
+
+        out_path = output_path or self._photo_output_path(target_path)
+        try:
+            written = cv2.imwrite(out_path, frame)
+        except Exception as e:
+            written = False
+            emit_error(f"Failed writing {out_path}: {e}", exception=e, scope='PIPELINE')
+        if not written:
+            return PhotoResult.skipped(target_path, f'could not write output to {out_path}')
+
+        emit_status(f"Batch output saved to: {out_path}", scope='PIPELINE')
+        return PhotoResult.swapped(target_path, out_path, faces)
+
+    def _photo_output_path(self, target_path: str) -> str:
+        """
+        Where a photo's swap is written when no explicit output was given.
+
+        Beside the target with a `_swapped` suffix. In a remote job the target
+        already lives in that job's own upload directory, so the outputs land
+        there too and are removed with it by `cleanup_session`.
+
+        `output_dir` overrides that, and a template job sets it: a template's
+        target lives in the shared library, so writing beside it would leave
+        one user's face in an asset directory for the next job to find.
+
+        Args:
+            target_path: Path to the target image
+
+        Returns:
+            Output path for this target
+        """
+        base, ext = os.path.splitext(target_path)
+        if self.config.output_dir:
+            base = os.path.join(
+                self.config.output_dir, os.path.basename(base)
+            )
+        return f'{base}_swapped{ext or ".png"}'
+
+    def _process_photos_batch(self, target_paths: List[str]) -> List[PhotoResult]:
+        """
+        Swap each target photo independently, skipping the ones that fail.
+
+        Independence is the contract: one unusable photo must not cost the
+        operator the other three, so every failure — unreadable file, no face,
+        a guard, or an exception from the swap itself — is recorded against
+        that photo and the loop continues.
+
+        Args:
+            target_paths: Target images, in the order they were given
+
+        Returns:
+            One PhotoResult per target, in the same order
+        """
+        results: List[PhotoResult] = []
+        total = len(target_paths)
+
+        for index, target in enumerate(target_paths):
+            if self._stop_event.is_set():
+                emit_status('Photo batch cancelled', scope='PIPELINE')
+                break
+
+            emit_status(
+                f"Processing photo {index + 1}/{total}: {os.path.basename(target)}",
+                scope='PIPELINE',
+            )
+
+            if not os.path.isfile(target):
+                result = PhotoResult.skipped(target, 'file not found')
+            else:
+                try:
+                    result = self._process_image_batch(target, None)
+                except Exception as e:
+                    # A failure here is this photo's failure, not the job's.
+                    emit_error(
+                        f"{os.path.basename(target)}: {type(e).__name__}: {e}",
+                        exception=e,
+                        scope='PIPELINE',
+                    )
+                    result = PhotoResult.skipped(target, f'{type(e).__name__}: {e}')
+
+            results.append(result)
+            self.bus.emit(PHOTO_RESULT, result=result, index=index, total=total)
+            self.bus.emit(
+                BATCH_PROGRESS,
+                done=index + 1,
+                total=total,
+                percent=((index + 1) / total) * 100.0 if total else 100.0,
+            )
+
+        self._photo_results = results
+        swapped = sum(1 for r in results if r.ok)
+        emit_status(
+            f"Photos complete: {swapped} swapped, {len(results) - swapped} skipped",
+            scope='PIPELINE',
+        )
+        return results
 
     def _process_video_batch(self, target_path: str, output_path: Optional[str]) -> None:
         """
@@ -1121,3 +1288,8 @@ class ProcessingPipeline:
     def is_running(self) -> bool:
         """Check if pipeline is currently running."""
         return self._running
+
+    @property
+    def photo_results(self) -> List[PhotoResult]:
+        """Per-photo outcomes of the most recent batch, in target order."""
+        return list(self._photo_results)

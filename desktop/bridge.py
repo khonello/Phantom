@@ -1,3 +1,4 @@
+import base64
 import gc
 import os
 import queue
@@ -13,7 +14,7 @@ from PySide6.QtGui import QPixmap, QImage, QPainter
 from PySide6.QtQuick import QQuickPaintedItem
 
 from pipeline.io.ffmpeg import is_image
-from pipeline.api.schema import PRESETS
+from pipeline.api.schema import MAX_PHOTO_BYTES, MAX_PHOTO_TARGETS, PRESETS
 from desktop.controller import PipelineClient
 from desktop.audio import AudioCapture, AudioPlayback, JitterBuffer
 from desktop.voice import VoiceTransformer
@@ -181,6 +182,11 @@ class Bridge(QObject):
     outputPathChanged = Signal(str)
     batchRunningChanged = Signal(bool)
     batchCompleteChanged = Signal(bool)
+    mediaTabChanged = Signal(str)
+    templatesChanged = Signal()
+    selectedTemplateChanged = Signal(str)
+    photoTargetsChanged = Signal()
+    photoResultsChanged = Signal()
     autoStopWarning = Signal(int)  # minutes remaining
 
     def __init__(self, client: PipelineClient) -> None:
@@ -201,6 +207,11 @@ class Bridge(QObject):
         self._status_message = 'idle'
         self._detection_status = ''
         self._loading_message = ''
+        # Two levels of navigation. The media tab is what kind of thing is
+        # being worked on; the mode is which job within it. LIVE and batch
+        # video are one family because they share the video pipeline and the
+        # compositor — a still is a different kind of job, not a third peer.
+        self._media_tab: str = 'video'   # 'video' | 'image'
         self._current_mode: str = 'realtime'  # 'realtime' | 'video' | 'image'
         self._target_set: bool = False
         self._target_label: str = ''
@@ -210,6 +221,19 @@ class Bridge(QObject):
         self._batch_running: bool = False
         self._batch_complete: bool = False
         self._batch_error: str = ''
+        # Photo mode: up to MAX_PHOTO_TARGETS chosen images, each with its own
+        # outcome. A single bool and a single output path cannot describe a job
+        # where two of four succeeded, so photo mode keeps its own list.
+        self._photo_targets: List[str] = []
+        self._photo_results: List[Dict[str, Any]] = []
+        # The subset of _photo_targets that reached the pipeline. Results come
+        # back one per *uploaded* photo, so a photo dropped during encoding
+        # would shift every result after it onto the wrong original.
+        self._photo_uploaded: List[str] = []
+        # Bundled templates, fetched from the pipeline on entering the tab.
+        self._templates: List[Dict[str, Any]] = []
+        self._selected_template: str = ''
+        self._templates_loading = False
         self._webcam_version = 0
         self._live_version = 0
         self._quality = 'optimal'
@@ -462,6 +486,11 @@ class Bridge(QObject):
         if self._connected:
             self._client.set_enhance(new_value)
 
+    # Colour correction and preprocessing no longer have header toggles: the
+    # first is correctness rather than preference (off produces a colour step
+    # at the swap boundary), and the second defaults off and makes the frame
+    # stop looking like the operator's real camera. These slots stay so the
+    # capability survives for `set_realism`, the CLI and state sync.
     @Slot()
     def toggleColorCorrection(self) -> None:
         new_value = not self._color_correction_active
@@ -603,10 +632,35 @@ class Bridge(QObject):
         """Set the voice transformation preset (none/female/male/child/deep)."""
         self._voice_transformer.set_preset(template if template != 'none' else None)
 
+    # Modes belonging to each media tab, first entry being that tab's default.
+    _TAB_MODES = {
+        'video': ('realtime', 'video'),
+        'image': ('image', 'template'),
+    }
+
+    @Property(str, notify=mediaTabChanged)
+    def mediaTab(self) -> str:
+        """Which top-level tab is selected: 'video' or 'image'."""
+        return self._media_tab
+
+    @Slot(str)
+    def setMediaTab(self, tab: str) -> None:
+        """
+        Switch the top-level tab, landing on that family's default mode.
+
+        Switching tabs is switching what is being made, so it moves the mode
+        with it rather than leaving a video job selected under the image tab.
+        """
+        if tab not in self._TAB_MODES or tab == self._media_tab:
+            return
+        self._media_tab = tab
+        self.mediaTabChanged.emit(tab)
+        self.setMode(self._TAB_MODES[tab][0])
+
     @Slot(str)
     def setMode(self, mode: str) -> None:
         """Switch between realtime, video, and image modes."""
-        if mode not in ('realtime', 'video', 'image') or mode == self._current_mode:
+        if mode not in ('realtime', 'video', 'image', 'template') or mode == self._current_mode:
             return
         if self._pipeline_running:
             self.stopPipeline()
@@ -614,12 +668,429 @@ class Bridge(QObject):
             self._stop_batch_internal()
         self._current_mode = mode
         self.currentModeChanged.emit(mode)
+
+        # A mode set directly — on reconnect, or from a shortcut — must not
+        # leave the tab pointing at the other family.
+        for tab, modes in self._TAB_MODES.items():
+            if mode in modes and tab != self._media_tab:
+                self._media_tab = tab
+                self.mediaTabChanged.emit(tab)
+
         self._reset_batch_state()
+
+        # The library lives on the pipeline, so it cannot be read until there
+        # is one to ask. Fetched on entering the tab rather than at startup:
+        # a user who never opens it should not pay for the transfer.
+        if mode == 'template' and not self._templates:
+            self.loadTemplates()
+
+    # -- Photo mode ------------------------------------------------
+    #
+    # Several image targets, each swapped on its own, failures skipped. The
+    # targets are uploaded rather than passed by path: `set_target` resolves
+    # against the *pipeline's* filesystem, which on a pod is a different
+    # machine, so a chosen file would not exist there. Photos are small enough
+    # to carry inline; video is not, which is why this is image-only.
+
+    # Long side below which downscaling stops and the photo is refused instead.
+    # Losing detail defeats the point of a photo swap, so the transfer budget
+    # gives way before the image does.
+    _MIN_PHOTO_LONG_SIDE = 1600
+
+    @Property(list, notify=photoTargetsChanged)
+    def photoTargets(self) -> List[str]:
+        """Chosen target photos, as local file paths."""
+        return list(self._photo_targets)
+
+    @Property(list, notify=photoResultsChanged)
+    def photoResults(self) -> List[Dict[str, Any]]:
+        """One entry per target: name, ok, reason, and where it was saved."""
+        return list(self._photo_results)
+
+    @Property(int, constant=True)
+    def maxPhotoTargets(self) -> int:
+        """How many photos one job accepts."""
+        return MAX_PHOTO_TARGETS
+
+    # -- Templates -------------------------------------------------
+    #
+    # A template is a target we ship: the same swap as an uploaded photo, but
+    # against a scene chosen and verified in advance. The source face is
+    # whatever was uploaded; only the picture it goes into differs.
+
+    @Property(list, notify=templatesChanged)
+    def templates(self) -> List[Dict[str, Any]]:
+        """Available templates: id, name, and a local thumbnail path."""
+        return list(self._templates)
+
+    @Property(str, notify=selectedTemplateChanged)
+    def selectedTemplate(self) -> str:
+        """Id of the chosen template, or empty."""
+        return self._selected_template
+
+    def _cache_dir(self, *parts: str) -> str:
+        """A local directory for files fetched from the pipeline."""
+        from PySide6.QtCore import QStandardPaths
+        base = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.AppDataLocation
+        ) or os.path.expanduser('~/.phantom')
+        path = os.path.join(base, *parts)
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def _output_dir(self) -> str:
+        """
+        Where a template's result is saved locally.
+
+        An uploaded photo has an original to sit beside; a template does not,
+        so its output needs a home of its own that the operator can actually
+        find. Pictures/Phantom is where someone would look.
+        """
+        from PySide6.QtCore import QStandardPaths
+        base = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.PicturesLocation
+        ) or os.path.expanduser('~')
+        path = os.path.join(base, 'Phantom')
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    @Slot()
+    def loadTemplates(self) -> None:
+        """Fetch the library. Runs on a worker — the request blocks."""
+        if self._templates_loading:
+            return
+        if not self._connected:
+            self._set_status('cannot load templates - not connected')
+            return
+        self._templates_loading = True
+        self._set_status('loading templates...')
+        threading.Thread(target=self._load_templates_worker, daemon=True).start()
+
+    def _load_templates_worker(self) -> None:
+        """Fetch, decode thumbnails to a local cache, publish to the gallery."""
+        try:
+            response = self._client.list_templates()
+            if response.get('error'):
+                self._set_status('templates unavailable: %s' % response['error'])
+                return
+
+            entries = (response.get('data') or {}).get('templates', [])
+            cache = self._cache_dir('templates')
+            loaded: List[Dict[str, Any]] = []
+
+            for entry in entries:
+                record: Dict[str, Any] = {
+                    'id': entry.get('id', ''),
+                    'name': entry.get('name', entry.get('id', '')),
+                    'thumbnail': '',
+                }
+                data = entry.get('thumbnail')
+                if data:
+                    thumb = os.path.join(cache, '%s.jpg' % record['id'])
+                    try:
+                        with open(thumb, 'wb') as fh:
+                            fh.write(base64.b64decode(data))
+                        record['thumbnail'] = thumb.replace(chr(92), '/')
+                    except (OSError, ValueError):
+                        # A template without a picture is still selectable.
+                        pass
+                loaded.append(record)
+
+            self._templates = loaded
+            self.templatesChanged.emit()
+            self._set_status(
+                '%d template(s)' % len(loaded) if loaded else 'no templates available'
+            )
+        finally:
+            self._templates_loading = False
+
+    @Slot(str)
+    def selectTemplate(self, template_id: str) -> None:
+        """Choose a template as the target for the next job."""
+        if self._batch_running or not template_id:
+            return
+
+        response = self._client.set_template(template_id)
+        if response.get('error') or response.get('success') is False:
+            self._set_status('error: %s' % (response.get('error') or 'template refused'))
+            return
+
+        self._selected_template = template_id
+        self.selectedTemplateChanged.emit(template_id)
+
+        name = next(
+            (t['name'] for t in self._templates if t['id'] == template_id),
+            template_id,
+        )
+        thumbnail = next(
+            (t['thumbnail'] for t in self._templates if t['id'] == template_id),
+            '',
+        )
+
+        # The header's "target set" gate is what enables PROCESS, so a template
+        # has to satisfy it the same way a chosen file does.
+        self._target_set = True
+        self._target_label = name
+        self._target_thumbnail = thumbnail
+        self._photo_results = []
+        self._batch_complete = False
+        self.targetSetChanged.emit(True)
+        self.targetLabelChanged.emit(name)
+        self.targetThumbnailChanged.emit(thumbnail)
+        self.photoResultsChanged.emit()
+        self.batchCompleteChanged.emit(False)
+
+    @Slot()
+    def startTemplate(self) -> None:
+        """Run the swap against the selected template."""
+        if self._batch_running or not self._source_set or not self._selected_template:
+            return
+        if not self._connected:
+            self._set_status('cannot reach server - not connected')
+            return
+
+        self._batch_complete = False
+        self._batch_error = ''
+        self._photo_results = []
+        # The target is already on the pipeline, so nothing is uploaded and
+        # there is no local original for the result to sit beside.
+        self._photo_uploaded = []
+        self.batchCompleteChanged.emit(False)
+        self.photoResultsChanged.emit()
+
+        result = self._client.start()
+        if result.get('success', False) is False and 'error' in result:
+            self._set_status('error: %s' % result['error'])
+            return
+
+        self._batch_running = True
+        self.batchRunningChanged.emit(True)
+        self._set_status('processing...')
+
+    @Slot()
+    def selectPhotoTargets(self) -> None:
+        """Choose up to four target photos."""
+        from PySide6.QtWidgets import QFileDialog
+        paths, _ = QFileDialog.getOpenFileNames(
+            None, 'Select up to %d target photos' % MAX_PHOTO_TARGETS, '',
+            'Images (*.jpg *.jpeg *.png *.webp *.bmp)',
+        )
+        if not paths:
+            return
+
+        chosen = [q.replace(chr(92), '/') for q in paths[:MAX_PHOTO_TARGETS]]
+        if len(paths) > MAX_PHOTO_TARGETS:
+            self._set_status(
+                '%d chosen - using the first %d' % (len(paths), MAX_PHOTO_TARGETS)
+            )
+
+        self._photo_targets = chosen
+        self._photo_results = []
+        self._batch_complete = False
+        self.photoTargetsChanged.emit()
+        self.photoResultsChanged.emit()
+        self.batchCompleteChanged.emit(False)
+
+        # Keep the single-target properties meaningful so the existing header
+        # and its "target set" gate keep working in photo mode.
+        self._target_set = True
+        self._target_path = chosen[0]
+        self._target_label = (
+            os.path.basename(chosen[0]) if len(chosen) == 1
+            else '%d photos' % len(chosen)
+        )
+        self._target_thumbnail = chosen[0]
+        self.targetSetChanged.emit(True)
+        self.targetLabelChanged.emit(self._target_label)
+        self.targetThumbnailChanged.emit(self._target_thumbnail)
+
+    @Slot(int)
+    def removePhotoTarget(self, index: int) -> None:
+        """Drop one chosen photo before the job runs."""
+        if self._batch_running or not (0 <= index < len(self._photo_targets)):
+            return
+        self._photo_targets.pop(index)
+        self._photo_results = []
+        self.photoTargetsChanged.emit()
+        self.photoResultsChanged.emit()
+        if not self._photo_targets:
+            self._reset_batch_state()
+
+    def _encode_photo(self, path: str) -> Tuple[str, str]:
+        """
+        Read one photo as base64, shrinking it only if it exceeds the cap.
+
+        A photo that already fits is sent byte-for-byte - no decode, no
+        re-encode, no generation loss. Only a camera original over the limit is
+        touched, and then as gently as it can be: quality first, and dimensions
+        only after quality has been spent, in 10% steps rather than one jump to
+        a target size.
+
+        Args:
+            path: Local path to the photo
+
+        Returns:
+            (base64_data, error) - exactly one is non-empty
+        """
+        try:
+            with open(path, 'rb') as fh:
+                raw = fh.read()
+        except OSError as e:
+            return '', 'could not be read: %s' % e
+
+        if len(raw) <= MAX_PHOTO_BYTES:
+            return base64.b64encode(raw).decode('ascii'), ''
+
+        image = cv2.imread(path)
+        if image is None:
+            return '', 'could not be read as an image'
+
+        # Quality first - it costs the least visible detail per byte saved.
+        for quality in (95, 92, 88):
+            ok, buf = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, quality])
+            if ok and buf.nbytes <= MAX_PHOTO_BYTES:
+                return base64.b64encode(buf.tobytes()).decode('ascii'), ''
+
+        # Then dimensions, in small steps, stopping well before the image
+        # stops being worth swapping.
+        scale = 1.0
+        height, width = image.shape[:2]
+        while max(height, width) * scale * 0.9 >= self._MIN_PHOTO_LONG_SIDE:
+            scale *= 0.9
+            resized = cv2.resize(
+                image, (max(1, int(width * scale)), max(1, int(height * scale))),
+                interpolation=cv2.INTER_AREA,
+            )
+            ok, buf = cv2.imencode('.jpg', resized, [cv2.IMWRITE_JPEG_QUALITY, 92])
+            if ok and buf.nbytes <= MAX_PHOTO_BYTES:
+                return base64.b64encode(buf.tobytes()).decode('ascii'), ''
+
+        return '', (
+            '%.1f MB and cannot be reduced under %d MB without losing too much detail'
+            % (len(raw) / (1024 * 1024), MAX_PHOTO_BYTES // (1024 * 1024))
+        )
+
+    @Slot()
+    def startPhotos(self) -> None:
+        """Upload the chosen photos and run the swap over all of them."""
+        if self._batch_running or not self._source_set or not self._photo_targets:
+            return
+        if not self._connected:
+            self._set_status('cannot reach server - not connected')
+            return
+
+        self._batch_complete = False
+        self._batch_error = ''
+        self._photo_results = []
+        self.batchCompleteChanged.emit(False)
+        self.photoResultsChanged.emit()
+        self._set_status('preparing photos...')
+
+        images: List[Dict[str, str]] = []
+        uploaded: List[str] = []
+        skipped: List[str] = []
+        for path in self._photo_targets:
+            data, error = self._encode_photo(path)
+            if error:
+                skipped.append('%s: %s' % (os.path.basename(path), error))
+                continue
+            images.append({'name': os.path.basename(path), 'data': data})
+            uploaded.append(path)
+
+        if not images:
+            self._set_status('no usable photo - %s' % '; '.join(skipped))
+            return
+        if skipped:
+            self._set_status('skipping %d - %s' % (len(skipped), '; '.join(skipped)))
+
+        self._set_status('uploading %d photo(s)...' % len(images))
+        response = self._client.upload_target(images)
+        if response.get('error') or response.get('success') is False:
+            reason = response.get('error') or 'upload failed'
+            self._set_status('error: %s' % reason)
+            return
+
+        result = self._client.start()
+        if result.get('success', False) is False and 'error' in result:
+            self._set_status('error: %s' % result['error'])
+            return
+
+        self._photo_uploaded = uploaded
+        self._batch_running = True
+        self.batchRunningChanged.emit(True)
+        self._set_status('processing...')
+
+    def _collect_photo_results(self) -> None:
+        """
+        Fetch the finished photos and write the swapped ones next to their
+        originals.
+
+        The outputs live on the pipeline's filesystem, which is not the
+        operator's machine when the pipeline is a pod, so they come back inline
+        and are written locally here - beside the photo the operator picked,
+        with the `_swapped` suffix `startBatch` already uses for video.
+        """
+        response = self._client.get_photo_results()
+        if response.get('error'):
+            self._set_status('error reading results: %s' % response['error'])
+            return
+
+        entries = (response.get('data') or {}).get('results', [])
+        collected: List[Dict[str, Any]] = []
+
+        for index, entry in enumerate(entries):
+            local_source = (
+                self._photo_uploaded[index] if index < len(self._photo_uploaded) else ''
+            )
+            record: Dict[str, Any] = {
+                'name': entry.get('target', os.path.basename(local_source)),
+                'ok': bool(entry.get('ok')),
+                'reason': entry.get('reason', ''),
+                'source': local_source,
+                'output': '',
+            }
+
+            data = entry.get('data')
+            if record['ok'] and data:
+                if local_source:
+                    # An uploaded photo has an original to sit beside.
+                    base, ext = os.path.splitext(local_source)
+                    out_path = '%s_swapped%s' % (base, ext or '.png')
+                else:
+                    # A template has none, so its result needs a home the
+                    # operator can actually find.
+                    name = entry.get('target', 'template')
+                    base, ext = os.path.splitext(name)
+                    out_path = os.path.join(
+                        self._output_dir(), '%s_swapped%s' % (base, ext or '.png')
+                    )
+                try:
+                    with open(out_path, 'wb') as fh:
+                        fh.write(base64.b64decode(data))
+                    record['output'] = out_path
+                except (OSError, ValueError) as e:
+                    record['ok'] = False
+                    record['reason'] = 'could not be saved locally: %s' % e
+            collected.append(record)
+
+        self._photo_results = collected
+        self.photoResultsChanged.emit()
+
+        swapped = sum(1 for r in collected if r['ok'])
+        self._set_status(
+            '%d swapped, %d skipped' % (swapped, len(collected) - swapped)
+        )
 
     @Slot()
     def selectTargetFile(self) -> None:
         """Open a file dialog to select the target video or image."""
         from PySide6.QtWidgets import QFileDialog
+        if self._current_mode == 'image':
+            # Image mode takes several targets and uploads them, so it has its
+            # own selection path. Routed here rather than duplicated in QML so
+            # one button keeps working in every mode.
+            self.selectPhotoTargets()
+            return
         if self._current_mode == 'video':
             path, _ = QFileDialog.getOpenFileName(
                 None, 'Select target video', '',
@@ -666,6 +1137,12 @@ class Bridge(QObject):
     @Slot()
     def startBatch(self) -> None:
         """Start batch face swap processing on the selected target file."""
+        if self._current_mode == 'image':
+            self.startPhotos()
+            return
+        if self._current_mode == 'template':
+            self.startTemplate()
+            return
         if self._batch_running or not self._source_set or not self._target_set:
             return
         if not self._connected:
@@ -725,6 +1202,13 @@ class Bridge(QObject):
 
     def _reset_batch_state(self) -> None:
         """Clear all batch-related state."""
+        self._photo_targets = []
+        self._photo_results = []
+        self._photo_uploaded = []
+        self._selected_template = ''
+        self.selectedTemplateChanged.emit('')
+        self.photoTargetsChanged.emit()
+        self.photoResultsChanged.emit()
         self._target_set = False
         self._target_label = ''
         self._target_path = ''
@@ -937,6 +1421,19 @@ class Bridge(QObject):
                 self._batch_error = message
             if message and not self._pipeline_running:
                 self._set_status(message)
+        elif event == 'PHOTO_RESULT':
+            # One photo finished. Recorded as it arrives so four tiles resolve
+            # one at a time rather than all at the end; the swapped image
+            # itself is fetched once the job stops.
+            entry = data.get('result') or {}
+            self._photo_results.append({
+                'name': entry.get('target', ''),
+                'ok': bool(entry.get('ok')),
+                'reason': entry.get('reason', ''),
+                'source': '',
+                'output': '',
+            })
+            self.photoResultsChanged.emit()
         elif event == 'PIPELINE_STARTED':
             # Don't clear the overlay here — keep it up until the first
             # processed frame arrives so the user sees the swap is active.
@@ -961,7 +1458,17 @@ class Bridge(QObject):
                 else:
                     self._batch_complete = True
                     self.batchCompleteChanged.emit(True)
-                    self._set_status('done')
+                    if self._photo_targets:
+                        # Fetching the images is a blocking request, and this
+                        # runs on the socket's own receive thread — waiting
+                        # here would block the very loop that has to deliver
+                        # the response. Hence a worker.
+                        threading.Thread(
+                            target=self._collect_photo_results,
+                            daemon=True,
+                        ).start()
+                    else:
+                        self._set_status('done')
         elif event == 'auto_stop_warning':
             minutes = (data.get('data') or {}).get('minutes_remaining', 5)
             self.autoStopWarning.emit(minutes)

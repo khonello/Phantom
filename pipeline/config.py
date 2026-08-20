@@ -7,7 +7,7 @@ Supports change notifications via callbacks for reactive updates.
 
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Callable, List, Optional, Dict
+from typing import Any, Callable, List, Optional, Dict, Tuple
 
 
 @dataclass
@@ -23,6 +23,22 @@ class FaceSwapConfig:
     source_path: Optional[str] = None
     source_paths: List[str] = field(default_factory=list)
     target_path: Optional[str] = None
+    # Photo mode: several image targets, each swapped independently. Kept
+    # separate from `target_path` so a photo job cannot be mistaken for a
+    # single-file batch, and vice versa.
+    target_paths: List[str] = field(default_factory=list)
+    # Bundled template in use, and the face within it the template's author
+    # chose. The point is normalised (x, y) so it survives a resize, and it is
+    # what answers the multi-face guard: the ambiguity was resolved offline.
+    template_id: Optional[str] = None
+    target_face_point: Optional[Tuple[float, float]] = None
+    # RGBA layer drawn over the finished swap, for hair, glasses or a hand that
+    # belongs in front of the face. Carried as a path rather than as a Template
+    # so the pipeline stays unaware of the library.
+    target_foreground: Optional[str] = None
+    # Where derived photo outputs go. Set for a template job, whose target
+    # lives in the shared library and must not be written next to.
+    output_dir: Optional[str] = None
     output_path: Optional[str] = None
     save_embedding_path: Optional[str] = None
 
@@ -252,6 +268,11 @@ class FaceSwapConfig:
             'source_path': self.source_path,
             'source_paths': self.source_paths,
             'target_path': self.target_path,
+            'target_paths': self.target_paths,
+            'template_id': self.template_id,
+            'target_face_point': self.target_face_point,
+            'target_foreground': self.target_foreground,
+            'output_dir': self.output_dir,
             'output_path': self.output_path,
             'frame_processors': self.frame_processors,
             'keep_fps': self.keep_fps,

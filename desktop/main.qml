@@ -56,9 +56,7 @@ Window {
             Text {
                 id: headerHint
                 property string hint: vcamHh.hovered  ? "Output swapped face to a virtual webcam for use in video calls"
-                                    : enhHh.hovered   ? "GFPGAN face enhancement \u2014 sharpens and restores facial detail"
-                                    : ccHh.hovered    ? "Match swapped face skin tone to target \u2014 fixes cross-complexion swaps"
-                                    : ppHh.hovered    ? "Normalize lighting, white balance and reduce camera noise"
+                                    : enhHh.hovered   ? "Face restoration \u2014 off keeps the face softer, closer to the raw camera"
                                     : ""
                 text: hint
                 color: "#475569"; font.pixelSize: 11
@@ -167,107 +165,6 @@ Window {
 
             }
 
-            // ── separator: pipeline toggles │ quality toggles ──
-            Rectangle {
-                visible: bridge.currentMode === "realtime"
-                width: 1; height: 18; color: "#14142a"
-                anchors.verticalCenter: parent.verticalCenter
-            }
-
-            // Color correction toggle (realtime mode only)
-            Rectangle {
-                visible: bridge.currentMode === "realtime"
-                width: ccRow.width + 20; height: 28; radius: 6
-                anchors.verticalCenter: parent.verticalCenter
-                color: bridge.colorCorrectionActive ? "#0a1628"
-                     : ccHh.containsMouse            ? "#151525" : "#0f0f1e"
-                border.color: bridge.colorCorrectionActive ? "#3b82f6" : "#1e1e38"
-                border.width: 1
-                Behavior on color       { ColorAnimation { duration: 200 } }
-                Behavior on border.color { ColorAnimation { duration: 200 } }
-
-                Row {
-                    id: ccRow
-                    anchors.centerIn: parent; spacing: 6
-
-                    Rectangle {
-                        width: 6; height: 6; radius: 3
-                        color: bridge.colorCorrectionActive ? "#3b82f6" : "#333355"
-                        anchors.verticalCenter: parent.verticalCenter
-                        Behavior on color { ColorAnimation { duration: 200 } }
-
-                        SequentialAnimation on opacity {
-                            running: bridge.colorCorrectionActive; loops: Animation.Infinite
-                            NumberAnimation { to: 0.25; duration: 700; easing.type: Easing.InOutSine }
-                            NumberAnimation { to: 1.0;  duration: 700; easing.type: Easing.InOutSine }
-                        }
-                    }
-                    Text {
-                        text: "COLOR"
-                        color: bridge.colorCorrectionActive ? "#3b82f6"
-                             : ccHh.containsMouse           ? "#64748b" : "#475569"
-                        font.pixelSize: 10; font.letterSpacing: 1.5; font.weight: Font.Medium
-                        anchors.verticalCenter: parent.verticalCenter
-                        Behavior on color { ColorAnimation { duration: 200 } }
-                    }
-                }
-
-                HoverHandler { id: ccHh }
-                MouseArea {
-                    anchors.fill: parent
-                    onClicked: bridge.toggleColorCorrection()
-                    cursorShape: Qt.PointingHandCursor
-                }
-
-            }
-
-            // Preprocessing toggle (realtime mode only)
-            Rectangle {
-                visible: bridge.currentMode === "realtime"
-                width: ppRow.width + 20; height: 28; radius: 6
-                anchors.verticalCenter: parent.verticalCenter
-                color: bridge.preprocessingActive ? "#0a1628"
-                     : ppHh.containsMouse          ? "#151525" : "#0f0f1e"
-                border.color: bridge.preprocessingActive ? "#3b82f6" : "#1e1e38"
-                border.width: 1
-                Behavior on color       { ColorAnimation { duration: 200 } }
-                Behavior on border.color { ColorAnimation { duration: 200 } }
-
-                Row {
-                    id: ppRow
-                    anchors.centerIn: parent; spacing: 6
-
-                    Rectangle {
-                        width: 6; height: 6; radius: 3
-                        color: bridge.preprocessingActive ? "#3b82f6" : "#333355"
-                        anchors.verticalCenter: parent.verticalCenter
-                        Behavior on color { ColorAnimation { duration: 200 } }
-
-                        SequentialAnimation on opacity {
-                            running: bridge.preprocessingActive; loops: Animation.Infinite
-                            NumberAnimation { to: 0.25; duration: 700; easing.type: Easing.InOutSine }
-                            NumberAnimation { to: 1.0;  duration: 700; easing.type: Easing.InOutSine }
-                        }
-                    }
-                    Text {
-                        text: "PREPROC"
-                        color: bridge.preprocessingActive ? "#3b82f6"
-                             : ppHh.containsMouse          ? "#64748b" : "#475569"
-                        font.pixelSize: 10; font.letterSpacing: 1.5; font.weight: Font.Medium
-                        anchors.verticalCenter: parent.verticalCenter
-                        Behavior on color { ColorAnimation { duration: 200 } }
-                    }
-                }
-
-                HoverHandler { id: ppHh }
-                MouseArea {
-                    anchors.fill: parent
-                    onClicked: bridge.togglePreprocessing()
-                    cursorShape: Qt.PointingHandCursor
-                }
-
-            }
-
             Text {
                 text: bridge.statusMessage
                 color: "#334155"; font.pixelSize: 12
@@ -296,6 +193,54 @@ Window {
                     font.pixelSize: 12; anchors.verticalCenter: parent.verticalCenter
                 }
             }
+
+            Rectangle { width: 1; height: 18; color: "#14142a"; anchors.verticalCenter: parent.verticalCenter }
+
+            // ── Media tabs ────────────────────────────────────────
+            // The top level of navigation: what kind of thing is being made.
+            // The sidebar below picks the job within it.
+            Rectangle {
+                width: 132; height: 30; radius: 8
+                anchors.verticalCenter: parent.verticalCenter
+                color: "#0b0b16"
+                border.color: "#1a1a30"; border.width: 1
+
+                Row {
+                    anchors { fill: parent; margins: 3 }
+                    spacing: 2
+
+                    Repeater {
+                        model: [
+                            { id: "video", label: "VIDEO" },
+                            { id: "image", label: "IMAGE" },
+                        ]
+
+                        Rectangle {
+                            width: (parent.width - 2) / 2; height: parent.height; radius: 6
+                            property bool isActive: bridge.mediaTab === modelData.id
+                            color: isActive ? "#1a1a30" : (mth.containsMouse ? "#111120" : "transparent")
+                            border.color: isActive ? "#2e2e55" : "transparent"
+                            border.width: 1
+                            Behavior on color { ColorAnimation { duration: 120 } }
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: modelData.label
+                                color: isActive ? "#c4b5fd" : "#334155"
+                                font.pixelSize: 9; font.letterSpacing: 1.5; font.weight: Font.Medium
+                                Behavior on color { ColorAnimation { duration: 120 } }
+                            }
+
+                            HoverHandler { id: mth }
+                            MouseArea {
+                                anchors.fill: parent
+                                onClicked: bridge.setMediaTab(modelData.id)
+                                cursorShape: Qt.PointingHandCursor
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -320,6 +265,7 @@ Window {
                 spacing: 0
 
                 // ── Mode switcher ─────────────────────────────────────
+                // The job within the selected media tab. Both tabs have two.
                 Rectangle {
                     Layout.fillWidth: true; height: 34; radius: 8
                     color: "#0a0a14"
@@ -331,14 +277,25 @@ Window {
                         spacing: 2
 
                         Repeater {
-                            model: [
-                                { id: "realtime", label: "LIVE"  },
-                                { id: "video",    label: "VIDEO" },
-                                { id: "image",    label: "IMAGE" },
-                            ]
+                            // Video: "RENDER", not "BATCH" - batch reads as
+                            // *many*, and this is one video processed offline
+                            // rather than streamed.
+                            //
+                            // Image: the face is yours either way; what differs
+                            // is whose picture it goes into. UPLOAD is one you
+                            // bring, TEMPLATES is one we ship.
+                            model: bridge.mediaTab === "video"
+                                   ? [
+                                       { id: "realtime", label: "LIVE"   },
+                                       { id: "video",    label: "RENDER" },
+                                     ]
+                                   : [
+                                       { id: "image",    label: "UPLOAD"    },
+                                       { id: "template", label: "TEMPLATES" },
+                                     ]
 
                             Rectangle {
-                                width: (parent.width - 4) / 3; height: parent.height; radius: 6
+                                width: (parent.width - 2) / 2; height: parent.height; radius: 6
                                 property bool isActive: bridge.currentMode === modelData.id
                                 color: isActive ? "#1a1a30" : (mh.containsMouse ? "#111120" : "transparent")
                                 border.color: isActive ? "#2e2e55" : "transparent"
@@ -825,7 +782,11 @@ Window {
 
                         // ── Target file ───────────────────────────────
                         Text {
-                            text: bridge.currentMode === "video" ? "TARGET VIDEO" : "TARGET IMAGE"
+                            text: bridge.currentMode === "video"
+                                  ? "TARGET VIDEO"
+                                  : bridge.currentMode === "template"
+                                  ? "CHOOSE A SCENE"
+                                  : "TARGET PHOTOS (MAX " + bridge.maxPhotoTargets + ")"
                             color: "#252545"; font.pixelSize: 8; font.letterSpacing: 1.5
                             Layout.bottomMargin: 8
                         }
@@ -833,7 +794,9 @@ Window {
                         // Select target button
                         Rectangle {
                             Layout.fillWidth: true; height: 38; radius: 8
-                            visible: !bridge.targetSet
+                            // Templates are picked from the gallery below,
+                            // not from the filesystem.
+                            visible: !bridge.targetSet && bridge.currentMode !== "template"
                             color: tgtHover.containsMouse ? "#1a1a2e" : "#12121e"
                             border.color: tgtHover.containsMouse ? "#2e2e50" : "#1e1e35"
                             border.width: 1
@@ -848,7 +811,7 @@ Window {
                                     Text { anchors.centerIn: parent; text: "+"; color: "#3b82f6"; font.pixelSize: 17 }
                                 }
                                 Text {
-                                    text: bridge.currentMode === "video" ? "Select Video" : "Select Image"
+                                    text: bridge.currentMode === "video" ? "Select Video" : "Select Photos"
                                     color: "#60a5fa"; font.pixelSize: 12
                                     anchors.verticalCenter: parent.verticalCenter
                                 }
@@ -862,10 +825,11 @@ Window {
                             }
                         }
 
-                        // Target thumbnail card
+                        // Target thumbnail card (video only — photo mode
+                        // shows a tile per chosen image instead)
                         Rectangle {
                             Layout.fillWidth: true; height: 68; radius: 8
-                            visible: bridge.targetSet
+                            visible: bridge.targetSet && bridge.currentMode === "video"
                             color: "#12121e"
                             border.color: "#1a2a45"; border.width: 1
                             clip: true
@@ -918,15 +882,229 @@ Window {
                             }
                         }
 
+                        // ── Chosen photos ─────────────────────────────
+                        // One tile per target, each carrying its own outcome:
+                        // a job where two of four are skipped has no single
+                        // verdict to show.
+                        Flow {
+                            Layout.fillWidth: true
+                            visible: bridge.currentMode === "image" && bridge.photoTargets.length > 0
+                            spacing: 6
+
+                            Repeater {
+                                model: bridge.photoTargets
+
+                                Rectangle {
+                                    width: 74; height: 74; radius: 8
+                                    color: "#12121e"
+                                    clip: true
+                                    border.width: 1
+                                    border.color: {
+                                        var r = bridge.photoResults[index]
+                                        if (!r) return "#1a2a45"
+                                        return r.ok ? "#14532d" : "#4c1d24"
+                                    }
+
+                                    Image {
+                                        anchors.fill: parent
+                                        source: "file:///" + modelData
+                                        fillMode: Image.PreserveAspectCrop
+                                        smooth: true
+                                        asynchronous: true
+                                    }
+
+                                    // Outcome badge — absent while pending
+                                    Rectangle {
+                                        anchors { top: parent.top; left: parent.left; topMargin: 4; leftMargin: 4 }
+                                        width: 16; height: 16; radius: 8
+                                        visible: bridge.photoResults[index] !== undefined
+                                        color: {
+                                            var r = bridge.photoResults[index]
+                                            if (!r) return "transparent"
+                                            return r.ok ? "#14532d" : "#4c1d24"
+                                        }
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: {
+                                                var r = bridge.photoResults[index]
+                                                if (!r) return ""
+                                                return r.ok ? "\u2713" : "\u2715"
+                                            }
+                                            color: {
+                                                var r = bridge.photoResults[index]
+                                                if (!r) return "transparent"
+                                                return r.ok ? "#86efac" : "#fca5a5"
+                                            }
+                                            font.pixelSize: 10
+                                        }
+                                    }
+
+                                    // Skip reason, so a refusal says why
+                                    Rectangle {
+                                        anchors { bottom: parent.bottom; left: parent.left; right: parent.right }
+                                        height: 18
+                                        visible: {
+                                            var r = bridge.photoResults[index]
+                                            return r !== undefined && !r.ok
+                                        }
+                                        color: "#d0090909"
+                                        Text {
+                                            anchors { fill: parent; leftMargin: 4; rightMargin: 4 }
+                                            verticalAlignment: Text.AlignVCenter
+                                            text: {
+                                                var r = bridge.photoResults[index]
+                                                return r ? r.reason : ""
+                                            }
+                                            color: "#fca5a5"; font.pixelSize: 7
+                                            elide: Text.ElideRight
+                                        }
+                                    }
+
+                                    // × remove, before the job runs
+                                    Rectangle {
+                                        anchors { top: parent.top; right: parent.right; topMargin: 4; rightMargin: 4 }
+                                        width: 16; height: 16; radius: 4
+                                        visible: !bridge.batchRunning
+                                        color: rmHover.containsMouse ? "#1d2c4e" : "#c00a1428"
+                                        Text { anchors.centerIn: parent; text: "×"; color: "#60a5fa"; font.pixelSize: 11 }
+                                        HoverHandler { id: rmHover }
+                                        MouseArea {
+                                            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                            onClicked: bridge.removePhotoTarget(index)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // ── Template gallery ──────────────────────────
+                        // The scenes we ship. Selecting one sets it as the
+                        // target; the source face is whatever was uploaded.
+                        Flow {
+                            Layout.fillWidth: true
+                            visible: bridge.currentMode === "template"
+                                     && bridge.templates.length > 0
+                            spacing: 6
+
+                            Repeater {
+                                model: bridge.templates
+
+                                Rectangle {
+                                    width: 74; height: 74; radius: 8
+                                    color: "#12121e"
+                                    clip: true
+                                    border.width: 1
+                                    border.color: bridge.selectedTemplate === modelData.id
+                                                  ? "#2e2e55" : "#1a2a45"
+
+                                    Image {
+                                        anchors.fill: parent
+                                        source: modelData.thumbnail !== ""
+                                                ? "file:///" + modelData.thumbnail
+                                                : ""
+                                        fillMode: Image.PreserveAspectCrop
+                                        smooth: true
+                                        asynchronous: true
+                                        opacity: bridge.selectedTemplate === modelData.id ? 1.0 : 0.65
+                                        Behavior on opacity { NumberAnimation { duration: 120 } }
+                                    }
+
+                                    // Name, so a scene without a thumbnail is
+                                    // still identifiable
+                                    Rectangle {
+                                        anchors { bottom: parent.bottom; left: parent.left; right: parent.right }
+                                        height: 16; color: "#d009090e"
+                                        Text {
+                                            anchors { fill: parent; leftMargin: 4; rightMargin: 4 }
+                                            verticalAlignment: Text.AlignVCenter
+                                            text: modelData.name
+                                            color: "#93c5fd"; font.pixelSize: 7
+                                            elide: Text.ElideRight
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        anchors { top: parent.top; left: parent.left; topMargin: 4; leftMargin: 4 }
+                                        width: 16; height: 16; radius: 8
+                                        visible: bridge.selectedTemplate === modelData.id
+                                        color: "#1a1a30"
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: "\u2713"; color: "#c4b5fd"; font.pixelSize: 10
+                                        }
+                                    }
+
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        enabled: !bridge.batchRunning
+                                        onClicked: bridge.selectTemplate(modelData.id)
+                                        cursorShape: Qt.PointingHandCursor
+                                    }
+                                }
+                            }
+                        }
+
+                        // Empty library, or one still loading
+                        Rectangle {
+                            Layout.fillWidth: true; height: 60; radius: 8
+                            visible: bridge.currentMode === "template"
+                                     && bridge.templates.length === 0
+                            color: "#0d0d18"
+                            border.color: "#14142a"; border.width: 1
+                            Column {
+                                anchors.centerIn: parent; spacing: 6
+                                Text {
+                                    anchors.horizontalCenter: parent.horizontalCenter
+                                    text: "no scenes available"
+                                    color: "#334155"; font.pixelSize: 11
+                                }
+                                Text {
+                                    anchors.horizontalCenter: parent.horizontalCenter
+                                    text: "retry"
+                                    color: "#60a5fa"; font.pixelSize: 10
+                                    MouseArea {
+                                        anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                        onClicked: bridge.loadTemplates()
+                                    }
+                                }
+                            }
+                        }
+
+                        // Add more, while under the cap
+                        Rectangle {
+                            Layout.fillWidth: true; height: 30; radius: 8
+                            Layout.topMargin: 6
+                            visible: bridge.currentMode === "image"
+                                     && bridge.photoTargets.length > 0
+                                     && bridge.photoTargets.length < bridge.maxPhotoTargets
+                                     && !bridge.batchRunning
+                            color: addHover.containsMouse ? "#1a1a2e" : "#12121e"
+                            border.color: "#1e1e35"; border.width: 1
+                            Text {
+                                anchors.centerIn: parent
+                                text: "Choose photos again"
+                                color: "#60a5fa"; font.pixelSize: 10
+                            }
+                            HoverHandler { id: addHover }
+                            MouseArea {
+                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                onClicked: bridge.selectPhotoTargets()
+                            }
+                        }
+
                         // ── Output path ───────────────────────────────
+                        // Photo mode derives one output per photo, beside the
+                        // original, so there is nothing to choose here.
                         Text {
                             text: "OUTPUT PATH"
+                            visible: bridge.currentMode === "video"
                             color: "#252545"; font.pixelSize: 8; font.letterSpacing: 1.5
                             Layout.topMargin: 16; Layout.bottomMargin: 8
                         }
 
                         Rectangle {
                             Layout.fillWidth: true; height: 38; radius: 8
+                            visible: bridge.currentMode === "video"
                             color: outHover.containsMouse ? "#1a1a2e" : "#12121e"
                             border.color: bridge.outputPath !== "" ? "#1e2e1e" : "#1e1e35"
                             border.width: 1
@@ -1285,12 +1463,21 @@ Window {
 
                             Text {
                                 anchors.horizontalCenter: parent.horizontalCenter
-                                text: "▶"
+                                // A play glyph belongs to video; a still job
+                                // gets a frame, and a template gets a gallery.
+                                text: bridge.currentMode === "video" ? "▶"
+                                    : bridge.currentMode === "template" ? "◳" : "▢"
                                 color: "#1c1c35"; font.pixelSize: 42
                             }
                             Text {
                                 anchors.horizontalCenter: parent.horizontalCenter
-                                text: bridge.currentMode === "video" ? "select target video" : "select target image"
+                                // Templates are not selected here — they are
+                                // picked from the gallery in the sidebar, so
+                                // this says where to look rather than implying
+                                // something on this panel is clickable.
+                                text: bridge.currentMode === "video" ? "select target video"
+                                    : bridge.currentMode === "template" ? "choose a scene from the gallery"
+                                    : "select target photos"
                                 color: "#252545"; font.pixelSize: 13
                             }
                         }
@@ -1338,16 +1525,75 @@ Window {
                         clip: true
                         Behavior on border.color { ColorAnimation { duration: 600 } }
 
-                        // Output image (image mode, after complete)
+                        // Output image (video mode, after complete)
                         Image {
                             anchors.fill: parent
-                            source: (bridge.batchComplete && bridge.currentMode === "image" && bridge.outputPath !== "")
+                            source: (bridge.batchComplete && bridge.currentMode === "video" && bridge.outputPath !== "")
                                     ? "file:///" + bridge.outputPath
                                     : ""
                             fillMode: Image.PreserveAspectFit
                             smooth: true
-                            visible: bridge.batchComplete && bridge.currentMode === "image" && bridge.outputPath !== ""
+                            visible: bridge.batchComplete && bridge.currentMode === "video" && bridge.outputPath !== ""
                             cache: false
+                        }
+
+                        // Swapped photos. A photo job has several outputs and
+                        // may have skipped some, so the result is a grid with
+                        // the skips named rather than one image.
+                        Flow {
+                            anchors { fill: parent; margins: 10 }
+                            spacing: 6
+                            // Templates report through the same per-photo
+                            // results, being a photo job of one.
+                            visible: (bridge.currentMode === "image"
+                                      || bridge.currentMode === "template")
+                                     && bridge.photoResults.length > 0
+
+                            Repeater {
+                                model: bridge.photoResults
+
+                                Rectangle {
+                                    width: (parent.width - 6) / 2
+                                    height: (parent.height - 6) / 2
+                                    radius: 8
+                                    color: "#0a0a14"
+                                    border.width: 1
+                                    border.color: modelData.ok ? "#14532d" : "#4c1d24"
+                                    clip: true
+
+                                    Image {
+                                        anchors.fill: parent
+                                        source: modelData.output !== ""
+                                                ? "file:///" + modelData.output
+                                                : ""
+                                        fillMode: Image.PreserveAspectFit
+                                        smooth: true
+                                        visible: modelData.output !== ""
+                                        cache: false
+                                    }
+
+                                    // Why this one was skipped
+                                    Column {
+                                        anchors.centerIn: parent; spacing: 6
+                                        width: parent.width - 20
+                                        visible: !modelData.ok
+                                        Text {
+                                            width: parent.width
+                                            horizontalAlignment: Text.AlignHCenter
+                                            text: modelData.name
+                                            color: "#64748b"; font.pixelSize: 10
+                                            elide: Text.ElideMiddle
+                                        }
+                                        Text {
+                                            width: parent.width
+                                            horizontalAlignment: Text.AlignHCenter
+                                            text: modelData.reason
+                                            color: "#fca5a5"; font.pixelSize: 9
+                                            wrapMode: Text.WordWrap
+                                        }
+                                    }
+                                }
+                            }
                         }
 
                         // Idle placeholder

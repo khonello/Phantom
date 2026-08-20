@@ -463,7 +463,11 @@ def check_frame(
     if config.many_faces:
         return GuardResult.passed()
 
-    if config.guard_multi_face and len(detections) > 1:
+    # A named face answers the question this guard exists to ask. It refuses
+    # a crowd because "which face did you mean?" has no safe default — once a
+    # template's author has answered it offline, there is nothing left to
+    # protect against, and refusing would reject a scene we shipped on purpose.
+    if config.guard_multi_face and len(detections) > 1 and config.target_face_point is None:
         return GuardResult.failed(MULTIPLE_FACES, f'{len(detections)} faces')
 
     if not detections:

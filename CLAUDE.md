@@ -33,14 +33,20 @@ from starting the pod through to the outstanding implementation work.
 [docs/TODO.md](docs/TODO.md) remains the backlog.
 
 - Working: realtime stream, aligned-space compositing, RunPod deployment,
-  desktop LIVE mode, batch **image** and **video**, desktop VIDEO mode
+  desktop LIVE mode, batch **image** and **video**, **photo mode** (up to four
+  uploaded targets), **template targets** (bundled scenes), desktop VIDEO and
+  IMAGE tabs
+- No templates are bundled yet — the machinery runs against an empty library.
+  The assets are a content decision, including licensing for this use
 - Not exposed: realism knobs have no desktop UI (API/CLI only)
-- No automated tests exist
 - Batch video is wired but has only been exercised against a stubbed swapper —
   the FFmpeg plumbing, frame ordering, audio sync, cancellation and cleanup are
   verified; a real run with the models in the loop has not been done locally
-- Large-file transfer is still the gap in batch: `upload_source` is base64
-  inside a single JSON message, fine for a face and unusable for a 2 GB video
+- Large-file transfer is still the gap for **video** targets. Photos sidestep it
+  (`upload_target`, ≤4, ≤6 MB each, base64 in one message per job), and are so
+  far the only target that reaches a remote pod at all — `set_target` validates
+  against the *pipeline's* filesystem, so a desktop-chosen file only resolves
+  when the pipeline runs locally. A 2 GB video still needs a real transfer path
 
 ## Quick Commands
 
@@ -53,8 +59,13 @@ from starting the pod through to the outstanding implementation work.
 ### Development
 - **Lint**: `flake8 pipeline.py pipeline desktop`
 - **Type check**: `mypy pipeline desktop` (CI runs `mypy pipeline` only)
-- **Unit tests**: `python -m pytest tests/ -q` — ~40s, no GPU or model weights
-  needed (the ML layer is stubbed in `tests/conftest.py`)
+- **Unit tests**: `python -m pytest tests/ -q` — ~32s, no GPU or model weights
+  needed (the ML layer is stubbed in `tests/conftest.py`). Ten modules;
+  `test_photo_batch.py` covers the photo path, including that a refused photo
+  leaves no output file behind, and `test_templates.py` covers the bundled
+  library and the face its manifest names
+- **Validate templates**: `python tools/validate_templates.py` — runs the real
+  guards over the library, non-zero if any scene would be refused
 - **End-to-end**: `python pipeline.py -s=.github/examples/source.jpg -t=.github/examples/target.mp4 -o=/tmp/output.mp4`
 
 ### Measurement
@@ -186,9 +197,33 @@ Capture settings live in `PRESETS` and are read by both the pipeline's own
 `VideoCapture` loop and the desktop's webcam thread, so local and push mode
 cannot diverge. Changing quality restarts the capture device to apply them.
 
-Presets deliberately **do not** set `enhance` or `color_correction`: both have
-explicit toggles in the desktop header, and a preset must not silently undo
-something the operator just clicked.
+Presets deliberately **do not** set `enhance`: it has an explicit toggle in the
+desktop header, and a preset must not silently undo something the operator just
+clicked. `color_correction` is left alone for a different reason — it is on and
+stays on (see below).
+
+### Header toggles — what a consumer is allowed to change
+Only two: **VCAM** and **ENHANCE**. `COLOR` and `PREPROC` were removed, and the
+distinction is worth keeping straight — a toggle implies a choice worth making.
+
+- **VCAM** is not a quality knob at all. It is where the output *goes*, and on a
+  live call it is the control that makes the whole thing work.
+- **ENHANCE** is the one with genuine taste in it: restoration is what decides
+  whether the output reads as a real call or as AI, so "too plastic" is a
+  legitimate opinion. Binary is the wrong shape for it long-term — the real axis
+  is *how much* — but it stays until there is a strength slider.
+- **COLOR** was removed because it is correctness, not preference. It matches
+  the swapped face's skin tone to the target; off produces a colour step at the
+  boundary, which is failure mode 2. Turning it off never makes output better.
+- **PREPROC** was removed because it defaults *off* and, by its own docstring,
+  "the output stops looking like the operator's real camera" — the opposite of
+  the design target. It is a rescue knob for terrible lighting.
+
+Both remain reachable via `set_realism`, the CLI and env: they were removed from
+the consumer's surface, not from the product. Note also that the header toggles
+are realtime-only, while the settings they set are global — a photo or render
+job inherits whatever the config holds, which is another reason not to expose
+knobs there that nobody should be turning.
 
 `tracker`, `blend`, `luminance_blend` and `redetect_interval` remain on
 `FaceSwapConfig` so the `set_blend` / `set_alpha` API commands keep working, but
@@ -315,8 +350,18 @@ A guarded frame emits **the last good swapped frame, unchanged** — nothing dra
 on it, since it reaches every participant on the call. Guards fail closed, and
 never update temporal state. `FaceCompositor.composite` returns `None` rather than
 the untouched frame when it cannot produce a swap: on the live path the untouched
-frame is the operator's real face. Batch instead passes the original through,
-because a batch target is a file the operator supplied, not their camera.
+frame is the operator's real face.
+
+Batch splits by what an unswapped output would mean:
+
+- **Video** passes the original frame through. The target is a file the
+  operator supplied, not their camera, and one unswapped frame mid-clip is a
+  smaller defect than a hole.
+- **A still** writes nothing at all. There is no surrounding footage to carry
+  it, so an unswapped photo is a copy of the input wearing the output's name —
+  indistinguishable from success to whoever opens the folder, which is the
+  "confidently wrong output" the guards exist to prevent. `PhotoResult` carries
+  the refusal and its reason instead.
 
 `_run_vcam` holds and re-sends the last frame when the queue empties, so the
 virtual camera never shows the raw camera and never shows nothing — covering hour
@@ -329,6 +374,109 @@ that lack it. The two are not on the same scale, so which was used is recorded.
 Thresholds are `guard_*` fields on `FaceSwapConfig`, settable via `set_realism`
 (clamped, not rejected). `guards` disables the runtime guards wholesale;
 `many_faces` bypasses them.
+
+### Photo mode
+A third job shape beside live and batch video: **one to four target photos, each
+swapped independently, failures skipped**. It adds no stage to the pipeline — it
+loops the image path that already existed, so every photo goes through the same
+`_swap_frame_detail`, the same guards and the same `FaceCompositor` as a video
+frame or a live frame.
+
+Three things are specific to it:
+
+- **Targets are uploaded, not referenced.** `upload_target` carries the images
+  base64 in one message, capped at `MAX_PHOTO_TARGETS` (4) and
+  `MAX_PHOTO_BYTES` (6 MB) each, both defined in `pipeline/api/schema.py` and
+  enforced on the server as well as in the desktop. This exists because
+  `set_target` validates with `os.path.exists` against the *pipeline's*
+  filesystem: on a pod that is another machine, so a chosen file is simply not
+  there. Photos are small enough to carry inline; a video is not, which is why
+  this is image-only and not a general transfer path.
+- **A photo that cannot be swapped writes no file.** See the guards section
+  above — this is the one place batch behaviour deliberately differs between
+  video and stills.
+- **Failures are per photo.** Unreadable file, no face, a guard, or an exception
+  out of the swap all record against that photo and the loop continues; one bad
+  photo must not cost the operator the other three. Each result goes out as a
+  `PHOTO_RESULT` event as it lands, and `get_photo_results` returns the whole
+  set with the swapped images inline — the outputs live on the pipeline's
+  filesystem, so a path alone would be useless to a remote operator.
+
+The desktop writes each returned image beside the original the operator picked,
+with the `_swapped` suffix batch video already uses. A photo that already fits
+under the cap is uploaded byte-for-byte; only a camera original over it is
+re-encoded, quality first and dimensions only after, in 10% steps with a floor
+of 1600px on the long side. Losing detail defeats the point of a photo swap, so
+the transfer budget gives way before the image does.
+
+### Desktop navigation
+Two levels. The header's far right picks the **media tab** — VIDEO or IMAGE —
+and the sidebar picks the job within it:
+
+| Tab | Modes | The difference |
+|---|---|---|
+| **VIDEO** | LIVE, RENDER | Streamed now, or a file processed offline |
+| **IMAGE** | UPLOAD, TEMPLATES | Whose picture the face goes into |
+
+LIVE and offline video are one family because they share the video pipeline and
+the compositor; a still is a different kind of job, not a third peer. Switching
+tabs moves the mode with it, and setting a mode directly pulls the tab back into
+step, so the two can never disagree.
+
+The image pair is named for what actually differs. The source face is the
+operator's in both — **UPLOAD** is a picture they bring, **TEMPLATES** is one we
+ship. PHOTOS/SCENES reads better but the two words are near-synonyms, so the
+distinction would not survive a first reading.
+
+The video label is **RENDER**, not "batch". Batch reads as *many*, and this has
+always been one video processed offline rather than streamed; the word sent
+readers looking for a multi-file feature that never existed. The code still says
+`run_batch`, correctly — there it means "not streaming", and it now covers
+photos and templates too.
+
+### Template targets
+Bundled scenes the source face is swapped into — **the target is ours, the face
+is theirs**. Not a new job shape: `set_template` points `target_paths` at a
+library image and the job runs as a photo job of one, through the same guards,
+the same `FaceCompositor` and the same `PHOTO_RESULT` / `get_photo_results`
+return path that uploaded photos use.
+
+Being bundled is what makes it small:
+
+- **No transfer.** The library lives on the pipeline's filesystem, so
+  `set_target`-style path resolution works as designed. The upload machinery
+  photo mode needed does not apply.
+- **Ambiguity is resolved offline.** A scene with several people would be
+  refused by the multi-face guard, which exists because "which face did you
+  mean?" has no safe default. A template answers it once, in its manifest, as
+  `face_point` — and `check_frame` stands down when one is set, since there is
+  nothing left to protect against.
+- **Failure is a build problem.** `tools/validate_templates.py` runs the real
+  guards over the library and exits non-zero, so a scene that would be refused
+  never ships. A user must never meet a refusal caused by an asset we chose.
+
+`face_point` is a **normalised point, not an index**. Detection order is not a
+stable contract — it can shift with a model pack — and an index that quietly
+comes to mean a different person is exactly the confidently-wrong output the
+guards exist to prevent. `select_by_point` matches by containment, then by
+nearest centre; the validator flags a point that only resolves by proximity,
+because that means the manifest is asserting something it does not point at.
+
+An optional `foreground` RGBA layer is composited *over* the finished swap, for
+hair, glasses or a hand that belongs in front of the face. XSeg already does
+this from the frame, but a template's occlusion is fixed and known, so it can be
+drawn once by hand and be right every time instead of approximately right per
+run. PSD is the authoring format for that layer; the runtime consumes a flat
+PNG, so no PSD is parsed and no blend-mode fidelity is at stake.
+
+Outputs never land in the library — a template's target is a shared asset, and
+writing `_swapped` beside it would leave one user's face there for the next job.
+`config.output_dir` sends them to a per-job directory instead, and the desktop
+saves the returned image to `Pictures/Phantom/`.
+
+Library location follows the model weights: `/workspace/templates` when the
+network volume is mounted, else `pipeline/templates/`. Gitignored for the same
+reason weights are — a scene library would bloat every clone and image build.
 
 ### Execution providers — fails closed
 ONNX Runtime does not error when a provider cannot initialise; it silently uses

@@ -139,6 +139,7 @@ DETECTION = 'detection'  # kwargs: detection, frame_seq
 FACE_LOST = 'face_lost'  # kwargs: reason
 DROP_RATE = 'drop_rate'  # kwargs: dropped, total, percent
 BATCH_PROGRESS = 'batch_progress'  # kwargs: done, total, percent
+PHOTO_RESULT = 'photo_result'  # kwargs: result (PhotoResult), index, total
 
 # Status updates
 STATUS_CHANGED = 'status_changed'  # kwargs: message, scope (optional)

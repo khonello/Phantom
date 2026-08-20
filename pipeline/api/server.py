@@ -25,7 +25,7 @@ import time
 from typing import Any, Dict, Optional, Set
 
 from pipeline.config import FaceSwapConfig, CONFIG
-from pipeline.events import BUS, ERROR, FRAME_READY, DETECTION, STATUS_CHANGED, PIPELINE_STARTED, PIPELINE_STOPPED, WARNING
+from pipeline.events import BUS, ERROR, FRAME_READY, DETECTION, PHOTO_RESULT, STATUS_CHANGED, PIPELINE_STARTED, PIPELINE_STOPPED, WARNING
 from pipeline.api.handlers import dispatch_command, HandlerContext
 from pipeline.processing.pipeline import ProcessingPipeline
 from pipeline.logging import emit_status, emit_error
@@ -120,6 +120,7 @@ class WebSocketAPIServer:
         BUS.on(DETECTION, self._on_detection)
         BUS.on(PIPELINE_STARTED, self._on_pipeline_started)
         BUS.on(PIPELINE_STOPPED, self._on_pipeline_stopped)
+        BUS.on(PHOTO_RESULT, self._on_photo_result)
         BUS.on(WARNING, self._on_warning)
         BUS.on(ERROR, self._on_error)
 
@@ -611,6 +612,29 @@ class WebSocketAPIServer:
         # Also update config status message
         if self.config:
             self.config.status_message = message
+
+    def _on_photo_result(self, result: Any, index: int, total: int) -> None:
+        """
+        Handle PHOTO_RESULT — push one photo's outcome to all clients.
+
+        Sent as each photo finishes rather than only at the end, so a client
+        can show four tiles resolving one at a time instead of nothing until
+        the job stops. The swapped image itself is not attached here; clients
+        fetch it with `get_photo_results` once the job is done, which keeps
+        this event small enough to be a status update.
+
+        Args:
+            result: PhotoResult for the photo just processed
+            index: Zero-based position in the job
+            total: Photos in the job
+        """
+        self._broadcast_text({
+            'type': 'event',
+            'event': 'PHOTO_RESULT',
+            'index': index,
+            'total': total,
+            'result': result.to_dict(),
+        })
 
     def _on_warning(self, message: str, scope: str = 'PHANTOM') -> None:
         """

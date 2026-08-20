@@ -258,12 +258,17 @@ class PipelineClient:
         except Exception:
             pass  # best-effort — start_stream will catch real failures
 
-    def _send(self, action: str, **kwargs: Any) -> Dict[str, Any]:
+    def _send(self, action: str, _timeout: float = 5.0, **kwargs: Any) -> Dict[str, Any]:
         """
         Send a command over WebSocket and wait for response.
 
         Args:
             action: Command action name
+            _timeout: Seconds to wait for the response. Underscored so it
+                      cannot collide with a payload field name. The default
+                      suits control commands; bulk transfers pass their own,
+                      since the response only arrives once the server has read
+                      the whole message
             **kwargs: Additional payload fields
 
         Returns:
@@ -290,8 +295,8 @@ class PipelineClient:
                 self._response_events.pop(action, None)
             return {'error': str(e)}
 
-        # Wait up to 5 seconds for response
-        if event.wait(timeout=5.0):
+        # Wait for the response
+        if event.wait(timeout=_timeout):
             with self._pending_lock:
                 result = self._response_data.pop(action, {})
                 self._response_events.pop(action, None)
@@ -354,6 +359,32 @@ class PipelineClient:
         Works for both single and multi-image (averaged embedding) cases.
         """
         return self._send('upload_source', images=images)
+
+    def list_templates(self) -> Dict[str, Any]:
+        """Fetch the bundled template library, thumbnails included.
+
+        Thumbnails travel inline because the library is on the pipeline's
+        filesystem, which is not this machine when the pipeline is a pod.
+        """
+        return self._send('list_templates', _timeout=60.0)
+
+    def set_template(self, template_id: str) -> Dict[str, Any]:
+        """Choose a bundled template as the target."""
+        return self._send('set_template', id=template_id)
+
+    def upload_target(self, images: List[Dict[str, str]]) -> Dict[str, Any]:
+        """Upload target photo(s) as base64 for a photo-mode job.
+
+        Each entry: {'name': filename, 'data': base64_string}. At most four,
+        enforced server-side as well. Unlike `set_source`/`set_target`, this
+        needs no shared filesystem, which is what lets photo mode run against
+        a remote pod.
+        """
+        return self._send('upload_target', _timeout=60.0, images=images)
+
+    def get_photo_results(self, include_images: bool = True) -> Dict[str, Any]:
+        """Fetch per-photo outcomes of the last photo job, images included."""
+        return self._send('get_photo_results', _timeout=60.0, include_images=include_images)
 
     def create_embedding(self, paths: List[str]) -> Dict[str, Any]:
         """Create face embedding from source paths."""

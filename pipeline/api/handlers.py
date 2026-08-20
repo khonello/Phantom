@@ -15,6 +15,7 @@ HandlerContext provides dependency injection — no module-level globals.
 
 import base64
 import os
+import tempfile
 import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
@@ -23,12 +24,17 @@ from typing import Any, Callable, Dict, List, Optional
 _UPLOAD_DIR = '/tmp/phantom_uploads'
 
 from pipeline.config import FaceSwapConfig
-from pipeline.api.schema import ResponseMessage
+from pipeline.api.schema import (
+    MAX_PHOTO_BYTES,
+    MAX_PHOTO_TARGETS,
+    ResponseMessage,
+)
 from pipeline.processing.pipeline import ProcessingPipeline
 from pipeline.services import guards
 from pipeline.services import swapper_models
 from pipeline.services.database import SourceReview
-from pipeline.logging import emit_status, emit_error
+from pipeline.services.templates import TemplateLibrary
+from pipeline.logging import emit_status, emit_error, emit_warning
 from pipeline.io.ffmpeg import is_image, is_video, normalize_output_path
 
 
@@ -183,6 +189,10 @@ def handle_set_target(config: FaceSwapConfig, path: str) -> ResponseMessage:
         )
 
     config.set('target_path', path)
+    # Clearing the photo targets is what keeps the two batch shapes exclusive:
+    # a stale photo list would otherwise take precedence over the file just set.
+    config.set('target_paths', [])
+    _clear_template(config)
     emit_status(f'Target set to: {path}', scope='API')
 
     return ResponseMessage(
@@ -242,7 +252,11 @@ def handle_start(config: FaceSwapConfig, pipeline: Optional[ProcessingPipeline])
     Returns:
         ResponseMessage with success status
     """
-    if not config.target_path:
+    # A photo job carries its targets in `target_paths` and derives an output
+    # per photo, so neither `target_path` nor `output_path` applies to it.
+    photo_job = bool(config.target_paths)
+
+    if not photo_job and not config.target_path:
         return ResponseMessage(
             type='start',
             data={},
@@ -258,7 +272,7 @@ def handle_start(config: FaceSwapConfig, pipeline: Optional[ProcessingPipeline])
             error='Source path not set',
         )
 
-    if not config.output_path:
+    if not photo_job and not config.output_path:
         return ResponseMessage(
             type='start',
             data={},
@@ -776,6 +790,270 @@ def handle_upload_source(
     )
 
 
+def _clear_template(config: FaceSwapConfig) -> None:
+    """
+    Forget the selected template.
+
+    Its face point and foreground describe *that scene* and nothing else. Left
+    in place they would silently steer face selection on an unrelated target,
+    and quietly draw someone else's hair over it — both invisible until the
+    output is wrong.
+    """
+    config.set('template_id', None)
+    config.set('target_face_point', None)
+    config.set('target_foreground', None)
+    config.set('output_dir', None)
+
+
+def handle_list_templates() -> ResponseMessage:
+    """
+    List the bundled target templates.
+
+    Thumbnails travel inline because the library lives on the pipeline's
+    filesystem, which on a pod is not the operator's machine — the same reason
+    `get_photo_results` returns images rather than paths.
+
+    Returns:
+        ResponseMessage with one entry per template
+    """
+    library = TemplateLibrary()
+    entries = []
+    for template in library.all():
+        entry = template.to_dict()
+        thumbnail = template.thumbnail or template.image
+        try:
+            with open(thumbnail, 'rb') as fh:
+                entry['thumbnail'] = base64.b64encode(fh.read()).decode('ascii')
+        except OSError as e:
+            # A template whose thumbnail cannot be read is still usable; it
+            # just shows without a picture rather than vanishing.
+            emit_warning(
+                f'Template {template.id}: thumbnail unreadable ({e})',
+                scope='API',
+            )
+        entries.append(entry)
+
+    return ResponseMessage(
+        type='list_templates',
+        data={'templates': entries, 'count': len(entries)},
+        success=True,
+    )
+
+
+def handle_set_template(config: FaceSwapConfig, template_id: str) -> ResponseMessage:
+    """
+    Choose a bundled template as the target.
+
+    Sets the same `target_path` an uploaded photo would, plus the two things
+    only a template knows: which face its author chose, and any layer that
+    belongs in front of the swap.
+
+    Args:
+        config: FaceSwapConfig
+        template_id: Id from `list_templates`
+
+    Returns:
+        ResponseMessage with the resolved template
+    """
+    if not template_id:
+        return ResponseMessage(
+            type='set_template',
+            data={},
+            success=False,
+            error='Template id cannot be empty',
+        )
+
+    template = TemplateLibrary().get(template_id)
+    if template is None:
+        return ResponseMessage(
+            type='set_template',
+            data={'id': template_id},
+            success=False,
+            error=f'No such template: {template_id}',
+        )
+
+    # Run as a photo job of one. That is what it is — a single still, swapped
+    # and handed back inline — and it means the result, the per-item event and
+    # the image return path are the ones photo mode already proved rather than
+    # a second set that would have to be kept in step.
+    config.set('target_paths', [template.image])
+    config.set('target_path', None)
+    config.set('template_id', template.id)
+    config.set('target_face_point', template.face_point)
+    config.set('target_foreground', template.foreground)
+
+    os.makedirs(_UPLOAD_DIR, exist_ok=True)
+    config.set('output_dir', tempfile.mkdtemp(prefix='template_', dir=_UPLOAD_DIR))
+
+    emit_status(f'Template set: {template.name}', scope='API')
+    return ResponseMessage(
+        type='set_template',
+        data={'template': template.to_dict()},
+        success=True,
+    )
+
+
+def handle_upload_target(
+    config: FaceSwapConfig,
+    images: List[Dict[str, Any]],
+) -> ResponseMessage:
+    """
+    Receive up to four target photos as base64 bytes and stage them for a
+    photo-mode job.
+
+    Targets have never had a transfer path — `set_target` validates with
+    `os.path.exists` against the *pipeline's* filesystem, so a file chosen on a
+    desktop only worked when the pipeline ran on the same machine. Photos are
+    small enough to carry inline, which is why this exists for images and not
+    for video.
+
+    A malformed or oversized image is refused individually and the rest are
+    kept, matching how the job itself treats a photo it cannot swap.
+
+    Args:
+        config: FaceSwapConfig
+        images: List of dicts with 'name' (filename) and 'data' (base64 string)
+
+    Returns:
+        ResponseMessage with the staged server-side paths
+    """
+    if not images:
+        return ResponseMessage(
+            type='upload_target',
+            data={},
+            success=False,
+            error='No images provided',
+        )
+
+    if len(images) > MAX_PHOTO_TARGETS:
+        return ResponseMessage(
+            type='upload_target',
+            data={'max': MAX_PHOTO_TARGETS},
+            success=False,
+            error=f'At most {MAX_PHOTO_TARGETS} target photos ({len(images)} given)',
+        )
+
+    # Its own directory per job. The upload dir is shared with sources and
+    # persists across jobs, so without this a target named like a previously
+    # uploaded file would silently overwrite it — and two photos picked from
+    # different folders with the same camera filename would overwrite each
+    # other.
+    os.makedirs(_UPLOAD_DIR, exist_ok=True)
+    job_dir = tempfile.mkdtemp(prefix='targets_', dir=_UPLOAD_DIR)
+
+    saved: List[str] = []
+    rejected: List[Dict[str, str]] = []
+
+    for index, img in enumerate(images):
+        name = os.path.basename(img.get('name', f'target_{index}.jpg')) or f'target_{index}.jpg'
+        b64 = img.get('data', '')
+        if not b64:
+            rejected.append({'name': name, 'reason': 'no image data'})
+            continue
+
+        try:
+            image_bytes = base64.b64decode(b64)
+        except Exception as e:
+            emit_error(
+                f'Base64 decode failed for {name}: {type(e).__name__}: {e}',
+                scope='HANDLERS',
+            )
+            rejected.append({'name': name, 'reason': 'invalid base64 data'})
+            continue
+
+        if len(image_bytes) > MAX_PHOTO_BYTES:
+            rejected.append({
+                'name': name,
+                'reason': (
+                    f'{len(image_bytes) / (1024 * 1024):.1f} MB exceeds the '
+                    f'{MAX_PHOTO_BYTES // (1024 * 1024)} MB limit'
+                ),
+            })
+            continue
+
+        path = os.path.join(job_dir, name)
+        with open(path, 'wb') as fh:
+            fh.write(image_bytes)
+        saved.append(path)
+
+    if not saved:
+        reasons = '; '.join(f"{r['name']}: {r['reason']}" for r in rejected)
+        return ResponseMessage(
+            type='upload_target',
+            data={'paths': [], 'rejected': rejected},
+            success=False,
+            error=f'No usable target photo — {reasons}',
+        )
+
+    # Photo mode is signalled by which field holds the targets, so the
+    # single-file path has to be cleared or a stale target would win.
+    config.set('target_paths', saved)
+    config.set('target_path', None)
+    _clear_template(config)
+    # Uploaded photos are written beside themselves, inside the job directory.
+    config.set('output_dir', None)
+
+    emit_status(f'Target photos uploaded: {len(saved)}', scope='API')
+    return ResponseMessage(
+        type='upload_target',
+        data={'paths': saved, 'count': len(saved), 'rejected': rejected},
+        success=True,
+    )
+
+
+def handle_get_photo_results(
+    pipeline: Optional[ProcessingPipeline],
+    include_images: bool = True,
+) -> ResponseMessage:
+    """
+    Return the per-photo outcomes of the last photo job, with the swapped
+    images inline.
+
+    The outputs are written on the pipeline's filesystem, which on a pod is a
+    machine the operator cannot see, so a path alone would be useless to them.
+
+    Args:
+        pipeline: Pipeline holding the results
+        include_images: Attach base64 image bytes for the photos that swapped
+
+    Returns:
+        ResponseMessage with one entry per target
+    """
+    if pipeline is None:
+        return ResponseMessage(
+            type='get_photo_results',
+            data={},
+            success=False,
+            error='Pipeline not initialized',
+        )
+
+    results = []
+    for result in pipeline.photo_results:
+        entry = result.to_dict()
+        if include_images and result.ok and result.output_path:
+            try:
+                with open(result.output_path, 'rb') as fh:
+                    entry['data'] = base64.b64encode(fh.read()).decode('ascii')
+            except OSError as e:
+                # The swap happened; only the read back failed. Reported as a
+                # skip so the client never shows a result it cannot display.
+                entry['ok'] = False
+                entry['reason'] = f'output could not be read back: {e}'
+        results.append(entry)
+
+    swapped = sum(1 for r in results if r['ok'])
+    return ResponseMessage(
+        type='get_photo_results',
+        data={
+            'results': results,
+            'total': len(results),
+            'swapped': swapped,
+            'skipped': len(results) - swapped,
+        },
+        success=True,
+    )
+
+
 def _source_review(pipeline: Optional[ProcessingPipeline]) -> Optional[SourceReview]:
     """
     The most recent source review, if the pipeline has run one.
@@ -1001,6 +1279,20 @@ def dispatch_command(
 
         elif command_type == 'upload_source':
             return handle_upload_source(config, data.get('images', []), ctx.pipeline)
+
+        elif command_type == 'list_templates':
+            return handle_list_templates()
+
+        elif command_type == 'set_template':
+            return handle_set_template(config, str(data.get('id', '')))
+
+        elif command_type == 'upload_target':
+            return handle_upload_target(config, data.get('images', []))
+
+        elif command_type == 'get_photo_results':
+            return handle_get_photo_results(
+                ctx.pipeline, bool(data.get('include_images', True))
+            )
         elif command_type == 'create_embedding':
             return handle_create_embedding(config, data.get('paths', []))
 

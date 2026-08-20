@@ -10,6 +10,7 @@ Provides dataclasses and type aliases for:
 Extends the basic types from pipeline/typing.py.
 """
 
+import os
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 import numpy as np
@@ -173,4 +174,44 @@ class SwapResult:
             'source_used': self.source_used,
             'detection': self.detection.to_dict() if self.detection else None,
             'frame_shape': self.frame.shape if self.frame is not None else None,
+        }
+
+
+@dataclass
+class PhotoResult:
+    """
+    Outcome of swapping one target photo.
+
+    Photo mode processes each target independently and skips the ones that
+    fail, so a job returns a list of these rather than a single verdict. The
+    reason matters as much as the verdict: there is a person choosing the next
+    photo to try, and "no face detected" and "two faces in frame" call for
+    different fixes.
+    """
+
+    target_path: str
+    ok: bool
+    reason: str = ''                    # empty when ok
+    output_path: Optional[str] = None   # written only when ok
+    faces: int = 0                      # faces swapped
+
+    @classmethod
+    def swapped(cls, target_path: str, output_path: str, faces: int) -> 'PhotoResult':
+        """A photo that produced a swap."""
+        return cls(target_path=target_path, ok=True, output_path=output_path, faces=faces)
+
+    @classmethod
+    def skipped(cls, target_path: str, reason: str) -> 'PhotoResult':
+        """A photo that did not, and why. No output file is written."""
+        return cls(target_path=target_path, ok=False, reason=reason)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to dictionary for the API."""
+        return {
+            'target': os.path.basename(self.target_path),
+            'target_path': self.target_path,
+            'ok': self.ok,
+            'reason': self.reason,
+            'output_path': self.output_path,
+            'faces': self.faces,
         }
