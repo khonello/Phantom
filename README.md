@@ -57,6 +57,12 @@ python desktop.py
 
 See [Installation Guide](docs/INSTALLATION.md) for detailed instructions including GPU setup.
 
+**Running on a rented GPU:** [RUNPOD_DEPLOYMENT.md](RUNPOD_DEPLOYMENT.md) — one-time
+setup, then `python runpod/orchestrator.py start` provisions the pod, installs
+everything, launches the pipeline and writes the connection URL into `.env`.
+[docs/PENDING_WORK.md](docs/PENDING_WORK.md) is the runbook for what to do with
+the session once it is up.
+
 ## Usage
 
 ### Batch Mode (CLI)

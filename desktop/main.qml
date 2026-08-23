@@ -70,13 +70,20 @@ Window {
             anchors { right: parent.right; rightMargin: 24; verticalCenter: parent.verticalCenter }
             spacing: 16
 
-            // VCAM toggle (realtime mode only)
+            // VCAM status — an indicator, not a control.
+            //
+            // Turning the virtual camera off is the only action in this app
+            // that can put the operator's real face on a call: releasing the
+            // device makes the conferencing app show a placeholder, report a
+            // disconnected camera, or pick the next available one — the
+            // webcam. So the camera is simply on for the life of the app, and
+            // this reports whether the device opened. Always visible, because
+            // "is Phantom available as a camera" is not a question that stops
+            // mattering when the mode changes.
             Rectangle {
-                visible: bridge.currentMode === "realtime"
                 width: vcamRow.width + 20; height: 28; radius: 6
                 anchors.verticalCenter: parent.verticalCenter
-                color: bridge.virtualCamActive ? "#0a2218"
-                     : vcamHh.containsMouse    ? "#151525" : "#0f0f1e"
+                color: bridge.virtualCamActive ? "#0a2218" : "#0f0f1e"
                 border.color: bridge.virtualCamActive ? "#10b981" : "#1e1e38"
                 border.width: 1
                 Behavior on color       { ColorAnimation { duration: 200 } }
@@ -100,8 +107,7 @@ Window {
                     }
                     Text {
                         text: "VCAM"
-                        color: bridge.virtualCamActive ? "#10b981"
-                             : vcamHh.containsMouse    ? "#64748b" : "#475569"
+                        color: bridge.virtualCamActive ? "#10b981" : "#475569"
                         font.pixelSize: 10; font.letterSpacing: 1.5; font.weight: Font.Medium
                         anchors.verticalCenter: parent.verticalCenter
                         Behavior on color { ColorAnimation { duration: 200 } }
@@ -109,13 +115,6 @@ Window {
                 }
 
                 HoverHandler { id: vcamHh }
-                MouseArea {
-                    anchors.fill: parent
-                    enabled: bridge.pipelineRunning || bridge.virtualCamActive
-                    onClicked: bridge.toggleVirtualCam()
-                    cursorShape: (bridge.pipelineRunning || bridge.virtualCamActive) ? Qt.PointingHandCursor : Qt.ArrowCursor
-                }
-
             }
 
             // Enhance toggle (realtime mode only)
@@ -1873,6 +1872,276 @@ Window {
                 }
             }
 
+        }
+    }
+
+    // ── Access gate ──────────────────────────────────────────────────
+    // Covers everything when the machine has no time left. Above the
+    // auto-stop dialog in z-order because an expired session should not be
+    // showing a countdown for a pod it can no longer reach.
+    //
+    // Deliberately opaque rather than translucent: this is not a modal over
+    // the app, it is the app not being available yet. A dimmed but visible
+    // interface behind it reads as something to click past.
+    Rectangle {
+        id: authGate
+        visible: bridge.authRequired
+        anchors.fill: parent
+        color: "#09090e"
+        z: 2000
+
+        // QML's font.family takes one family name, not a CSS-style list — a
+        // comma-separated string is treated as a single (missing) family and
+        // silently falls back to the default, losing the fixed pitch that
+        // makes a grouped code readable. Pick per platform instead.
+        readonly property string monoFamily:
+              Qt.platform.os === "windows" ? "Consolas"
+            : Qt.platform.os === "osx"     ? "Menlo"
+            :                               "Monospace"
+
+        // Swallow every click and key press that reaches the backdrop, so
+        // nothing behind the gate can be operated through it.
+        MouseArea { anchors.fill: parent; hoverEnabled: true }
+
+        Column {
+            anchors.centerIn: parent
+            spacing: 22
+            width: 360
+
+            Row {
+                anchors.horizontalCenter: parent.horizontalCenter
+                spacing: 12
+
+                Rectangle {
+                    width: 9; height: 9; radius: 2
+                    anchors.verticalCenter: parent.verticalCenter
+                    gradient: Gradient {
+                        orientation: Gradient.Horizontal
+                        GradientStop { position: 0.0; color: "#8b5cf6" }
+                        GradientStop { position: 1.0; color: "#3b82f6" }
+                    }
+                }
+                Text {
+                    text: "PHANTOM"
+                    color: "#e2e8f0"; font.pixelSize: 12
+                    font.letterSpacing: 4; font.weight: Font.Medium
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+            }
+
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: "Enter your access code"
+                color: "#94a3b8"; font.pixelSize: 13
+            }
+
+            // The field. Uppercases as you type and accepts the grouped form,
+            // so a code read off a phone screen can be typed exactly as seen.
+            Rectangle {
+                id: codeBox
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: 280; height: 46; radius: 8
+                color: "#0f0f18"
+                border.width: 1
+                border.color: bridge.authError !== "" ? "#ef4444"
+                            : codeField.activeFocus  ? "#3b82f6"
+                            : "#1e1e38"
+
+                TextInput {
+                    id: codeField
+                    anchors.fill: parent
+                    anchors.margins: 12
+                    verticalAlignment: TextInput.AlignVCenter
+                    horizontalAlignment: TextInput.AlignHCenter
+                    color: "#e2e8f0"
+                    font.pixelSize: 18
+                    font.letterSpacing: 3
+                    font.family: authGate.monoFamily
+                    enabled: !bridge.authChecking
+                    focus: authGate.visible
+                    // 10 characters plus the separator.
+                    maximumLength: 11
+                    onTextChanged: {
+                        var up = text.toUpperCase()
+                        if (up !== text) text = up
+                    }
+                    onAccepted: authGate.submit()
+
+                    Text {
+                        anchors.centerIn: parent
+                        visible: codeField.text === ""
+                        text: "XXXXX-XXXXX"
+                        color: "#2a2a44"
+                        font: codeField.font
+                    }
+                }
+            }
+
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.WordWrap
+                text: bridge.authError
+                color: "#ef4444"; font.pixelSize: 12
+                visible: bridge.authError !== "" && !bridge.authChecking
+            }
+
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: "Checking…"
+                color: "#64748b"; font.pixelSize: 12
+                visible: bridge.authChecking
+            }
+
+            Rectangle {
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: 280; height: 40; radius: 8
+                opacity: (bridge.authChecking || codeField.text.length === 0) ? 0.4 : 1.0
+                color: unlockMa.containsMouse ? "#1e3a5f" : "#172554"
+                border.color: "#3b82f6"; border.width: 1
+
+                Text {
+                    anchors.centerIn: parent
+                    text: "START SESSION"
+                    color: "#3b82f6"
+                    font.pixelSize: 11; font.letterSpacing: 1.5
+                }
+                MouseArea {
+                    id: unlockMa
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    enabled: !bridge.authChecking && codeField.text.length > 0
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: authGate.submit()
+                }
+            }
+
+            // Reaching the server is our problem, not the customer's, so it
+            // gets its own affordance rather than being folded into the error
+            // text above the code field.
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: "Retry connection"
+                color: retryMa.containsMouse ? "#94a3b8" : "#475569"
+                font.pixelSize: 11
+                font.underline: retryMa.containsMouse
+                visible: bridge.authError.indexOf("licence server") !== -1
+
+                MouseArea {
+                    id: retryMa
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: bridge.checkAuth()
+                }
+            }
+        }
+
+        function submit() {
+            if (bridge.authChecking || codeField.text.length === 0)
+                return
+            bridge.submitCode(codeField.text)
+        }
+
+        // Clear the field once the gate opens, so a code is never left sitting
+        // on screen after it has been spent.
+        onVisibleChanged: if (!visible) codeField.text = ""
+    }
+
+    // ── Session countdown ────────────────────────────────────────────
+    // Only appears in the last ten minutes. A permanent clock on a paid hour
+    // invites watching it instead of using it.
+    Rectangle {
+        visible: !bridge.authRequired && bridge.authMinutes > 0 && bridge.authMinutes <= 10
+        anchors { top: parent.top; right: parent.right; topMargin: 14; rightMargin: 20 }
+        width: sessionLeft.width + 20; height: 24; radius: 4
+        color: "#1a1020"
+        border.color: "#ef4444"; border.width: 1
+        z: 900
+
+        Text {
+            id: sessionLeft
+            anchors.centerIn: parent
+            text: bridge.authMinutes + " MIN LEFT"
+            color: "#ef4444"; font.pixelSize: 10; font.letterSpacing: 1.5
+        }
+    }
+
+    // ── Session ended ────────────────────────────────────────────────
+    // An anchored card, not the full gate and not anything drawn on the
+    // picture. Two reasons:
+    //
+    //   The operator may still be in a call. Covering the whole window at the
+    //   moment their time runs out hides the app from someone who needs to see
+    //   it; the frozen preview underneath is information, not decoration.
+    //
+    //   Nothing is ever composited onto the frame. What the call sees is the
+    //   last swapped frame, unchanged, still being sent — the notice lives in
+    //   this window and travels nowhere.
+    Rectangle {
+        id: sessionEndedCard
+        visible: bridge.sessionExpired
+        anchors.fill: parent
+        color: "#99000000"
+        z: 1500
+
+        MouseArea { anchors.fill: parent; hoverEnabled: true }
+
+        Rectangle {
+            anchors.centerIn: parent
+            width: 420; height: 210; radius: 12
+            color: "#12121f"
+            border.color: "#8b5cf6"; border.width: 1
+
+            Column {
+                anchors.centerIn: parent
+                spacing: 14
+                width: parent.width - 48
+
+                Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: "SESSION ENDED"
+                    color: "#8b5cf6"; font.pixelSize: 12
+                    font.letterSpacing: 2.5; font.weight: Font.Medium
+                }
+                Text {
+                    width: parent.width
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.WordWrap
+                    text: bridge.sessionReason
+                    color: "#e2e8f0"; font.pixelSize: 14
+                }
+                Text {
+                    width: parent.width
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.WordWrap
+                    text: "Your camera is still showing the last frame. It will "
+                        + "keep doing so until you close Phantom."
+                    color: "#64748b"; font.pixelSize: 11; lineHeight: 1.3
+                }
+
+                Rectangle {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    width: 200; height: 38; radius: 8
+                    color: newCodeMa.containsMouse ? "#1e3a5f" : "#172554"
+                    border.color: "#3b82f6"; border.width: 1
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: "ENTER A NEW CODE"
+                        color: "#3b82f6"
+                        font.pixelSize: 11; font.letterSpacing: 1.5
+                    }
+                    MouseArea {
+                        id: newCodeMa
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: bridge.enterNewCode()
+                    }
+                }
+            }
         }
     }
 

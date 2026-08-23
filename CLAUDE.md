@@ -58,7 +58,7 @@ from starting the pod through to the outstanding implementation work.
 
 ### Development
 - **Lint**: `flake8 pipeline.py pipeline desktop`
-- **Type check**: `mypy pipeline desktop` (CI runs `mypy pipeline` only)
+- **Type check**: `mypy pipeline desktop` — clean, keep it that way (CI runs `mypy pipeline` only)
 - **Unit tests**: `python -m pytest tests/ -q` — ~32s, no GPU or model weights
   needed (the ML layer is stubbed in `tests/conftest.py`). Ten modules;
   `test_photo_batch.py` covers the photo path, including that a refused photo
@@ -127,6 +127,24 @@ from starting the pod through to the outstanding implementation work.
 - **pipeline/stream.py**: Stream mode wrapper
 - **desktop/bridge.py**: Push-based frame display (no HTTP polling, no 2s status timer)
 - **desktop/controller.py**: WebSocket client (`websockets` library, single connection, auto-reconnect)
+
+### Session shutdown
+The paid hour ends in one of two ways, and both land in
+`Bridge._end_session`: the pipeline broadcasts `auto_stop` before stopping the
+pod, or the session's own clock runs out. Three things deliberately do **not**
+happen there:
+
+- **The virtual camera is not touched.** See above — releasing it is the one
+  action that can expose the operator's real face.
+- **Nothing is drawn on the frame.** The notice is a card in the desktop
+  window. What reaches the call is the last swapped frame, unchanged.
+- **The full auth gate does not take over.** The operator may still be in a
+  call and needs to see the app. The gate returns when they ask for it
+  (`enterNewCode`) or on the next launch.
+
+`PipelineClient.expect_disconnect()` stops the reconnect loop, because a pod
+stopped on purpose is not a network fault and must not present as one. The loop
+is otherwise indefinite — the cap is on the delay, not the attempt count.
 
 ### Removed Files (Dead Code Deleted)
 The following files were deleted in the Phase 2 cleanup:
@@ -203,11 +221,23 @@ clicked. `color_correction` is left alone for a different reason — it is on an
 stays on (see below).
 
 ### Header toggles — what a consumer is allowed to change
-Only two: **VCAM** and **ENHANCE**. `COLOR` and `PREPROC` were removed, and the
+**One: ENHANCE.** `VCAM`, `COLOR` and `PREPROC` were all removed, and the
 distinction is worth keeping straight — a toggle implies a choice worth making.
 
-- **VCAM** is not a quality knob at all. It is where the output *goes*, and on a
-  live call it is the control that makes the whole thing work.
+- **VCAM** was removed because it was never a quality knob: it is where the
+  output *goes*. The earlier note here said it "is the control that makes the
+  whole thing work", which was the argument against it being a control at all.
+  Its only distinct effect was releasing the virtual camera device, and the only
+  moment anyone would do that is mid-call — where a conferencing app responds by
+  showing a placeholder, reporting a disconnected camera, or **selecting the
+  next available camera, which is the operator's real webcam**. That is the
+  exact failure the product exists to prevent, reached through a button that
+  reads like a convenience.
+
+  The camera is now simply **on**: opened when the app opens, released only when
+  it closes — not tied to a mode or a session. An open device nobody has
+  selected costs nothing, while a device that comes and goes is what makes a
+  conferencing app go looking for another one. The header shows its state.
 - **ENHANCE** is the one with genuine taste in it: restoration is what decides
   whether the output reads as a real call or as AI, so "too plastic" is a
   legitimate opinion. Binary is the wrong shape for it long-term — the real axis
@@ -365,7 +395,9 @@ Batch splits by what an unswapped output would mean:
 
 `_run_vcam` holds and re-sends the last frame when the queue empties, so the
 virtual camera never shows the raw camera and never shows nothing — covering hour
-expiry, session end, worker death and crashes alike.
+expiry, session end, worker death and crashes alike. It keeps doing so until the
+app closes: `cleanup` is the only path that releases the device. `stopPipeline`,
+an expired session and a dropped socket all deliberately leave it running.
 
 Yaw prefers `face.pose` — `buffalo_l` bundles `1k3d68.onnx`, which computes it as
 a side effect of detection — and falls back to a keypoint approximation on packs
@@ -644,7 +676,8 @@ back to the other backend or off — rather than failing.
 ### Linting & Testing
 - flake8 checks: E3, E4, F
 - Exception: `pipeline/core.py` ignores E402 (imports after code) for performance-critical initialization
-- Run before commit: `mypy pipeline desktop` and `flake8 pipeline.py pipeline desktop`
+- Run before commit: `mypy pipeline desktop` and
+  `flake8 pipeline.py pipeline desktop tests tools runpod firebase`
 
 ## Dependencies & Environment
 
@@ -734,6 +767,9 @@ back to the other backend or off — rather than failing.
 - `runpod/orchestrator.py`: CLI tool for managing GPU pods (start, resume, stop, terminate, status, gpus, datacenters)
 - `runpod/startup.sh`: Pod setup script (ffmpeg, venv, pip install)
 - `runpod/TROUBLESHOOTING.md`: Detailed log of every RunPod API gotcha and fix
+- `RUNPOD_DEPLOYMENT.md`: Setup and operation guide — one-time account/volume/`.env`
+  setup, the command set, what each `start` phase does, and the full `.env`
+  reference. `tests/test_wiring.py` asserts it stays in step with the code
 
 ## RunPod Orchestrator
 

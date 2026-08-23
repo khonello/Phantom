@@ -1,0 +1,20 @@
+rules_version = '2';
+
+// Nothing reaches Firestore from a client. Not the desktop, not a browser.
+//
+// The two operations that exist — check a machine's session, burn a code —
+// go through the Cloud Functions in functions/main.py, which run with admin
+// credentials and are unaffected by these rules.
+//
+// This is one rule rather than a set of clever ones on purpose. "Allow a read
+// only if you already know the document id" is expressible here; "burn this
+// code, start a clock, and refuse if the machine already has time left" is
+// not. Splitting the logic between rules and a function would put half the
+// billing decision somewhere it cannot be read alongside the other half.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

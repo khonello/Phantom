@@ -1386,6 +1386,41 @@ def cmd_status(pod_id: str) -> None:
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
+def _warn_existing_pod(pod_id: str) -> None:
+    """
+    Confirm before `start` replaces the pod ID recorded in .env.
+
+    `start` always creates a new pod and overwrites RUNPOD_POD_ID, which is the
+    only place the existing pod's ID is kept. Losing it puts that pod beyond the
+    reach of `stop`, `terminate` and `status` — and if it was RUNNING it goes on
+    billing with nothing left to report it. So the status is fetched rather than
+    assumed, a running pod is named as such instead of being described as merely
+    "not affected", and the outgoing ID is printed where the scrollback keeps it.
+    """
+    try:
+        status = _get_pod_status(pod_id)
+    except Exception:
+        status = "unknown"
+
+    print("WARNING: RUNPOD_POD_ID is already set ({}), status: {}.".format(pod_id, status))
+    if status == "RUNNING":
+        print("  That pod is RUNNING and billing right now.")
+        print("  Stop it first:  python runpod/orchestrator.py stop")
+    print("  'start' deploys a NEW pod and overwrites RUNPOD_POD_ID in .env,")
+    print("  after which stop/terminate/status can no longer reach {}.".format(pod_id))
+    print("  To boot the existing pod instead: python runpod/orchestrator.py resume")
+
+    answer = input("\nProceed with a new pod? [y/N] ").strip().lower()
+    if answer != "y":
+        print("Aborted. Nothing was created and .env is unchanged.")
+        sys.exit(0)
+
+    # Repeated after the prompt on purpose: once .env is rewritten this line is
+    # the only remaining copy of the old ID.
+    print("\nReplacing pod ID. Previous pod: {} ({}).".format(pod_id, status))
+    print("Recover it from the RunPod dashboard if it needs stopping.\n")
+
+
 def main() -> None:
     """Parse args and dispatch to the right command."""
     parser = argparse.ArgumentParser(
@@ -1398,7 +1433,7 @@ commands:
   stop         Pause pod (preserves /workspace volume — models intact)
   terminate    Permanently delete pod (network volume survives)
   status       Show pod state, GPU, cost, and current WebSocket address
-  gpus         List GPUs available in RUNPOD_DATACENTER_ID
+  gpus         List every GPU with VRAM, price, and whether it is eligible
   datacenters  List all RunPod datacenters and their IDs
 
 Set RUNPOD_DEPLOY_MODE=ssh (development) or docker (production) in .env.
@@ -1417,13 +1452,7 @@ Set RUNPOD_DEPLOY_MODE=ssh (development) or docker (production) in .env.
 
     if args.command == "start":
         if pod_id:
-            print("WARNING: RUNPOD_POD_ID is set ({}).".format(pod_id))
-            print("  'start' will deploy a NEW pod (the existing one is not affected).")
-            print("  Did you mean 'resume'?")
-            answer = input("\nProceed with new pod? [y/N] ").strip().lower()
-            if answer != "y":
-                print("Aborted. To resume the existing pod: python runpod/orchestrator.py resume")
-                sys.exit(0)
+            _warn_existing_pod(pod_id)
         cmd_start()
     elif args.command == "datacenters":
         cmd_datacenters()

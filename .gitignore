@@ -17,3 +17,8 @@ Python_3_12_0venv
 *.jpeg
 *.npy
 .env.backup-*
+
+# Firebase functions create their own venv on deploy
+venv/
+firebase/functions/venv/
+.firebase/

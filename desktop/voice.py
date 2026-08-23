@@ -8,9 +8,10 @@ Requires: parselmouth (pip install praat-parselmouth)
 """
 
 import sys
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
+import numpy.typing as npt
 
 
 # Preset: (pitch_shift_semitones, formant_shift_ratio)
@@ -76,7 +77,7 @@ class VoiceTransformer:
         self._preset = key
         self._pitch_semitones, self._formant_ratio = VOICE_PRESETS[key]
 
-    def process(self, pcm: np.ndarray) -> np.ndarray:
+    def process(self, pcm: npt.NDArray[Any]) -> npt.NDArray[Any]:
         """Transform a PCM audio chunk.
 
         Args:

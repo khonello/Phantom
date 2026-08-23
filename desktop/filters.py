@@ -20,13 +20,14 @@ when no filter is enabled is exactly zero because the caller keeps its original
 path.
 """
 
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
+import numpy.typing as npt
 
 
-def _curve(shadows: float, midtones: float, highlights: float) -> np.ndarray:
+def _curve(shadows: float, midtones: float, highlights: float) -> npt.NDArray[Any]:
     """
     Build a 256-entry tone curve from three control points.
 
@@ -44,7 +45,7 @@ def _curve(shadows: float, midtones: float, highlights: float) -> np.ndarray:
     return np.clip(np.interp(ramp, xs, ys) * 255.0, 0, 255).astype(np.uint8)
 
 
-def _channel_lut(blue: np.ndarray, green: np.ndarray, red: np.ndarray) -> np.ndarray:
+def _channel_lut(blue: npt.NDArray[Any], green: npt.NDArray[Any], red: npt.NDArray[Any]) -> npt.NDArray[Any]:
     """Stack three per-channel curves into one BGR lookup table."""
     return np.dstack([blue, green, red]).astype(np.uint8)
 
@@ -82,10 +83,10 @@ _CONTRAST = np.clip(
 ).astype(np.uint8)
 
 # Vignette masks are shape-dependent, so they are built on first use and kept.
-_VIGNETTE_CACHE: Dict[Tuple[int, int, int], np.ndarray] = {}
+_VIGNETTE_CACHE: Dict[Tuple[int, int, int], npt.NDArray[Any]] = {}
 
 
-def _vignette_mask(shape: Tuple[int, int], strength: int) -> np.ndarray:
+def _vignette_mask(shape: Tuple[int, int], strength: int) -> npt.NDArray[Any]:
     """
     A radial falloff mask for the given frame shape, cached.
 
@@ -116,7 +117,7 @@ def _vignette_mask(shape: Tuple[int, int], strength: int) -> np.ndarray:
     return mask
 
 
-def _apply_vignette(frame: np.ndarray, strength: int) -> np.ndarray:
+def _apply_vignette(frame: npt.NDArray[Any], strength: int) -> npt.NDArray[Any]:
     """
     Darken the edges.
 
@@ -128,7 +129,7 @@ def _apply_vignette(frame: np.ndarray, strength: int) -> np.ndarray:
     return cv2.multiply(frame, mask, dtype=cv2.CV_8U)
 
 
-def _saturate(frame: np.ndarray, factor: float) -> np.ndarray:
+def _saturate(frame: npt.NDArray[Any], factor: float) -> npt.NDArray[Any]:
     """
     Scale saturation by pushing the frame away from its own greyscale.
 
@@ -140,22 +141,22 @@ def _saturate(frame: np.ndarray, factor: float) -> np.ndarray:
     return cv2.addWeighted(frame, factor, grey, 1.0 - factor, 0)
 
 
-def _mono(frame: np.ndarray) -> np.ndarray:
+def _mono(frame: npt.NDArray[Any]) -> npt.NDArray[Any]:
     grey = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     return cv2.cvtColor(grey, cv2.COLOR_GRAY2BGR)
 
 
-def _noir(frame: np.ndarray) -> np.ndarray:
+def _noir(frame: npt.NDArray[Any]) -> npt.NDArray[Any]:
     grey = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     grey = cv2.LUT(grey, _CONTRAST)
     return _apply_vignette(cv2.cvtColor(grey, cv2.COLOR_GRAY2BGR), 55)
 
 
-def _vivid(frame: np.ndarray) -> np.ndarray:
+def _vivid(frame: npt.NDArray[Any]) -> npt.NDArray[Any]:
     return cv2.LUT(_saturate(frame, 1.35), _CONTRAST)
 
 
-def _soft(frame: np.ndarray) -> np.ndarray:
+def _soft(frame: npt.NDArray[Any]) -> npt.NDArray[Any]:
     """
     A gentle diffusion — bloom, not blur.
 
@@ -170,7 +171,7 @@ def _soft(frame: np.ndarray) -> np.ndarray:
 class Filter:
     """One named look, and the function that applies it."""
 
-    def __init__(self, key: str, name: str, apply: Optional[Callable[[np.ndarray], np.ndarray]]) -> None:
+    def __init__(self, key: str, name: str, apply: Optional[Callable[[npt.NDArray[Any]], npt.NDArray[Any]]]) -> None:
         """
         Args:
             key: Stable identifier used by the UI and stored in settings
@@ -181,7 +182,7 @@ class Filter:
         self.name = name
         self._apply = apply
 
-    def __call__(self, frame: np.ndarray) -> np.ndarray:
+    def __call__(self, frame: npt.NDArray[Any]) -> npt.NDArray[Any]:
         if self._apply is None:
             return frame
         return self._apply(frame)
@@ -208,7 +209,7 @@ def get(key: str) -> Optional[Filter]:
     return _BY_KEY.get(key)
 
 
-def apply(frame: np.ndarray, key: str) -> np.ndarray:
+def apply(frame: npt.NDArray[Any], key: str) -> npt.NDArray[Any]:
     """
     Apply a filter by key, returning the frame unchanged if it does not apply.
 

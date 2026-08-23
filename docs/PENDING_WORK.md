@@ -30,20 +30,25 @@ All local, all free. Twenty minutes.
 ### 0.1 Confirm the tree is green
 
 ```bash
-python -m pytest tests/ -q                              # expect: 9 passed, ~36s
-flake8 pipeline.py pipeline desktop tests tools runpod  # expect: silent
-mypy pipeline                                           # expect: clean
+python -m pytest tests/ -q                                       # expect: 10 passed, ~35s
+flake8 pipeline.py pipeline desktop tests tools runpod firebase  # expect: silent
+mypy pipeline desktop                                            # expect: clean
 bash -n runpod/startup.sh && bash -n runpod/entrypoint.sh
 ```
 
-Nine test modules, ~310 checks. `tests/test_wiring.py` is the one to watch: it
+Ten test modules, ~310 checks. `tests/test_wiring.py` is the one to watch: it
 asserts the seams *between* files — that every forwarded env var is read, that
 `Dockerfile` and `.env.example` pin the same image, that both deploy paths
 pre-warm. Every historical break in this repo lived in one of those gaps.
 
-`mypy pipeline` is clean — all 11 pre-existing errors were fixed, which also
-turned the CI `lint` job green for the first time. `mypy pipeline desktop` still
-reports 25, all in `desktop/`, which CI does not check.
+`mypy pipeline desktop` is now clean. The 11 errors in `pipeline/` were fixed
+first, which turned the CI `lint` job green; `desktop/` carried 53 more that CI
+never checked, and those are fixed too. All were annotation strictness rather
+than defects — bare `np.ndarray`, `deque` and `Queue` needing parameters, and
+sounddevice stream handles typed `object` (a type with *no* attributes) where
+`Any` was meant, which had accumulated stale `type: ignore` comments that no
+longer matched the errors mypy emitted. Worth clearing rather than tolerating:
+53 cosmetic errors is where a real one hides.
 
 ### 0.2 Push and watch CI
 
@@ -599,11 +604,107 @@ Gated on the clip. Build in the order the measurements justify:
 - [ ] Decide the overflow policy for a batch job outliving its session
 - [ ] Decide whether upload time is billed
 
-### 4.4 Stage 4 and beyond
+### 4.4 Access codes — built, not yet deployed
+
+**One code buys one hour.** Sell it however you like, the customer types it into
+the desktop once, and the machine stays authenticated until the hour is out.
+Full description in [ACCESS_CODES.md](ACCESS_CODES.md).
+
+This is deliberately *not* the Stage 4 control plane. It is the smallest thing
+that turns the pipeline into something sellable, and it was built beside the
+existing work rather than on top of it: nothing in `pipeline/` depends on it,
+and leaving `PHANTOM_AUTH_URL` unset removes the feature entirely. That is what
+makes it safe to have landed before Phase 3 is finished.
+
+| Piece | Where | State |
+|---|---|---|
+| Endpoints (`/session`, `/redeem`) | `firebase/functions/main.py` | Written, **not deployed** |
+| Deny-all rules | `firebase/firestore.rules` | Written, **not deployed** |
+| Code format + checksum | `desktop/codes.py` | Done, tested |
+| Machine id, held-code logic | `desktop/auth.py` | Done |
+| Gate overlay, countdown | `desktop/main.qml` | Done |
+| Bridge wiring, deferred commit | `desktop/bridge.py` | Done |
+| Minting tool | `tools/mint_codes.py` | Done (`--dry-run` needs no Firebase) |
+
+**Two rules carry the design, and both are easy to undo by accident:**
+
+- **A code is spent when the pipeline is running, not when it is typed.**
+  `Redemption.begin` holds it; `_set_pipeline_running(True)` commits it. A pod
+  that fails to provision costs the customer nothing. Do not "simplify" this
+  into a single call at the auth screen.
+- **The hour belongs to the machine, not to the app session.** `/session` is
+  called on every launch, so closing and reopening the desktop inside the hour
+  never prompts. The answer lives in Firestore, not in a local file — a local
+  file would mean a reinstall costs an hour someone paid for.
+
+**Outstanding, in order:**
+
+- [ ] **Create the Firebase project and deploy.** Needs the Blaze plan (card on
+      file; $0 at this volume, but the upgrade is a real step that will stop
+      you). `firebase deploy --only firestore:rules,functions`, then put the
+      base URL in `PHANTOM_AUTH_URL`
+- [ ] **Mint a first batch and redeem one end to end** against a real pod. This
+      is the only part never exercised — everything below the network call is
+      tested, the network call itself is not
+- [ ] **Decide what a mid-session pipeline death costs the customer.** Right now
+      the hour keeps running. Deferring the burn until the pipeline is up
+      removes the most likely failure, not all of them
+- [ ] **Fold into the pod session.** The desktop knows the hour is over; the pod
+      is stopped separately by `RUNPOD_MAX_UPTIME`. Two clocks that currently
+      agree because both are 60 minutes — see 4.5
+
+### 4.5 Session shutdown — done
+
+The gaps the access codes exposed, all now closed. Verified by driving the real
+`Bridge` through every ending: user Stop, `auto_stop`, socket drop, clock
+expiry, and app close.
+
+- [x] **The desktop handles `auto_stop`.** `server.py::_stop_pod` broadcasts it
+      and sleeps a second so clients receive it; nothing listened, so the end of
+      a paid hour presented itself as *"disconnected — reconnecting…"* forever.
+      It now ends the session with a reason
+- [x] **The reconnect loop distinguishes expected from unexpected.**
+      `expect_disconnect()` stops it when the pod was stopped on purpose. It is
+      otherwise indefinite, which is correct — a pod can be slow and a laptop
+      can sleep. `max_retries = 3` only ever capped the backoff exponent, and
+      the docstring that claimed a retry limit was simply wrong
+- [x] **The virtual camera is on for the life of the app.** Not a toggle, not
+      tied to LIVE, not tied to a session. `cleanup` is the only path that
+      releases it; `stopPipeline`, expiry and disconnect all leave it running,
+      holding the last swapped frame
+
+**The flow, as built:**
+
+| When | Desktop | What the call sees |
+|---|---|---|
+| last 10 min | countdown chip in the header | swapped frames, unchanged |
+| pod's 5-min warning | existing auto-stop dialog, Extend available | unchanged |
+| time ends | **anchored card**: "Session ended", with ENTER A NEW CODE | **last swapped frame, held, indefinitely** |
+| socket drops | nothing further — reconnecting has stopped | still the held frame |
+| app closed | — | device released |
+
+**Do not soften these:**
+
+- **Never release the virtual camera to signal anything.** A conferencing app
+  responds to a device disappearing by showing a placeholder, reporting a
+  disconnected camera, or selecting the next available one — the operator's
+  real webcam. `tests/test_wiring.py` asserts which functions may call
+  `_stop_vcam` and which may not
+- **Only the pipeline's swapped stream feeds the device.** Both feed calls sit
+  in `_poll_frames`, downstream of `_jitter_buffer.pop_eligible()`. The raw
+  webcam preview is handled in the same function and has no path there
+- **Nothing is drawn on a frame, ever.** Every notice is desktop chrome
+
+### 4.6 Stage 4 and beyond
 
 Unchanged from [TODO.md](TODO.md), and all substantially larger than anything
 above: the control plane and session state machine, then cold start, resilience,
-provider abstraction, packing, payment, authentication.
+provider abstraction, packing, payment.
+
+Authentication is no longer on that list in its original form — 4.4 covers what
+it was for. What remains under Stage 4 is what access codes deliberately do not
+do: entitlements that outlive a machine, self-serve purchase, partial-hour
+credit, and several customers on one pod.
 
 Nothing in Stage 4 should start until Phase 3 is done. It is the largest body of
 work in the project, and building a session plane around a pipeline whose

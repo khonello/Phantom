@@ -13,13 +13,15 @@ Supports:
   - PHANTOM_API_URL env var for remote/RunPod connections
   - wss:// for secure connections
   - 30-second connection timeout
-  - Exponential backoff retry (max 3 retries)
+  - Exponential backoff retry, indefinite; the delay is capped, not the count
+  - expect_disconnect() to stop retrying when the pod was stopped on purpose
   - Connection status callbacks
 """
 
 import json
 import os
 import subprocess
+import sys
 import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -56,7 +58,15 @@ class PipelineClient:
     Single persistent connection to ws://host:9000/ws.
     Sends commands as JSON text frames.
     Receives events and frames over the same connection.
-    Handles reconnection with exponential backoff (max 3 retries).
+    Reconnects with exponential backoff, indefinitely — a pod can be slow, a
+    laptop can sleep, and a live call is not a good moment to stop trying. The
+    delay is what is capped (at 30s), not the number of attempts.
+
+    The exception is a disconnect we were told to expect: `expect_disconnect()`
+    marks the pod as having gone away on purpose, and the loop stops rather
+    than hammering a stopped pod forever. Without it an expired session looks
+    exactly like a network fault, which is the wrong thing to show someone
+    whose paid time has simply run out.
 
     Example:
         client = PipelineClient()
@@ -112,9 +122,30 @@ class PipelineClient:
         # Background receiver thread
         self._recv_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+        # Set when the pod has gone away on purpose — the paid hour ended, or
+        # the pipeline announced an auto-stop. Distinguishes "we are done" from
+        # "the network dropped", which are identical at the socket level and
+        # must not look identical to the person watching.
+        self._expected_disconnect = threading.Event()
         self._start_receiver()
 
     # ── Connection management ────────────────────────────────────────────────
+
+    def expect_disconnect(self) -> None:
+        """
+        Stop reconnecting: the pod is gone because it was meant to be.
+
+        Called when the pipeline broadcasts `auto_stop`, or when the session's
+        own clock runs out. Retrying past this point produces a UI that says
+        "reconnecting…" forever about a pod that will never answer.
+        """
+        self._expected_disconnect.set()
+
+    def expect_reconnect(self) -> None:
+        """Undo `expect_disconnect` — a new session is starting."""
+        self._expected_disconnect.clear()
+        if self._recv_thread is None or not self._recv_thread.is_alive():
+            self._start_receiver()
 
     def _start_receiver(self) -> None:
         """Start background WebSocket receiver thread."""
@@ -131,10 +162,13 @@ class PipelineClient:
         from websockets.sync.client import connect as ws_connect
 
         retry_delay = 1.0
-        max_retries = 3
+        # Caps the backoff exponent, not the number of attempts — the loop
+        # below runs until stopped or until a disconnect we were told to
+        # expect.
+        max_backoff_steps = 3
         attempt = 0
 
-        while not self._stop_event.is_set():
+        while not self._stop_event.is_set() and not self._expected_disconnect.is_set():
             try:
                 with ws_connect(
                     self._ws_url,
@@ -159,7 +193,6 @@ class PipelineClient:
                                 try:
                                     self.on_frame(message)
                                 except Exception as e:
-                                    import sys
                                     print(f'[CONTROLLER] on_frame callback error: {type(e).__name__}: {e}', file=sys.stderr)
                         elif isinstance(message, str):
                             # Text: JSON event or response
@@ -167,14 +200,11 @@ class PipelineClient:
                                 data = json.loads(message)
                                 self._dispatch_message(data)
                             except json.JSONDecodeError as e:
-                                import sys
                                 print(f'[CONTROLLER] JSON decode error: {e} — raw: {message[:120]}', file=sys.stderr)
                             except Exception as e:
-                                import sys
                                 print(f'[CONTROLLER] message dispatch error: {type(e).__name__}: {e}', file=sys.stderr)
 
             except Exception as e:
-                import sys
                 print(f'[CONTROLLER] Connection error ({self._ws_url}): {e}', file=sys.stderr)
             finally:
                 with self._ws_lock:
@@ -184,10 +214,15 @@ class PipelineClient:
             if self._stop_event.is_set():
                 break
 
+            if self._expected_disconnect.is_set():
+                print('[CONTROLLER] Disconnect was expected — not reconnecting.',
+                      file=sys.stderr)
+                break
+
             # Exponential backoff
             attempt += 1
-            if attempt > max_retries:
-                attempt = max_retries  # cap
+            if attempt > max_backoff_steps:
+                attempt = max_backoff_steps  # cap the delay, keep retrying
             self._stop_event.wait(timeout=min(retry_delay * (2 ** (attempt - 1)), 30.0))
 
     def _dispatch_message(self, data: Dict[str, Any]) -> None:
@@ -214,7 +249,6 @@ class PipelineClient:
             try:
                 self.on_event(data)
             except Exception as e:
-                import sys
                 print(f'[CONTROLLER] on_event callback error: {type(e).__name__}: {e}', file=sys.stderr)
 
     def _set_connected(self, value: bool) -> None:
@@ -225,7 +259,6 @@ class PipelineClient:
                 try:
                     self.on_connected(value)
                 except Exception as e:
-                    import sys
                     print(f'[CONTROLLER] on_connected callback error: {type(e).__name__}: {e}', file=sys.stderr)
 
     def close(self) -> None:
@@ -236,7 +269,6 @@ class PipelineClient:
                 try:
                     self._ws.close()
                 except Exception as e:
-                    import sys
                     print(f'[CONTROLLER] WebSocket close error: {type(e).__name__}: {e}', file=sys.stderr)
         if self._recv_thread is not None:
             self._recv_thread.join(timeout=3)
@@ -470,7 +502,6 @@ class PipelineClient:
             if self._ws is not None:
                 self._ws.send(jpeg_bytes)
         except Exception as e:
-            import sys
             print(f'[CONTROLLER] send_frame error: {type(e).__name__}: {e}', file=sys.stderr)
         finally:
             self._ws_lock.release()

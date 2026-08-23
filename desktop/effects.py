@@ -26,14 +26,15 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
+import numpy.typing as npt
 
 # Particle counts are per effect. Chosen against the measured cost of drawing
 # them — see the benchmark note in the module docstring of `filters.py`; the
 # budget is the same 33ms display tick, shared with a filter.
-_FIELD_CACHE: Dict[Tuple[str, int], Dict[str, np.ndarray]] = {}
+_FIELD_CACHE: Dict[Tuple[str, int], Dict[str, npt.NDArray[Any]]] = {}
 
 
-def _field(key: str, count: int) -> Dict[str, np.ndarray]:
+def _field(key: str, count: int) -> Dict[str, npt.NDArray[Any]]:
     """
     The fixed random properties of one effect's particles.
 
@@ -54,7 +55,7 @@ def _field(key: str, count: int) -> Dict[str, np.ndarray]:
         return cached
 
     rng = np.random.default_rng(abs(hash(key)) % (2 ** 32))
-    field = {
+    field: Dict[str, npt.NDArray[Any]] = {
         'x': rng.random(count).astype(np.float32),
         'y': rng.random(count).astype(np.float32),
         'speed': (0.10 + rng.random(count) * 0.35).astype(np.float32),
@@ -67,8 +68,8 @@ def _field(key: str, count: int) -> Dict[str, np.ndarray]:
     return field
 
 
-def _positions(field: Dict[str, np.ndarray], t: float, width: int, height: int,
-               sway: float = 0.0) -> Tuple[np.ndarray, np.ndarray]:
+def _positions(field: Dict[str, npt.NDArray[Any]], t: float, width: int, height: int,
+               sway: float = 0.0) -> Tuple[npt.NDArray[Any], npt.NDArray[Any]]:
     """
     Where every particle is at time `t`, in pixels.
 
@@ -84,13 +85,13 @@ def _positions(field: Dict[str, np.ndarray], t: float, width: int, height: int,
     return (x * width).astype(np.int32), (y * height).astype(np.int32)
 
 
-def _hsv_colours(hue: np.ndarray) -> np.ndarray:
+def _hsv_colours(hue: npt.NDArray[Any]) -> npt.NDArray[Any]:
     """Saturated BGR colours from a hue array, built once per call."""
     hsv = np.stack([hue, np.full_like(hue, 220), np.full_like(hue, 255)], axis=1)
     return cv2.cvtColor(hsv.reshape(-1, 1, 3), cv2.COLOR_HSV2BGR).reshape(-1, 3)
 
 
-def _confetti(frame: np.ndarray, t: float) -> np.ndarray:
+def _confetti(frame: npt.NDArray[Any], t: float) -> npt.NDArray[Any]:
     """Falling coloured rectangles, tumbling as they go."""
     height, width = frame.shape[:2]
     field = _field('confetti', 130)
@@ -110,7 +111,7 @@ def _confetti(frame: np.ndarray, t: float) -> np.ndarray:
     return out
 
 
-def _snow(frame: np.ndarray, t: float) -> np.ndarray:
+def _snow(frame: npt.NDArray[Any], t: float) -> npt.NDArray[Any]:
     """Soft white flakes, blended rather than painted on."""
     height, width = frame.shape[:2]
     field = _field('snow', 150)
@@ -124,7 +125,7 @@ def _snow(frame: np.ndarray, t: float) -> np.ndarray:
     return cv2.addWeighted(frame, 1.0, layer, 0.75, 0)
 
 
-def _hearts(frame: np.ndarray, t: float) -> np.ndarray:
+def _hearts(frame: npt.NDArray[Any], t: float) -> npt.NDArray[Any]:
     """Rising hearts, drawn as two circles and a triangle."""
     height, width = frame.shape[:2]
     field = _field('hearts', 60)
@@ -147,7 +148,7 @@ def _hearts(frame: np.ndarray, t: float) -> np.ndarray:
     return cv2.addWeighted(frame, 1.0, layer, 0.85, 0)
 
 
-def _bubbles(frame: np.ndarray, t: float) -> np.ndarray:
+def _bubbles(frame: npt.NDArray[Any], t: float) -> npt.NDArray[Any]:
     """Rising outlined bubbles — hollow, so the picture shows through."""
     height, width = frame.shape[:2]
     field = _field('bubbles', 70)
@@ -162,7 +163,7 @@ def _bubbles(frame: np.ndarray, t: float) -> np.ndarray:
     return cv2.addWeighted(frame, 1.0, layer, 0.7, 0)
 
 
-def _sparkle(frame: np.ndarray, t: float) -> np.ndarray:
+def _sparkle(frame: npt.NDArray[Any], t: float) -> npt.NDArray[Any]:
     """Twinkling points that fade in and out rather than travelling far."""
     height, width = frame.shape[:2]
     field = _field('sparkle', 110)
@@ -185,7 +186,7 @@ class Effect:
     """One named overlay, and the function that draws it at a moment in time."""
 
     def __init__(self, key: str, name: str,
-                 draw: Optional[Callable[[np.ndarray, float], np.ndarray]]) -> None:
+                 draw: Optional[Callable[[npt.NDArray[Any], float], npt.NDArray[Any]]]) -> None:
         """
         Args:
             key: Stable identifier used by the UI
@@ -196,7 +197,7 @@ class Effect:
         self.name = name
         self._draw = draw
 
-    def __call__(self, frame: np.ndarray, t: float) -> np.ndarray:
+    def __call__(self, frame: npt.NDArray[Any], t: float) -> npt.NDArray[Any]:
         if self._draw is None:
             return frame
         return self._draw(frame, t)
@@ -219,7 +220,7 @@ def get(key: str) -> Optional[Effect]:
     return _BY_KEY.get(key)
 
 
-def render(frame: np.ndarray, key: str, t: float) -> Any:
+def render(frame: npt.NDArray[Any], key: str, t: float) -> Any:
     """
     Draw an effect over a frame, returning it unchanged if it does not apply.
 

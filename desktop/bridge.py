@@ -9,12 +9,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
+import numpy.typing as npt
 from PySide6.QtCore import QObject, Signal, Slot, Property, QTimer, Qt
 from PySide6.QtGui import QPixmap, QImage, QPainter
 from PySide6.QtQuick import QQuickPaintedItem
 
 from pipeline.io.ffmpeg import is_image
 from pipeline.api.schema import MAX_PHOTO_BYTES, MAX_PHOTO_TARGETS, PRESETS
+from desktop import auth
 from desktop import effects as overlay_effects
 from desktop import filters as look_filters
 from desktop.controller import PipelineClient
@@ -43,7 +45,7 @@ class FrameBuffer:
     def pixmap(self) -> Optional[QPixmap]:
         return self._pixmap
 
-    def update_from_numpy(self, frame: np.ndarray) -> None:
+    def update_from_numpy(self, frame: npt.NDArray[Any]) -> None:
         rgb = np.ascontiguousarray(frame[:, :, ::-1])
         h, w, ch = rgb.shape
         qimg = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888).copy()
@@ -194,10 +196,36 @@ class Bridge(QObject):
     photoTargetsChanged = Signal()
     photoResultsChanged = Signal()
     autoStopWarning = Signal(int)  # minutes remaining
+    # Internal: carries a licence-server reply from a worker thread back to the
+    # GUI thread. (ok, seconds_remaining, message)
+    _auth_result = Signal(bool, int, str)
+    authRequiredChanged = Signal(bool)
+    authCheckingChanged = Signal(bool)
+    authMinutesChanged = Signal(int)
+    authErrorChanged = Signal(str)
+    sessionExpiredChanged = Signal(bool)
+    sessionReasonChanged = Signal(str)
 
     def __init__(self, client: PipelineClient) -> None:
         super().__init__()
         self._client = client
+        # ── Access codes ──────────────────────────────────────────────
+        # `_auth_required` drives the gate overlay. It starts True only when
+        # access control is configured at all, so a local development run with
+        # no PHANTOM_AUTH_URL is never gated.
+        #
+        # `_auth_pending` is a code that has been typed and accepted locally
+        # but *not yet spent*. It is committed when the pipeline is confirmed
+        # running, so a pod that fails to come up costs the customer nothing.
+        self._auth_enabled: bool = auth.is_enabled()
+        self._auth_required: bool = self._auth_enabled
+        self._auth_checking: bool = False
+        self._auth_minutes: int = 0
+        self._auth_error: str = ''
+        self._auth_deadline: float = 0.0
+        self._auth_pending = auth.Redemption()
+        self._session_expired: bool = False
+        self._session_reason: str = ''
         self._source_set = False
         self._source_thumbnail: str = ''
         self._source_label: str = ''
@@ -284,7 +312,7 @@ class Bridge(QObject):
         # Virtual camera output
         self._vcam_thread: Optional[threading.Thread] = None
         self._vcam_stop: Optional[threading.Event] = None
-        self._vcam_queue: queue.Queue = queue.Queue(maxsize=2)
+        self._vcam_queue: 'queue.Queue[Any]' = queue.Queue(maxsize=2)
 
         # Wire up WebSocket push callbacks from the client
         self._client.on_frame = self._on_ws_frame
@@ -295,6 +323,27 @@ class Bridge(QObject):
         self._frame_timer = QTimer(self)
         self._frame_timer.timeout.connect(self._poll_frames)
         self._frame_timer.start(33)
+
+        # Licence-server replies arrive on worker threads; this signal is how
+        # they cross back to the GUI thread, which is the only place Qt
+        # properties may be touched.
+        self._auth_result.connect(self._on_auth_result)
+
+        self._auth_timer = QTimer(self)
+        self._auth_timer.setInterval(10_000)
+        self._auth_timer.timeout.connect(self._tick_auth)
+
+        # Ask before the window is interacted with. Threaded, so an
+        # unreachable server delays nothing.
+        if self._auth_enabled:
+            self.checkAuth()
+
+        # The virtual camera is on for the life of the app. Not tied to LIVE,
+        # not tied to a session: a conferencing app should be able to select
+        # "Phantom" once and never see it disappear. Until the first swapped
+        # frame arrives the device simply waits — the raw camera is never sent
+        # as a stand-in.
+        self._ensure_vcam()
 
         self._start_webcam(0)
 
@@ -438,9 +487,11 @@ class Bridge(QObject):
 
     @Slot()
     def stopPipeline(self) -> None:
-        if self._virtual_cam_active:
-            self._stop_vcam()
-            self._set_virtual_cam_active(False)
+        # The virtual camera is deliberately left running. It holds and
+        # re-sends the last swapped frame, so a call in progress sees a frozen
+        # picture rather than a camera that vanished — and above all never the
+        # operator's real one. "Stop" means stop processing, not "change what
+        # my camera is". Only `cleanup` releases the device.
         self._awaiting_first_frame = False
         self._ws_push_active.clear()
         self._audio_playback.stop()
@@ -486,12 +537,41 @@ class Bridge(QObject):
 
     @Slot()
     def toggleVirtualCam(self) -> None:
+        """
+        Retained for the API only. **Not** a user-facing control any more.
+
+        Turning the virtual camera off is the only action in this application
+        that can put the operator's real face on a call. Releasing the device
+        makes the conferencing app do one of three things — show a
+        placeholder, report a disconnected camera, or **select the next
+        available camera**, which is the webcam. The third is the exact failure
+        the product exists to prevent, reached through a button that reads like
+        a convenience.
+
+        The camera is therefore simply **on**: opened when the app opens,
+        released when the app closes, regardless of mode or whether a session
+        is running. An open device nobody has selected costs nothing — no
+        application is obliged to pick it — while a device that comes and goes
+        is what makes a conferencing app go looking for another one.
+        """
         if not self._virtual_cam_active:
-            self._start_vcam()
+            self._ensure_vcam()
         else:
             self._stop_vcam()
             self._set_virtual_cam_active(False)
-            self._set_status('pipeline connected · processing')
+
+    def _ensure_vcam(self) -> None:
+        """
+        Open the virtual camera if it is not already open.
+
+        A missing backend must not stop anything: the swap still works, it
+        simply has nowhere to be sent. `_run_vcam` reports that in the status
+        line rather than raising, so an OBS install that is not there never
+        blocks a session.
+        """
+        if self._virtual_cam_active or self._vcam_thread is not None:
+            return
+        self._start_vcam()
 
     @Slot()
     def toggleEnhance(self) -> None:
@@ -1394,6 +1474,199 @@ class Bridge(QObject):
         if self._pipeline_running != value:
             self._pipeline_running = value
             self.pipelineRunningChanged.emit(value)
+            # The moment the customer's hour is worth charging for. A code is
+            # spent here and nowhere else — not when it was typed, because a
+            # pod that never came up must not cost them anything.
+            if value:
+                self._commit_pending_code()
+
+    # ── Access codes ──────────────────────────────────────────────────────
+
+    @Property(bool, notify=authRequiredChanged)
+    def authRequired(self) -> bool:
+        """True while the gate overlay should be shown."""
+        return self._auth_required
+
+    @Property(bool, notify=authCheckingChanged)
+    def authChecking(self) -> bool:
+        """True while a call to the licence server is in flight."""
+        return self._auth_checking
+
+    @Property(int, notify=authMinutesChanged)
+    def authMinutes(self) -> int:
+        """Minutes left in the current session, for display."""
+        return self._auth_minutes
+
+    @Property(str, notify=authErrorChanged)
+    def authError(self) -> str:
+        return self._auth_error
+
+    def _set_auth_required(self, value: bool) -> None:
+        if self._auth_required != value:
+            self._auth_required = value
+            self.authRequiredChanged.emit(value)
+
+    def _set_auth_checking(self, value: bool) -> None:
+        if self._auth_checking != value:
+            self._auth_checking = value
+            self.authCheckingChanged.emit(value)
+
+    def _set_auth_error(self, message: str) -> None:
+        if self._auth_error != message:
+            self._auth_error = message
+            self.authErrorChanged.emit(message)
+
+    def _apply_session(self, seconds_remaining: int) -> None:
+        """Record a live session and open the gate."""
+        if self._session_expired:
+            self._session_expired = False
+            self.sessionExpiredChanged.emit(False)
+        self._auth_deadline = time.time() + max(0, seconds_remaining)
+        self._auth_minutes = max(0, seconds_remaining) // 60
+        self.authMinutesChanged.emit(self._auth_minutes)
+        self._set_auth_error('')
+        self._set_auth_required(False)
+        if not self._auth_timer.isActive():
+            self._auth_timer.start()
+
+    @Slot()
+    def checkAuth(self) -> None:
+        """
+        Ask the licence server whether this machine already has time left.
+
+        Called on startup and by the RETRY button. Runs on a worker so a slow
+        or unreachable server cannot freeze the window before it has painted.
+        """
+        if not self._auth_enabled or self._auth_checking:
+            return
+        self._set_auth_checking(True)
+        self._set_auth_error('')
+        threading.Thread(target=self._check_auth_worker, daemon=True).start()
+
+    def _check_auth_worker(self) -> None:
+        state = auth.check_session()
+        self._auth_result.emit(
+            state.active, state.seconds_remaining, state.error or '')
+
+    @Slot(str)
+    def submitCode(self, raw_code: str) -> None:
+        """
+        Accept a typed code.
+
+        Only the *shape* is checked here — the checksum in codes.py catches a
+        mistyped character with no round trip, so a typo never counts as a
+        failed redemption. Nothing is spent until the pipeline is running.
+        """
+        if self._auth_checking:
+            return
+        if not self._auth_pending.begin(raw_code):
+            self._set_auth_error('That code is not complete — check the characters.')
+            return
+        self._set_auth_error('')
+        self._set_auth_checking(True)
+        threading.Thread(target=self._submit_code_worker, daemon=True).start()
+
+    def _submit_code_worker(self) -> None:
+        """
+        Spend the code straight away when there is no pipeline to wait for.
+
+        The deferred path exists to protect a customer from a pod that fails to
+        start. On this screen there is no pod yet — the gate is what stands
+        between them and starting one — so holding the code here would leave
+        them looking at an accepted code and a locked window. Committing now
+        and letting `_set_pipeline_running` re-commit is safe: the server
+        treats a repeat from the same machine inside its own live hour as
+        success rather than as reuse.
+        """
+        result = self._auth_pending.commit()
+        self._auth_result.emit(
+            result.ok, result.seconds_remaining, '' if result.ok else result.message)
+
+    def _commit_pending_code(self) -> None:
+        """Spend a held code now that the pipeline is confirmed running."""
+        if not self._auth_pending.pending:
+            return
+        threading.Thread(target=self._submit_code_worker, daemon=True).start()
+
+    def _on_auth_result(self, ok: bool, seconds: int, message: str) -> None:
+        """Back on the GUI thread with whatever the licence server said."""
+        self._set_auth_checking(False)
+        if ok:
+            self._apply_session(seconds)
+            return
+        # An active session reports its remaining time even on a refusal —
+        # entering a second code mid-hour is an accident, not a purchase.
+        if seconds > 0:
+            self._apply_session(seconds)
+            return
+        self._auth_pending.discard()
+        self._set_auth_error(message)
+        self._set_auth_required(True)
+
+    def _tick_auth(self) -> None:
+        """Recompute the displayed countdown."""
+        if self._auth_deadline <= 0:
+            return
+        remaining = max(0, int(self._auth_deadline - time.time()))
+        minutes = remaining // 60
+        if minutes != self._auth_minutes:
+            self._auth_minutes = minutes
+            self.authMinutesChanged.emit(minutes)
+        if remaining <= 0:
+            self._auth_timer.stop()
+            self._end_session('Your session has ended.')
+
+    def _end_session(self, reason: str) -> None:
+        """
+        The paid time is over, or the pod announced it is stopping.
+
+        Three things deliberately do *not* happen here:
+
+        - **The virtual camera is not touched.** It keeps re-sending the last
+          swapped frame until the app closes. Releasing the device is the one
+          action that can put the operator's real face on the call, and an
+          expiry is not a good reason to risk it — see `_run_vcam`.
+        - **Nothing is drawn on the frame.** The notice belongs to the desktop
+          window; the picture reaching the call stays exactly as it was.
+        - **The full gate does not take over.** The operator may still be in a
+          call and needs to see the app. An anchored card says what happened;
+          the gate returns when they ask for it, or on the next launch.
+        """
+        if self._session_expired:
+            return
+        self._session_expired = True
+
+        # Stop reconnecting. Without this the UI says "disconnected —
+        # reconnecting…" forever about a pod that was stopped on purpose,
+        # which reads as a broken app rather than as time running out.
+        self._client.expect_disconnect()
+
+        self._auth_minutes = 0
+        self.authMinutesChanged.emit(0)
+        self._set_status(reason)
+        self._session_reason = reason
+        self.sessionReasonChanged.emit(reason)
+        self.sessionExpiredChanged.emit(True)
+
+    @Property(bool, notify=sessionExpiredChanged)
+    def sessionExpired(self) -> bool:
+        """True once the paid time is over. Drives the ended-session card."""
+        return self._session_expired
+
+    @Property(str, notify=sessionReasonChanged)
+    def sessionReason(self) -> str:
+        """Why it ended, in words the customer should see."""
+        return self._session_reason
+
+    @Slot()
+    def enterNewCode(self) -> None:
+        """Dismiss the ended-session card and show the gate again."""
+        self._session_expired = False
+        self.sessionExpiredChanged.emit(False)
+        self._auth_pending = auth.Redemption()
+        self._set_auth_error('')
+        self._client.expect_reconnect()
+        self._set_auth_required(True)
 
     def _set_virtual_cam_active(self, value: bool) -> None:
         if self._virtual_cam_active != value:
@@ -1508,7 +1781,7 @@ class Bridge(QObject):
         if self._audio_playback.is_running:
             try:
                 stream = self._audio_playback._stream
-                if stream is not None and not stream.active:  # type: ignore[union-attr]
+                if stream is not None and not stream.active:
                     print('[SYNC] Audio playback stream died — recovering', file=sys.stderr)
                     self._audio_playback.try_recover()
             except Exception:
@@ -1553,7 +1826,7 @@ class Bridge(QObject):
             self._awaiting_first_frame = False
             self._set_loading_message('')
 
-    def _on_ws_event(self, data: Dict) -> None:
+    def _on_ws_event(self, data: Dict[str, Any]) -> None:
         """Called by PipelineClient when a JSON event arrives."""
         event = data.get('event', '')
         if event == 'STATUS_CHANGED':
@@ -1633,6 +1906,12 @@ class Bridge(QObject):
         elif event == 'auto_stop_warning':
             minutes = (data.get('data') or {}).get('minutes_remaining', 5)
             self.autoStopWarning.emit(minutes)
+        elif event == 'auto_stop':
+            # The pipeline is stopping the pod. It broadcasts this and waits a
+            # second precisely so this arrives before the socket dies — for a
+            # long time nothing listened, so the end of a paid hour presented
+            # itself as "disconnected — reconnecting…" forever.
+            self._end_session('Session ended — the pod has stopped.')
 
     def _on_ws_connected(self, connected: bool) -> None:
         """Called by PipelineClient when connection status changes."""
@@ -1754,8 +2033,6 @@ class Bridge(QObject):
             self._set_status('pyvirtualcam not installed — run: pip install pyvirtualcam')
             return
 
-        import numpy as np
-
         kwargs: Dict[str, Any] = {'width': 960, 'height': 540, 'fps': 30, 'fmt': pyvirtualcam.PixelFormat.BGR}
         if self._vcam_platform:
             kwargs['backend'] = self._vcam_platform
@@ -1778,7 +2055,7 @@ class Bridge(QObject):
         # the only one that is *expected*, and it must behave exactly like the
         # failures — the operator's real face must not appear on the call the
         # moment their time runs out.
-        held: Optional[np.ndarray] = None
+        held: Optional[npt.NDArray[Any]] = None
 
         try:
             with pyvirtualcam.Camera(**kwargs) as cam:

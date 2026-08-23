@@ -19,15 +19,16 @@ Requires: sounddevice (pip install sounddevice)
 import collections
 import sys
 import time
-from typing import Any, Deque, Dict, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Deque, Dict, List, Optional, TYPE_CHECKING, Tuple
 
 import numpy as np
+import numpy.typing as npt
 
 if TYPE_CHECKING:
     from desktop.voice import VoiceTransformer
 
 # PCM chunk: (capture_ts_ns, pcm_data as float32 numpy array)
-AudioChunk = Tuple[int, np.ndarray]
+AudioChunk = Tuple[int, npt.NDArray[Any]]
 
 # Default audio parameters
 DEFAULT_SAMPLE_RATE = 44100
@@ -61,7 +62,7 @@ class AudioRingBuffer:
         self._buf: Deque[AudioChunk] = collections.deque(maxlen=max_chunks)
         self.sample_rate = sample_rate
 
-    def append(self, capture_ts: int, pcm: np.ndarray) -> None:
+    def append(self, capture_ts: int, pcm: npt.NDArray[Any]) -> None:
         """Add a new audio chunk to the buffer.
 
         Args:
@@ -83,7 +84,7 @@ class AudioRingBuffer:
         except IndexError:
             return None
 
-    def snapshot(self) -> list:
+    def snapshot(self) -> List[Any]:
         """Return a shallow copy of all chunks for safe iteration."""
         return list(self._buf)
 
@@ -152,7 +153,7 @@ class AudioCapture:
         max_chunks = int(buffer_seconds * sample_rate / block_size)
         self.ring_buffer = AudioRingBuffer(max_chunks, sample_rate)
 
-        self._stream: Optional[object] = None
+        self._stream: Optional[Any] = None
         self._running = False
 
         # Voice transformer (set externally via set_voice_transformer)
@@ -166,7 +167,7 @@ class AudioCapture:
 
     def _audio_callback(
         self,
-        indata: np.ndarray,
+        indata: npt.NDArray[Any],
         frames: int,
         time_info: object,
         status: object,
@@ -281,7 +282,7 @@ class AudioCapture:
         active = False
         if self._stream is not None:
             try:
-                active = self._stream.active  # type: ignore[union-attr]
+                active = self._stream.active
             except Exception:
                 active = False
 
@@ -307,7 +308,7 @@ class AudioCapture:
         """
         if self._running and self._stream is not None:
             try:
-                if self._stream.active:  # type: ignore[union-attr]
+                if self._stream.active:
                     return True  # still alive, nothing to do
             except Exception:
                 pass
@@ -316,7 +317,7 @@ class AudioCapture:
         print('[AUDIO] Attempting capture stream recovery...', file=sys.stderr)
         if self._stream is not None:
             try:
-                self._stream.close()  # type: ignore[union-attr]
+                self._stream.close()
             except Exception:
                 pass
             self._stream = None
@@ -351,7 +352,7 @@ class RTTTracker:
     WARMUP_SAMPLES: int = 10            # min samples before adapting
 
     def __init__(self) -> None:
-        self._samples: collections.deque = collections.deque(maxlen=self.WINDOW_SIZE)
+        self._samples: 'collections.deque[Any]' = collections.deque(maxlen=self.WINDOW_SIZE)
         self._target_delay_ns: int = self.INITIAL_DELAY_NS
         self._count: int = 0
 
@@ -417,7 +418,7 @@ class JitterBuffer:
     MAX_FRAMES: int = 60  # ~2 seconds at 30 fps
 
     def __init__(self) -> None:
-        self._buf: collections.deque = collections.deque(maxlen=self.MAX_FRAMES)
+        self._buf: 'collections.deque[Any]' = collections.deque(maxlen=self.MAX_FRAMES)
         self._rtt = RTTTracker()
 
     def push(self, capture_ts: int, jpeg_bytes: bytes) -> None:
@@ -569,14 +570,14 @@ class AudioPlayback:
         self.block_size = block_size
         self._audio_capture = audio_capture
 
-        self._stream: Optional[object] = None
+        self._stream: Optional[Any] = None
         self._running = False
         # Leftover samples from a partially consumed chunk
-        self._leftover: Optional[np.ndarray] = None
+        self._leftover: Optional[npt.NDArray[Any]] = None
 
     def _output_callback(
         self,
-        outdata: np.ndarray,
+        outdata: npt.NDArray[Any],
         frames: int,
         time_info: object,
         status: object,
@@ -701,7 +702,7 @@ class AudioPlayback:
         """
         if self._running and self._stream is not None:
             try:
-                if self._stream.active:  # type: ignore[union-attr]
+                if self._stream.active:
                     return True
             except Exception:
                 pass
@@ -709,7 +710,7 @@ class AudioPlayback:
         print('[AUDIO] Attempting playback stream recovery...', file=sys.stderr)
         if self._stream is not None:
             try:
-                self._stream.close()  # type: ignore[union-attr]
+                self._stream.close()
             except Exception:
                 pass
             self._stream = None
