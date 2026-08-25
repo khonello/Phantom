@@ -16,13 +16,13 @@ import os
 import queue
 import threading
 import time
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import cv2
 import numpy as np
 
 from pipeline.config import FaceSwapConfig
-from pipeline.types import Frame, PhotoResult
+from pipeline.types import Frame, FrameSwap, PhotoResult
 from pipeline.events import (
     BATCH_PROGRESS,
     FRAME_READY,
@@ -65,6 +65,17 @@ from pipeline.processing.frame_processor import (
     SwappingProcessor,
     PreprocessingProcessor,
 )
+
+
+def _timecode(frame_index: int, fps: float) -> str:
+    """
+    Where in the clip a frame sits, as mm:ss.s.
+
+    A frame number alone is not something an operator can act on — they have to
+    open the video and find the offending face to fix it.
+    """
+    seconds = frame_index / fps if fps > 0 else 0.0
+    return f'{int(seconds // 60):02d}:{seconds % 60:04.1f}'
 
 
 class ProcessingPipeline:
@@ -123,6 +134,11 @@ class ProcessingPipeline:
         self._stop_event = threading.Event()
         # Per-photo outcomes of the last batch, read back by the API.
         self._photo_results: List[PhotoResult] = []
+        # Why a render stopped itself, as opposed to being stopped. Both end a
+        # job through the same `_stop_event`-shaped exit, and the difference
+        # matters to the operator: one is a finished decision they made, the
+        # other is a defect in the target they need told about.
+        self._abort_reason: str = ''
 
         # Guard state. `_last_good_frame` is what a guarded frame emits — the
         # last frame that was actually swapped, held unchanged. `_guard_reason`
@@ -176,6 +192,47 @@ class ProcessingPipeline:
         if self._masker is None:
             self._masker = FaceMasker(self.config)
         return self._masker
+
+    def face_boxes(self, path: str) -> List[Dict[str, float]]:
+        """
+        Every face in an image on disk, as normalised boxes.
+
+        Exists for the upload path, which has to tell the operator how many
+        faces a target photo holds before any job runs, so they can name the
+        one they meant. It is the same detector the job itself will use — a
+        different one could count differently, and a picker that disagrees with
+        the guard it exists to answer is worse than no picker.
+
+        Normalised for the same reason `target_face_point` is: these are drawn
+        over a scaled preview, and a pixel box is wrong the moment the preview
+        is not the photo's own size. Normalising here keeps it beside the
+        detector that produced the pixels.
+
+        Args:
+            path: Path to an image
+
+        Returns:
+            One box per face, or an empty list if the file will not read
+        """
+        frame = cv2.imread(path)
+        if frame is None:
+            return []
+
+        height, width = int(frame.shape[0]), int(frame.shape[1])
+        if not width or not height:
+            return []
+
+        boxes: List[Dict[str, float]] = []
+        for detection in self._get_detector().detect(frame):
+            bbox = detection.bbox
+            boxes.append({
+                'x': bbox.x / width,
+                'y': bbox.y / height,
+                'w': bbox.w / width,
+                'h': bbox.h / height,
+                'score': float(detection.confidence),
+            })
+        return boxes
 
     def _build_processors(self) -> None:
         """Build processor and compositing instances."""
@@ -848,6 +905,7 @@ class ProcessingPipeline:
 
         self._running = True
         self._stop_event.clear()
+        self._abort_reason = ''
 
         try:
             self._run_batch_impl()
@@ -923,7 +981,12 @@ class ProcessingPipeline:
                 scope='PIPELINE',
             )
 
-    def _swap_frame_detail(self, frame: Frame, stabilize: bool) -> Tuple[Frame, str, int]:
+    def _swap_frame_detail(
+        self,
+        frame: Frame,
+        stabilize: bool,
+        face_point: Optional[Tuple[float, float]] = None,
+    ) -> FrameSwap:
         """
         Run preprocess -> detect -> swap -> composite for one batch frame, and
         say whether a swap actually happened.
@@ -932,39 +995,45 @@ class ProcessingPipeline:
         the same compositor as stream mode so batch output matches live.
 
         The frame is returned unswapped on every failure path, which is what
-        the video path wants — one unswapped frame mid-clip beats a hole. A
-        still image has no such context: an unswapped photo is simply a copy of
-        the input wearing the output's name, so the photo path needs to know
-        the difference. Hence the reason, rather than a bare frame.
+        the video path wants for most of them — one unswapped frame mid-clip
+        beats a hole. A still image has no such context: an unswapped photo is
+        simply a copy of the input wearing the output's name, so the photo path
+        needs to know the difference. Hence the reason, rather than a bare
+        frame — and the reason *code* alongside it, since only video's caller
+        cares which guard it was.
 
         Args:
             frame: Input frame
             stabilize: Smooth landmarks across frames. True for video, where
                        frames are consecutive; False for a lone image
+            face_point: The face named for this target, if the operator or a
+                        template named one
 
         Returns:
-            (frame, reason, faces) — `reason` is empty when every detected face
-            was swapped, and `faces` counts them. On failure the frame is the
-            input, unmodified apart from preprocessing.
+            FrameSwap. On failure the frame is the input, unmodified apart
+            from preprocessing.
         """
         frame = self._preprocessing_proc.process(frame)
+        self._detection_proc.face_point = face_point
         frame = self._detection_proc.process(frame)
         detections = self._detection_proc.latest_detections
 
         if not detections:
             if stabilize:
                 self._stabilizer.mark_missing()
-            return frame, 'no face detected', 0
+            return FrameSwap(frame, 'no face detected')
 
         # Batch guards pass the original frame through rather than holding the
         # last good one. The privacy argument that forces a held frame on the
         # live path does not apply: the target here is a file the operator
         # supplied, not their camera, and freezing a frame mid-clip would be a
         # more visible defect than one unswapped frame.
-        verdict = guards.check_frame(self.config, self._detection_proc.all_detections)
+        verdict = guards.check_frame(
+            self.config, self._detection_proc.all_detections, face_point,
+        )
         if not verdict.ok:
             self._reset_temporal_state()
-            return frame, verdict.message or verdict.reason, 0
+            return FrameSwap(frame, verdict.message or verdict.reason, verdict.reason)
 
         swapped_count = 0
         for detection in detections:
@@ -977,32 +1046,20 @@ class ProcessingPipeline:
             swapped = self._swap_face(frame, face)
             if swapped is None:
                 self._reset_temporal_state()
-                return frame, 'the compositor produced no swap', swapped_count
+                return FrameSwap(
+                    frame, 'the compositor produced no swap', faces=swapped_count,
+                )
             frame = swapped
             swapped_count += 1
 
-        return frame, '', swapped_count
+        return FrameSwap(frame, faces=swapped_count)
 
-    def _swap_frame_faces(self, frame: Frame, stabilize: bool) -> Frame:
-        """
-        Frame-only view of `_swap_frame_detail`, for the video path.
-
-        Video processes thousands of frames and passes the unswapped ones
-        through, so it has no use for the reason. Kept as a separate method so
-        that stays true by construction rather than by every call site
-        remembering to discard two values.
-
-        Args:
-            frame: Input frame
-            stabilize: Smooth landmarks across frames
-
-        Returns:
-            Frame with every detected face swapped, or the input frame
-        """
-        frame, _reason, _faces = self._swap_frame_detail(frame, stabilize)
-        return frame
-
-    def _process_image_batch(self, target_path: str, output_path: Optional[str]) -> PhotoResult:
+    def _process_image_batch(
+        self,
+        target_path: str,
+        output_path: Optional[str],
+        face_point: Optional[Tuple[float, float]] = None,
+    ) -> PhotoResult:
         """
         Swap faces in a single image.
 
@@ -1015,6 +1072,8 @@ class ProcessingPipeline:
         Args:
             target_path: Path to target image
             output_path: Where to save output, or None to derive one
+            face_point: The face the operator picked in this photo, if it holds
+                        more than one and they were asked
 
         Returns:
             PhotoResult describing what happened to this image
@@ -1029,14 +1088,16 @@ class ProcessingPipeline:
         # pixel EMA would otherwise still hold whatever the last job left in it,
         # so the image has to be given a clean slate rather than assumed one.
         self._reset_temporal_state()
-        frame, reason, faces = self._swap_frame_detail(frame, stabilize=False)
+        result = self._swap_frame_detail(frame, stabilize=False, face_point=face_point)
 
-        if reason:
+        if result.reason:
             emit_status(
-                f"Skipped {os.path.basename(target_path)}: {reason}",
+                f"Skipped {os.path.basename(target_path)}: {result.reason}",
                 scope='PIPELINE',
             )
-            return PhotoResult.skipped(target_path, reason)
+            return PhotoResult.skipped(target_path, result.reason)
+
+        frame = result.frame
 
         # A template can carry an authored layer that belongs in front of the
         # face. Applied after the swap and before writing, so it occludes the
@@ -1054,7 +1115,7 @@ class ProcessingPipeline:
             return PhotoResult.skipped(target_path, f'could not write output to {out_path}')
 
         emit_status(f"Batch output saved to: {out_path}", scope='PIPELINE')
-        return PhotoResult.swapped(target_path, out_path, faces)
+        return PhotoResult.swapped(target_path, out_path, result.faces)
 
     def _photo_output_path(self, target_path: str) -> str:
         """
@@ -1098,6 +1159,10 @@ class ProcessingPipeline:
         """
         results: List[PhotoResult] = []
         total = len(target_paths)
+        # Aligned with `target_paths` by index, and allowed to be shorter or
+        # absent: a photo nobody was asked about simply has no point, and is
+        # refused by the multi-face guard exactly as before.
+        points = self.config.target_face_points
 
         for index, target in enumerate(target_paths):
             if self._stop_event.is_set():
@@ -1112,8 +1177,9 @@ class ProcessingPipeline:
             if not os.path.isfile(target):
                 result = PhotoResult.skipped(target, 'file not found')
             else:
+                point = points[index] if index < len(points) else None
                 try:
-                    result = self._process_image_batch(target, None)
+                    result = self._process_image_batch(target, None, point)
                 except Exception as e:
                     # A failure here is this photo's failure, not the job's.
                     emit_error(
@@ -1183,8 +1249,14 @@ class ProcessingPipeline:
                 )
                 return
 
-            if not self._process_frame_files(frame_paths):
-                emit_status('Batch cancelled', scope='PIPELINE')
+            if not self._process_frame_files(frame_paths, source_fps):
+                if self._abort_reason:
+                    # The error channel, not a status: the desktop reads a
+                    # batch's success from whether an error arrived, and a
+                    # warning here would let this render as "complete".
+                    emit_error(self._abort_reason, scope='PIPELINE')
+                else:
+                    emit_status('Batch cancelled', scope='PIPELINE')
                 return
 
             emit_status(f"Encoding {len(frame_paths)} frames", scope='PIPELINE')
@@ -1206,15 +1278,25 @@ class ProcessingPipeline:
         finally:
             clean_temp(self.config, target_path)
 
-    def _process_frame_files(self, frame_paths: List[str]) -> bool:
+    def _process_frame_files(self, frame_paths: List[str], fps: float) -> bool:
         """
         Swap every extracted frame in place.
 
+        Stops the whole job at the first frame holding more than one face.
+        That is deliberately the only guard that aborts: low confidence, pose
+        and occlusion describe one frame and pass through, but a second face
+        describes the *target*, will almost certainly persist, and every frame
+        it appears in would otherwise be written unswapped — a video that
+        silently stops being a swap partway through, which is the confidently
+        wrong output the guards exist to prevent.
+
         Args:
             frame_paths: Extracted frame paths, in playback order
+            fps: Source frame rate, for naming where in the clip it stopped
 
         Returns:
-            True if all frames were processed, False if the job was stopped
+            True if all frames were processed, False if the job was stopped —
+            by the operator, or by itself with `_abort_reason` set
         """
         total = len(frame_paths)
 
@@ -1244,8 +1326,15 @@ class ProcessingPipeline:
                 )
                 continue
 
-            frame = self._swap_frame_faces(frame, stabilize=True)
-            cv2.imwrite(frame_path, frame)
+            swap = self._swap_frame_detail(frame, stabilize=True)
+            if swap.code == guards.MULTIPLE_FACES:
+                self._abort_reason = (
+                    f'Stopped at frame {index + 1} of {total} '
+                    f'({_timecode(index, fps)}) — {swap.reason}. A video target '
+                    f'must show one face throughout. No output was written.'
+                )
+                return False
+            cv2.imwrite(frame_path, swap.frame)
 
             now = time.perf_counter()
             final = index == total - 1

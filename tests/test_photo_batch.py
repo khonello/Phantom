@@ -51,7 +51,8 @@ from pipeline.api.schema import MAX_PHOTO_BYTES, MAX_PHOTO_TARGETS
 from pipeline.config import FaceSwapConfig
 from pipeline.events import EventBus, PHOTO_RESULT
 from pipeline.processing.pipeline import ProcessingPipeline
-from pipeline.types import PhotoResult
+from pipeline.services import guards
+from pipeline.types import FrameSwap, PhotoResult
 
 logging.disable(logging.INFO)
 
@@ -87,6 +88,8 @@ class StubPipeline(ProcessingPipeline):
         super().__init__(config, bus)
         self.outcomes = outcomes or {}
         self.seen: list = []
+        # Which point reached the swap for each photo, in order.
+        self.points: list = []
 
     def _build_processors(self) -> None:
         pass
@@ -94,21 +97,25 @@ class StubPipeline(ProcessingPipeline):
     def _reset_temporal_state(self) -> None:
         pass
 
-    def _swap_frame_detail(self, frame, stabilize):
+    def _swap_frame_detail(self, frame, stabilize, face_point=None):
         name = os.path.basename(self.seen[-1]) if self.seen else ''
+        self.points.append(face_point)
         outcome = self.outcomes.get(name, '')
         if isinstance(outcome, Exception):
             raise outcome
-        if outcome:
-            return frame, outcome, 0
+        # A photo the operator named a face in is one the multi-face guard
+        # stands down for, so the stub has to honour the point rather than
+        # refuse regardless - otherwise the test proves nothing about it.
+        if outcome and not (outcome == guards.MULTIPLE_FACES and face_point):
+            return FrameSwap(frame, outcome, outcome)
         # Force the red channel high, so a swapped output is provable.
         frame = frame.copy()
         frame[:, :, 2] = 255
-        return frame, '', 1
+        return FrameSwap(frame, faces=1)
 
-    def _process_image_batch(self, target_path, output_path):
+    def _process_image_batch(self, target_path, output_path, face_point=None):
         self.seen.append(target_path)
-        return super()._process_image_batch(target_path, output_path)
+        return super()._process_image_batch(target_path, output_path, face_point)
 
 
 def fresh():
@@ -158,6 +165,62 @@ for label, reason in (
     check(f'{label}: reported as skipped', not result.ok)
     check(f'{label}: reason is carried through', result.reason == reason, result.reason)
     check(f'{label}: no output file written', not os.path.exists(out))
+
+
+# ── Naming a face in a photo that holds several ───────────────────────────
+# The operator's half of the seam a template's manifest fills from the other
+# side. Without a point the guard refuses, which is right - "which face did you
+# mean?" has no safe default. With one, it stands down for that photo alone.
+print('\nNaming a face in a crowded photo')
+
+crowd = write_photo('crowd.png')
+config, bus = fresh()
+pipe = StubPipeline(config, bus, {'crowd.png': guards.MULTIPLE_FACES})
+result = pipe._process_image_batch(crowd, None)
+check('a crowded photo with no point is refused', not result.ok)
+check('and says which guard', result.reason == guards.MULTIPLE_FACES, result.reason)
+check('and writes nothing',
+      not os.path.exists(os.path.join(WORK, 'crowd_swapped.png')))
+
+config, bus = fresh()
+pipe = StubPipeline(config, bus, {'crowd.png': guards.MULTIPLE_FACES})
+result = pipe._process_image_batch(crowd, None, (0.31, 0.44))
+check('a named face lets the same photo through', result.ok, result.reason)
+check('the point reaches the swap', pipe.points == [(0.31, 0.44)], str(pipe.points))
+check('and the output is written',
+      os.path.isfile(os.path.join(WORK, 'crowd_swapped.png')))
+
+
+# ── Points are per photo, not per job ─────────────────────────────────────
+# `target_face_point` holds one value and a photo job holds up to four
+# targets, so a single point would name a face in photos nobody looked at.
+print('\nEach photo carries its own point')
+
+targets = [write_photo(f'point_{i}.png') for i in range(4)]
+config, bus = fresh()
+config.target_face_points = [None, (0.6, 0.5), None, None]
+pipe = StubPipeline(config, bus, {
+    'point_1.png': guards.MULTIPLE_FACES,
+    'point_3.png': guards.MULTIPLE_FACES,
+})
+results = pipe._process_photos_batch(targets)
+
+check('every photo was attempted', len(results) == 4, str(len(results)))
+check('the point went to the photo it was chosen in',
+      pipe.points == [None, (0.6, 0.5), None, None], str(pipe.points))
+check('the named crowded photo swaps', results[1].ok, results[1].reason)
+check('the unnamed crowded photo is still refused', not results[3].ok)
+check('and the plain photos are untouched by any of it',
+      results[0].ok and results[2].ok)
+
+config, bus = fresh()
+config.target_face_points = [(0.5, 0.5)]
+pipe = StubPipeline(config, bus)
+results = pipe._process_photos_batch(targets)
+check('a short point list does not break the photos past it',
+      len(results) == 4 and all(r.ok for r in results))
+check('and those photos simply have no point',
+      pipe.points == [(0.5, 0.5), None, None, None], str(pipe.points))
 
 
 # ── An unreadable file ────────────────────────────────────────────────────
@@ -237,8 +300,8 @@ config, bus = fresh()
 
 
 class CancellingPipeline(StubPipeline):
-    def _process_image_batch(self, target_path, output_path):
-        result = super()._process_image_batch(target_path, output_path)
+    def _process_image_batch(self, target_path, output_path, face_point=None):
+        result = super()._process_image_batch(target_path, output_path, face_point)
         self._stop_event.set()  # cancel after the first photo
         return result
 

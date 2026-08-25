@@ -364,23 +364,24 @@ class PipelineClient:
         """Set output file path."""
         return self._send('set_output', path=path)
 
-    # ── Processing settings ───────────────────────────────────────────────────
+    # ── Output format ─────────────────────────────────────────────────────────
+    # `set_keep_frames` and `set_many_faces` used to sit here with no handler
+    # behind them, so calling either would have returned `Unknown command`.
+    # Both are deliberately CLI-only rather than missing: `many_faces` bypasses
+    # every runtime guard and both temporal EMAs, and `keep_frames` is a
+    # debugging flag that fills a pod's disk. See the note on COMMANDS in
+    # pipeline/api/schema.py.
+    #
+    # The two below are real, and the desktop deliberately does *not* call them
+    # on every render - see the note in bridge.startBatch.
 
     def set_keep_fps(self, value: bool) -> Dict[str, Any]:
-        """Set keep_fps flag."""
+        """Keep the target's frame rate, or retime the output to 30fps."""
         return self._send('set_keep_fps', value=value)
 
-    def set_keep_frames(self, value: bool) -> Dict[str, Any]:
-        """Set keep_frames flag."""
-        return self._send('set_keep_frames', value=value)
-
     def set_keep_audio(self, value: bool) -> Dict[str, Any]:
-        """Set keep_audio flag."""
+        """Keep the target's audio in the rendered output, or drop it."""
         return self._send('set_keep_audio', value=value)
-
-    def set_many_faces(self, value: bool) -> Dict[str, Any]:
-        """Set many_faces flag."""
-        return self._send('set_many_faces', value=value)
 
     # ── Source embedding ──────────────────────────────────────────────────────
 
@@ -413,6 +414,17 @@ class PipelineClient:
         a remote pod.
         """
         return self._send('upload_target', _timeout=60.0, images=images)
+
+    def set_target_faces(
+        self, points: List[Optional[List[float]]],
+    ) -> Dict[str, Any]:
+        """Name the face to swap in each uploaded target photo.
+
+        One normalised [x, y] per photo in `upload_target` order, or None for
+        a photo the operator was not asked about. Detection order is not a
+        stable contract, which is why this is a point rather than an index.
+        """
+        return self._send('set_target_faces', points=points)
 
     def get_photo_results(self, include_images: bool = True) -> Dict[str, Any]:
         """Fetch per-photo outcomes of the last photo job, images included."""

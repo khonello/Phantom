@@ -73,8 +73,24 @@ def parse_args() -> None:
     program.add_argument('-s', '--source', help='select source image(s) or embedding (.npy)', dest='source_path', nargs='+')
     program.add_argument('-t', '--target', help='select a target image or video', dest='target_path')
     program.add_argument('-o', '--output', help='select output file or directory', dest='output_path')
-    program.add_argument('--keep-fps', help='keep original fps', dest='keep_fps', action='store_true')
-    program.add_argument('--keep-audio', help='keep original audio', dest='keep_audio', action='store_true', default=True)
+    # These two decide what file the operator gets back, and both were unable
+    # to say "no". `store_true` gave `--keep-fps` a default of False, so every
+    # render retimed to 30fps unless asked otherwise - duplicating frames on a
+    # 24fps source and discarding motion on a 60fps one, for a tool whose job
+    # is swapping faces rather than transcoding. Worse, that is the path the
+    # audio-desync bug lived on, so the default routed everyone through the
+    # more fragile branch.
+    #
+    # `--keep-audio` was `store_true` with `default=True`, which can only ever
+    # produce True: there was no way to drop audio at all.
+    #
+    # BooleanOptionalAction gives both a real off switch (`--no-keep-fps`,
+    # `--no-keep-audio`) and lets the default be the conservative answer:
+    # hand back what was handed in.
+    program.add_argument('--keep-fps', help='keep the source frame rate', dest='keep_fps',
+                         action=argparse.BooleanOptionalAction, default=True)
+    program.add_argument('--keep-audio', help='keep the source audio', dest='keep_audio',
+                         action=argparse.BooleanOptionalAction, default=True)
     program.add_argument('--keep-frames', help='keep temporary frames', dest='keep_frames', action='store_true')
     program.add_argument('--many-faces', help='process every face', dest='many_faces', action='store_true')
     program.add_argument('--video-encoder', help='adjust output video encoder', dest='video_encoder',

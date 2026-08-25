@@ -81,6 +81,10 @@ class DetectionProcessor(FrameProcessor):
         # needs the count, and `latest_detections` cannot carry it: outside
         # `many_faces` that list is deliberately trimmed to one.
         self.all_detections: List[Detection] = []
+        # A face named for the target being processed right now, overriding
+        # `config.target_face_point`. Photo mode sets it per photo, because the
+        # config holds one point and a photo job holds up to four targets.
+        self.face_point: Optional[Tuple[float, float]] = None
         self._frame_count = 0
         # State-change tracking: None = unknown (first frame), True/False = last known state
         self._face_present: Optional[bool] = None
@@ -108,12 +112,12 @@ class DetectionProcessor(FrameProcessor):
             if self.config.many_faces:
                 self.latest_detections = list(self.all_detections)
             else:
-                # A template names the face to replace, so its choice wins over
-                # "the largest one" — which is only ever a guess at what the
-                # operator meant.
+                # A named face — a template's manifest, or the operator's own
+                # click on a photo — wins over "the largest one", which is only
+                # ever a guess at what they meant.
                 chosen = templates.select_by_point(
                     self.all_detections,
-                    self.config.target_face_point,
+                    self.face_point or self.config.target_face_point,
                     (int(frame.shape[0]), int(frame.shape[1])),
                 )
                 primary = chosen or self.detector.select_primary(self.all_detections)

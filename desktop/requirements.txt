@@ -1,4 +1,6 @@
-PySide6
+# 6.5 is the floor: QtQuick.Effects (MultiEffect) arrived there, and the
+# one-face notice blurs the window behind it with one.
+PySide6>=6.5
 opencv-python
 numpy
 websockets>=12.0

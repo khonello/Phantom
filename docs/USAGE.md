@@ -52,10 +52,12 @@ To use the processed output in Skype, Zoom, Teams, or other video call apps:
 2. Click **"PLATFORM"** dropdown to select:
    - **OBS Virtual Camera** (recommended, Windows/macOS/Linux)
    - **Unity Capture** (Windows only)
-3. Click **"VIRTUAL CAM"** to enable
-4. Status shows: `virtual camera active · device_name`
+3. Nothing to enable. The virtual camera opens with the app and is released
+   only when it closes — there is no toggle, because releasing the device
+   mid-call is what makes a conferencing app fall back to your real webcam
+4. The **VCAM** badge in the viewport's bottom-left corner confirms it is open
 5. In your video call app, select the virtual camera as your camera source
-6. Click **"VCAM ON"** to disable when done
+6. Close Phantom when done
 
 **Why this workflow?** The virtual camera driver (OBS, Unity Capture, v4l2loopback) is a system-level service that presents a fake camera device. roop-cam writes processed frames to this device via `pyvirtualcam`. Your video call app then selects it from the camera picker like any other USB camera.
 
@@ -87,7 +89,9 @@ python pipeline.py -s face.jpg -t video.mp4 -o output.mp4
 -t, --target      Path to target video or image (required)
 -o, --output      Output file path (required)
 --keep-fps        Preserve original video FPS (default: enabled)
+--no-keep-fps     Retime the output to 30fps instead
 --keep-audio      Preserve original audio (default: enabled)
+--no-keep-audio   Render silent
 --keep-frames     Don't delete temp frames after processing
 --many-faces      Swap multiple faces in target
 --quality         Processing quality: fast, optimal, production

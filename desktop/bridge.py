@@ -1,8 +1,10 @@
 import base64
 import gc
+import json
 import os
 import queue
 import struct
+import sys
 import time
 import threading
 from typing import Any, Dict, List, Optional, Tuple
@@ -14,7 +16,7 @@ from PySide6.QtCore import QObject, Signal, Slot, Property, QTimer, Qt
 from PySide6.QtGui import QPixmap, QImage, QPainter
 from PySide6.QtQuick import QQuickPaintedItem
 
-from pipeline.io.ffmpeg import is_image
+from pipeline.io.ffmpeg import IMAGE_EXTENSIONS, is_image, is_video
 from pipeline.api.schema import MAX_PHOTO_BYTES, MAX_PHOTO_TARGETS, PRESETS
 from desktop import auth
 from desktop import effects as overlay_effects
@@ -31,6 +33,44 @@ gc.set_threshold(2800, 15, 15)
 
 
 # ── Frame buffer (thread-safe storage) ────────────────────────────
+
+# The dialog offers exactly what `is_image` accepts. Building the filter from
+# the same tuple is what stops the two drifting: the picker used to offer
+# *.webp while the check quietly refused it, so choosing one did nothing at
+# all - no upload, no message, a dead button.
+_IMAGE_FILTER = 'Images (%s)' % ' '.join('*' + ext for ext in IMAGE_EXTENSIONS)
+
+
+def _unusable_reason(path: str) -> str:
+    """
+    Why a chosen file cannot be a face photo, in the words of what it is.
+
+    "not a supported image" is true of a video and unhelpful about it - the
+    person picked it on purpose and needs to know the shape of the mistake,
+    not that a predicate returned false.
+    """
+    name = os.path.basename(path)
+    if is_video(path):
+        return '%s is a video - faces come from photos' % name
+    if not os.path.isfile(path):
+        return '%s could not be opened' % name
+    formats = ', '.join(ext.lstrip('.') for ext in IMAGE_EXTENSIONS)
+    return '%s is not a supported image (%s)' % (name, formats)
+
+
+def _guard_phrase(message: str) -> str:
+    """
+    The guard's own words, without the framing.
+
+    The pipeline says "Frame guarded - <reason> (<measurement>)", which is
+    right for a log and wrong for a badge sitting beside a live call: the
+    operator can see it is holding, what they need is why.
+    """
+    for prefix in ('Frame guarded \u2014 ', 'Frame guarded - '):
+        if message.startswith(prefix):
+            return message[len(prefix):]
+    return message
+
 
 class FrameBuffer:
     """Background threads write QImages, main thread promotes to QPixmap."""
@@ -166,6 +206,7 @@ class Bridge(QObject):
     webcamVersionChanged = Signal(int)
     liveVersionChanged = Signal(int)
     statusMessageChanged = Signal(str)
+    statusErrorChanged = Signal(bool)
     connectedChanged = Signal(bool)
     connectionLabelChanged = Signal(str)
     embeddingPendingChanged = Signal(bool)
@@ -195,6 +236,9 @@ class Bridge(QObject):
     selectedTemplateChanged = Signal(str)
     photoTargetsChanged = Signal()
     photoResultsChanged = Signal()
+    faceChoiceChanged = Signal()
+    guardReasonChanged = Signal(str)
+    faceNoticeOpenChanged = Signal(bool)
     autoStopWarning = Signal(int)  # minutes remaining
     # Internal: carries a licence-server reply from a worker thread back to the
     # GUI thread. (ok, seconds_remaining, message)
@@ -239,7 +283,20 @@ class Bridge(QObject):
         self._connected = False
         self._connection_label = 'connecting...'
         self._status_message = 'idle'
+        self._status_error = False
         self._detection_status = ''
+        # Why the pipeline is holding the last swapped frame instead of
+        # swapping. It broadcasts this already; the desktop used to drop it, so
+        # a call would freeze with no explanation anywhere.
+        self._guard_reason: str = ''
+        # Which face the operator picked in each uploaded photo, and the faces
+        # they were picking between. Aligned with `_photo_uploaded`, which is
+        # the subset that actually went out - not `_photo_targets`.
+        self._photo_faces: List[Dict[str, Any]] = []
+        self._photo_points: List[Optional[List[float]]] = []
+        # The photo the picker is asking about, or -1 when it is closed.
+        self._picker_index: int = -1
+        self._face_notice_open: bool = False
         self._loading_message = ''
         # Two levels of navigation. The media tab is what kind of thing is
         # being worked on; the mode is which job within it. LIVE and batch
@@ -338,6 +395,9 @@ class Bridge(QObject):
         if self._auth_enabled:
             self.checkAuth()
 
+        # A local run is never gated, so there is no gate to wait behind.
+        self._open_notice_if_unseen()
+
         # The virtual camera is on for the life of the app. Not tied to LIVE,
         # not tied to a session: a conferencing app should be able to select
         # "Phantom" once and never see it disappear. Until the first swapped
@@ -360,6 +420,11 @@ class Bridge(QObject):
     @Property(str, notify=statusMessageChanged)
     def statusMessage(self) -> str:
         return self._status_message
+
+    @Property(bool, notify=statusErrorChanged)
+    def statusError(self) -> bool:
+        """Whether the current status line is a refusal rather than progress."""
+        return self._status_error
 
     @Property(bool, notify=connectedChanged)
     def connected(self) -> bool:
@@ -409,6 +474,69 @@ class Bridge(QObject):
     def detectionStatus(self) -> str:
         return self._detection_status
 
+    @Property(str, notify=guardReasonChanged)
+    def guardReason(self) -> str:
+        """Why the swap is paused, or empty. Shown beside the viewport only.
+
+        Never drawn onto the frame: the frame is what reaches everyone on the
+        call, and a badge burnt into it would announce the failure to them.
+        """
+        return self._guard_reason
+
+    @Property(bool, notify=faceNoticeOpenChanged)
+    def faceNoticeOpen(self) -> bool:
+        return self._face_notice_open
+
+    @Property(bool, notify=faceChoiceChanged)
+    def pickerOpen(self) -> bool:
+        """Whether the operator is being asked which face to swap."""
+        return self._picker_index >= 0
+
+    @Property(str, notify=faceChoiceChanged)
+    def pickerPhoto(self) -> str:
+        """Local path of the photo the picker is showing."""
+        if 0 <= self._picker_index < len(self._photo_uploaded):
+            return self._photo_uploaded[self._picker_index]
+        return ''
+
+    @Property('QVariantList', notify=faceChoiceChanged)
+    def pickerBoxes(self) -> List[Dict[str, float]]:
+        """Normalised face boxes in the photo the picker is showing."""
+        if 0 <= self._picker_index < len(self._photo_faces):
+            boxes = self._photo_faces[self._picker_index].get('boxes', [])
+            return list(boxes)
+        return []
+
+    @Property(int, notify=faceChoiceChanged)
+    def pickerPosition(self) -> int:
+        """Which of the ambiguous photos this is, 1-based, for the label."""
+        pending = self._ambiguous_indices()
+        if self._picker_index in pending:
+            return pending.index(self._picker_index) + 1
+        return 0
+
+    @Property(int, notify=faceChoiceChanged)
+    def pickerTotal(self) -> int:
+        """How many photos need a face chosen in them."""
+        return len(self._ambiguous_indices())
+
+    @Property('QVariantList', notify=faceChoiceChanged)
+    def photoNeedsFace(self) -> List[bool]:
+        """Per chosen photo: holds several faces and none has been named.
+
+        Aligned with `photoTargets` so a tile can say so, rather than letting
+        the job refuse the photo later for a reason the operator could have
+        fixed before it ran.
+        """
+        flags: List[bool] = []
+        for path in self._photo_targets:
+            index = (
+                self._photo_uploaded.index(path)
+                if path in self._photo_uploaded else -1
+            )
+            flags.append(index in self._ambiguous_indices())
+        return flags
+
     @Property(str, notify=loadingMessageChanged)
     def loadingMessage(self) -> str:
         return self._loading_message
@@ -451,25 +579,34 @@ class Bridge(QObject):
             self._set_status('select a face image first')
             return
         if not self._connected:
-            self._set_status('cannot reach server — not connected')
+            self._set_status('cannot reach server — not connected', error=True)
             return
         # Show overlay immediately so the user sees feedback before the
-        # round-trip WebSocket commands below (set_quality, set_enhance,
-        # start_stream) which each block waiting for a server response.
+        # round-trip WebSocket commands below (set_quality, start_stream)
+        # which each block waiting for a server response.
         self._set_loading_message('Initializing...')
         self._awaiting_first_frame = True
         # Fire config commands without waiting for responses — the server
         # processes them in order before start_stream runs, and none of
         # these can fail in a way that should block startup.
+        #
+        # Only quality is pushed. It is the one setting the desktop actually
+        # owns — the dropdown is its control surface, so the desktop's value
+        # is the authoritative one.
+        #
+        # `enhance`, `color_correction` and `preprocessing` are deliberately
+        # not pushed. None of them has a control any more, so the desktop's
+        # value can only ever be its own default — and firing that default
+        # would silently revert a pipeline started with `--no-enhance`,
+        # `ENHANCE=0` or a live `set_realism`, which is exactly the escape
+        # hatch those knobs were left reachable for. The pipeline's config is
+        # the source of truth; `_sync_state_from_server` below reads it back.
         self._client._fire('set_quality', preset=self._quality)
-        self._client._fire('set_enhance', value=self._enhance_active)
-        self._client._fire('set_color_correction', value=self._color_correction_active)
-        self._client._fire('set_preprocessing', value=self._preprocessing_active)
         result = self._client.start_stream()
         if not result.get('success', True):
             self._set_loading_message('')
             self._awaiting_first_frame = False
-            self._set_status(f'start failed: {result.get("error", "unknown error")}')
+            self._set_status(f'start failed: {result.get("error", "unknown error")}', error=True)
             return
         # If we rejoined an existing pipeline, sync UI state from the server
         # so source thumbnail, quality, enhance, etc. reflect reality.
@@ -573,6 +710,18 @@ class Bridge(QObject):
             return
         self._start_vcam()
 
+    # Restoration, colour correction and preprocessing no longer have header
+    # toggles. Colour correction is correctness rather than preference (off
+    # produces a colour step at the swap boundary); preprocessing defaults off
+    # and makes the frame stop looking like the operator's real camera; and
+    # `enhance` is a binary over an axis that is not binary — the believability
+    # knobs are `enhancer_weight` and `enhance_strength`, both already at a
+    # tuned 0.7, so the toggle's off position was not "less plastic" but "no
+    # restoration at all", which on a 128-native swapper reads as a soft face
+    # in a sharp frame. It belongs behind a strength slider, not a switch.
+    #
+    # These slots stay so the capability survives for `set_realism`, the CLI
+    # and state sync.
     @Slot()
     def toggleEnhance(self) -> None:
         new_value = not self._enhance_active
@@ -580,11 +729,6 @@ class Bridge(QObject):
         if self._connected:
             self._client.set_enhance(new_value)
 
-    # Colour correction and preprocessing no longer have header toggles: the
-    # first is correctness rather than preference (off produces a colour step
-    # at the swap boundary), and the second defaults off and makes the frame
-    # stop looking like the operator's real camera. These slots stay so the
-    # capability survives for `set_realism`, the CLI and state sync.
     @Slot()
     def toggleColorCorrection(self) -> None:
         new_value = not self._color_correction_active
@@ -612,11 +756,30 @@ class Bridge(QObject):
             None,
             'Select face image(s)',
             '',
-            'Images (*.jpg *.jpeg *.png *.webp)',
+            _IMAGE_FILTER,
         )
-        valid: List[str] = [p for p in paths if is_image(p)]
-        if not valid:
+        if not paths:
             return
+
+        valid: List[str] = [p for p in paths if is_image(p)]
+        rejected = [p for p in paths if p not in valid]
+        if not valid:
+            # Returning quietly here made the button look broken: the file was
+            # chosen, the dialog closed, and nothing happened or was said.
+            self._set_status(
+                'nothing usable - %s' % '; '.join(
+                    _unusable_reason(p) for p in rejected[:3]
+                ),
+                error=True,
+            )
+            return
+        if rejected:
+            self._set_status(
+                'skipping %d - %s' % (
+                    len(rejected), _unusable_reason(rejected[0]),
+                ),
+                error=True,
+            )
         self._source_thumbnail = valid[0].replace('\\', '/')
         multi = len(valid) > 1
         self._source_label = (
@@ -640,7 +803,7 @@ class Bridge(QObject):
                     images.append({'name': os.path.basename(fp), 'data': data})
                 except Exception as e:
                     self._set_embedding_pending(False)
-                    self._set_status(f'upload error: {e}')
+                    self._set_status(f'upload error: {e}', error=True)
                     return
 
             result = self._client.upload_source(images)
@@ -650,7 +813,7 @@ class Bridge(QObject):
                 # The error already names each refused image and why — the
                 # handler builds it that way precisely so it can be shown.
                 self._set_source_set(False)
-                self._set_status(f'upload error: {result.get("error", "upload failed")}')
+                self._set_status(f'upload error: {result.get("error", "upload failed")}', error=True)
                 return
 
             self._report_upload(result, len(images), multi)
@@ -973,7 +1136,7 @@ class Bridge(QObject):
         if self._templates_loading:
             return
         if not self._connected:
-            self._set_status('cannot load templates - not connected')
+            self._set_status('cannot load templates - not connected', error=True)
             return
         self._templates_loading = True
         self._set_status('loading templates...')
@@ -984,7 +1147,7 @@ class Bridge(QObject):
         try:
             response = self._client.list_templates()
             if response.get('error'):
-                self._set_status('templates unavailable: %s' % response['error'])
+                self._set_status('templates unavailable: %s' % response['error'], error=True)
                 return
 
             entries = (response.get('data') or {}).get('templates', [])
@@ -1025,7 +1188,7 @@ class Bridge(QObject):
 
         response = self._client.set_template(template_id)
         if response.get('error') or response.get('success') is False:
-            self._set_status('error: %s' % (response.get('error') or 'template refused'))
+            self._set_status('error: %s' % (response.get('error') or 'template refused'), error=True)
             return
 
         self._selected_template = template_id
@@ -1059,7 +1222,7 @@ class Bridge(QObject):
         if self._batch_running or not self._source_set or not self._selected_template:
             return
         if not self._connected:
-            self._set_status('cannot reach server - not connected')
+            self._set_status('cannot reach server - not connected', error=True)
             return
 
         self._batch_complete = False
@@ -1073,7 +1236,7 @@ class Bridge(QObject):
 
         result = self._client.start()
         if result.get('success', False) is False and 'error' in result:
-            self._set_status('error: %s' % result['error'])
+            self._set_status('error: %s' % result['error'], error=True)
             return
 
         self._batch_running = True
@@ -1086,19 +1249,41 @@ class Bridge(QObject):
         from PySide6.QtWidgets import QFileDialog
         paths, _ = QFileDialog.getOpenFileNames(
             None, 'Select up to %d target photos' % MAX_PHOTO_TARGETS, '',
-            'Images (*.jpg *.jpeg *.png *.webp *.bmp)',
+            _IMAGE_FILTER,
         )
         if not paths:
             return
 
-        chosen = [q.replace(chr(92), '/') for q in paths[:MAX_PHOTO_TARGETS]]
-        if len(paths) > MAX_PHOTO_TARGETS:
+        # Targets were never filtered, so a file the source path refuses was
+        # accepted here and failed later, per photo, after a round trip. The
+        # two dialogs answering differently is the thing worth removing.
+        usable = [p for p in paths if is_image(p)]
+        rejected = [p for p in paths if p not in usable]
+        if not usable:
             self._set_status(
-                '%d chosen - using the first %d' % (len(paths), MAX_PHOTO_TARGETS)
+                'nothing usable - %s' % '; '.join(
+                    _unusable_reason(p) for p in rejected[:3]
+                ),
+                error=True,
+            )
+            return
+        if rejected:
+            self._set_status(
+                'skipping %d - %s' % (
+                    len(rejected), _unusable_reason(rejected[0]),
+                ),
+                error=True,
+            )
+
+        chosen = [q.replace(chr(92), '/') for q in usable[:MAX_PHOTO_TARGETS]]
+        if len(usable) > MAX_PHOTO_TARGETS:
+            self._set_status(
+                '%d chosen - using the first %d' % (len(usable), MAX_PHOTO_TARGETS)
             )
 
         self._photo_targets = chosen
         self._photo_results = []
+        self._clear_face_choices()
         self._batch_complete = False
         self.photoTargetsChanged.emit()
         self.photoResultsChanged.emit()
@@ -1124,6 +1309,9 @@ class Bridge(QObject):
             return
         self._photo_targets.pop(index)
         self._photo_results = []
+        # The choices were made against the photos that were uploaded, and
+        # this is a different set of photos now.
+        self._clear_face_choices()
         self.photoTargetsChanged.emit()
         self.photoResultsChanged.emit()
         if not self._photo_targets:
@@ -1185,11 +1373,28 @@ class Bridge(QObject):
 
     @Slot()
     def startPhotos(self) -> None:
-        """Upload the chosen photos and run the swap over all of them."""
+        """
+        Upload the chosen photos and run the swap over all of them.
+
+        Or resume: a cancelled picker leaves the photos staged on the pipeline
+        and the choices already made intact, so pressing the button again picks
+        up where it left off rather than re-uploading and asking everything
+        over. Both ways of changing the photo set clear that state, so it can
+        only survive against the same photos it was gathered for.
+        """
         if self._batch_running or not self._source_set or not self._photo_targets:
             return
         if not self._connected:
-            self._set_status('cannot reach server - not connected')
+            self._set_status('cannot reach server - not connected', error=True)
+            return
+
+        if self._photo_faces and not self._photo_results:
+            pending = self._ambiguous_indices()
+            if pending:
+                self._picker_index = pending[0]
+                self.faceChoiceChanged.emit()
+            else:
+                self._launch_photo_job()
             return
 
         self._batch_complete = False
@@ -1211,7 +1416,7 @@ class Bridge(QObject):
             uploaded.append(path)
 
         if not images:
-            self._set_status('no usable photo - %s' % '; '.join(skipped))
+            self._set_status('no usable photo - %s' % '; '.join(skipped), error=True)
             return
         if skipped:
             self._set_status('skipping %d - %s' % (len(skipped), '; '.join(skipped)))
@@ -1220,18 +1425,180 @@ class Bridge(QObject):
         response = self._client.upload_target(images)
         if response.get('error') or response.get('success') is False:
             reason = response.get('error') or 'upload failed'
-            self._set_status('error: %s' % reason)
-            return
-
-        result = self._client.start()
-        if result.get('success', False) is False and 'error' in result:
-            self._set_status('error: %s' % result['error'])
+            self._set_status('error: %s' % reason, error=True)
             return
 
         self._photo_uploaded = uploaded
+        payload = response.get('data') or {}
+        faces = payload.get('faces') or []
+        # One entry per uploaded photo, in the same order. An older pipeline
+        # sends none, in which case nobody is asked and a crowded photo is
+        # refused at swap time exactly as it was before.
+        self._photo_faces = [
+            faces[i] if i < len(faces) else {'boxes': []}
+            for i in range(len(uploaded))
+        ]
+        self._photo_points = [None] * len(uploaded)
+        self.faceChoiceChanged.emit()
+
+        pending = self._ambiguous_indices()
+        if pending:
+            # Asking is the whole point: the guard refuses a crowd because
+            # "which face did you mean?" has no safe default, and starting the
+            # job now would spend the upload on a refusal.
+            self._picker_index = pending[0]
+            self.faceChoiceChanged.emit()
+            self._set_status(
+                'choose a face - %d photo(s) hold more than one' % len(pending)
+            )
+            return
+
+        self._launch_photo_job()
+
+    def _clear_face_choices(self) -> None:
+        """Forget the picker's state, and close it if it is open."""
+        self._photo_faces = []
+        self._photo_points = []
+        self._photo_uploaded = []
+        self._picker_index = -1
+        self.faceChoiceChanged.emit()
+
+    def _ambiguous_indices(self) -> List[int]:
+        """Uploaded photos holding several faces with none chosen yet."""
+        return [
+            i for i, entry in enumerate(self._photo_faces)
+            if len(entry.get('boxes', [])) > 1
+            and i < len(self._photo_points)
+            and self._photo_points[i] is None
+        ]
+
+    def _launch_photo_job(self) -> None:
+        """
+        Send whatever faces were named, then run the job.
+
+        The points go first and separately: they are a statement about the
+        targets already staged, and sending them after `start` would race the
+        job that reads them.
+        """
+        if any(p is not None for p in self._photo_points):
+            named = self._client.set_target_faces(self._photo_points)
+            if named.get('error') or named.get('success') is False:
+                self._set_status(
+                    'error: %s' % (named.get('error') or 'could not set faces'),
+                    error=True,
+                )
+                return
+
+        result = self._client.start()
+        if result.get('success', False) is False and 'error' in result:
+            self._set_status('error: %s' % result['error'], error=True)
+            return
+
         self._batch_running = True
         self.batchRunningChanged.emit(True)
         self._set_status('processing...')
+
+    @Slot(int)
+    def chooseFace(self, box_index: int) -> None:
+        """
+        Record the face the operator clicked, and move on.
+
+        The box's *centre*, as a normalised point - not the box, and not its
+        index. Detection order is not a stable contract, so an index that
+        quietly comes to mean a different person is the silent wrong-person
+        swap the guards exist to prevent.
+        """
+        if self._picker_index < 0:
+            return
+        boxes = self._photo_faces[self._picker_index].get('boxes', [])
+        if not (0 <= box_index < len(boxes)):
+            return
+
+        box = boxes[box_index]
+        self._photo_points[self._picker_index] = [
+            float(box['x']) + float(box['w']) / 2.0,
+            float(box['y']) + float(box['h']) / 2.0,
+        ]
+
+        pending = self._ambiguous_indices()
+        self._picker_index = pending[0] if pending else -1
+        self.faceChoiceChanged.emit()
+
+        if not pending:
+            self._launch_photo_job()
+
+    # ── The one-face notice ───────────────────────────────────────────
+    # The first piece of purely local state the desktop owns. Session state
+    # deliberately lives in Firestore so a reinstall does not cost the customer
+    # their hour; "have they read this" is the opposite - it is worth nothing
+    # to anyone but this machine, and losing it costs one dismissed card.
+
+    def _prefs_path(self) -> str:
+        return os.path.join(self._cache_dir(), 'prefs.json')
+
+    def _read_prefs(self) -> Dict[str, Any]:
+        try:
+            with open(self._prefs_path(), 'r', encoding='utf-8') as fh:
+                loaded = json.load(fh)
+            return loaded if isinstance(loaded, dict) else {}
+        except (OSError, ValueError):
+            # Unreadable is the same as absent: the notice shows again, which
+            # is a repeated card rather than a broken app.
+            return {}
+
+    def _write_pref(self, key: str, value: Any) -> None:
+        prefs = self._read_prefs()
+        prefs[key] = value
+        try:
+            with open(self._prefs_path(), 'w', encoding='utf-8') as fh:
+                json.dump(prefs, fh, indent=2)
+        except OSError as exc:
+            print('[PREFS] not saved: %s' % exc, file=sys.stderr)
+
+    def _open_notice_if_unseen(self) -> None:
+        """
+        Show the one-face notice on a first run.
+
+        Not while the access gate is up: the gate is opaque and covers the
+        whole window, so a card behind it would be dismissed unread by the
+        click that submits a code. `submitCode` calls this again once the
+        gate clears.
+        """
+        if self._face_notice_open or self._auth_required:
+            return
+        if self._read_prefs().get('seen_one_face_notice'):
+            return
+        self._set_face_notice(True)
+
+    def _set_face_notice(self, open_: bool) -> None:
+        if self._face_notice_open != open_:
+            self._face_notice_open = open_
+            self.faceNoticeOpenChanged.emit(open_)
+
+    @Slot()
+    def openFaceNotice(self) -> None:
+        """Show the notice again, from the header."""
+        self._set_face_notice(True)
+
+    @Slot()
+    def dismissFaceNotice(self) -> None:
+        """Close it, and do not open it again on the next launch."""
+        self._set_face_notice(False)
+        self._write_pref('seen_one_face_notice', True)
+
+    @Slot()
+    def cancelPicker(self) -> None:
+        """
+        Close the picker without running the job.
+
+        The photos stay uploaded and the choices already made stay made, so
+        pressing the button again resumes rather than starting over.
+        """
+        if self._picker_index < 0:
+            return
+        self._picker_index = -1
+        self.faceChoiceChanged.emit()
+        self._set_status('choose a face to continue')
 
     def _collect_photo_results(self) -> None:
         """
@@ -1245,7 +1612,7 @@ class Bridge(QObject):
         """
         response = self._client.get_photo_results()
         if response.get('error'):
-            self._set_status('error reading results: %s' % response['error'])
+            self._set_status('error reading results: %s' % response['error'], error=True)
             return
 
         entries = (response.get('data') or {}).get('results', [])
@@ -1324,8 +1691,7 @@ class Bridge(QObject):
             )
         else:
             path, _ = QFileDialog.getOpenFileName(
-                None, 'Select target image', '',
-                'Images (*.jpg *.jpeg *.png *.webp *.bmp)',
+                None, 'Select target image', '', _IMAGE_FILTER,
             )
         if not path:
             return
@@ -1372,7 +1738,7 @@ class Bridge(QObject):
         if self._batch_running or not self._source_set or not self._target_set:
             return
         if not self._connected:
-            self._set_status('cannot reach server — not connected')
+            self._set_status('cannot reach server — not connected', error=True)
             return
 
         # Auto-generate output path if none selected
@@ -1390,7 +1756,7 @@ class Bridge(QObject):
         self._client.set_output(self._output_path)
         result = self._client.start()
         if result.get('success', False) is False and 'error' in result:
-            self._set_status(f'error: {result["error"]}')
+            self._set_status(f'error: {result["error"]}', error=True)
             return
         self._batch_running = True
         self.batchRunningChanged.emit(True)
@@ -1466,9 +1832,20 @@ class Bridge(QObject):
 
     # ── Internal ──────────────────────────────────────────────────────
 
-    def _set_status(self, msg: str) -> None:
+    def _set_status(self, msg: str, error: bool = False) -> None:
+        """
+        Put a line in the header.
+
+        `error` is passed explicitly rather than inferred from the text. Every
+        refusal used to render in the same grey as "idle", so the one line
+        telling someone their photo was rejected looked exactly like the app
+        sitting there doing nothing.
+        """
         self._status_message = msg
         self.statusMessageChanged.emit(msg)
+        if self._status_error != error:
+            self._status_error = error
+            self.statusErrorChanged.emit(error)
 
     def _set_pipeline_running(self, value: bool) -> None:
         if self._pipeline_running != value:
@@ -1526,6 +1903,8 @@ class Bridge(QObject):
         self.authMinutesChanged.emit(self._auth_minutes)
         self._set_auth_error('')
         self._set_auth_required(False)
+        # The gate is opaque and covers the window, so the notice waits for it.
+        self._open_notice_if_unseen()
         if not self._auth_timer.isActive():
             self._auth_timer.start()
 
@@ -1699,6 +2078,11 @@ class Bridge(QObject):
             self._embedding_pending = value
             self.embeddingPendingChanged.emit(value)
 
+    def _set_guard_reason(self, reason: str) -> None:
+        if self._guard_reason != reason:
+            self._guard_reason = reason
+            self.guardReasonChanged.emit(reason)
+
     def _set_detection_status(self, msg: str) -> None:
         if self._detection_status != msg:
             self._detection_status = msg
@@ -1848,6 +2232,13 @@ class Bridge(QObject):
                     self._set_detection_status('no face detected')
                 else:
                     self._set_detection_status('')
+            elif scope == 'GUARD':
+                # Both edges arrive: the pipeline emits on reason *transition*
+                # and again when the guard clears, so this is not a message
+                # that has to be timed out.
+                self._set_guard_reason(
+                    '' if level != 'warning' else _guard_phrase(message)
+                )
             # Remember a failure so PIPELINE_STOPPED is not read as success.
             # A batch reports completion by stopping, so the stop event alone
             # cannot tell a finished job from a failed one.
@@ -1887,7 +2278,7 @@ class Bridge(QObject):
                 self._batch_running = False
                 self.batchRunningChanged.emit(False)
                 if self._batch_error:
-                    self._set_status(f'failed: {self._batch_error}')
+                    self._set_status(f'failed: {self._batch_error}', error=True)
                     self._batch_error = ''
                 else:
                     self._batch_complete = True
@@ -2060,7 +2451,10 @@ class Bridge(QObject):
         try:
             with pyvirtualcam.Camera(**kwargs) as cam:
                 self._set_virtual_cam_active(True)
-                self._set_status(f'virtual camera active · {cam.device}')
+                # Not the device name. The PLATFORM dropdown is the only thing
+                # that sets the backend and it has no auto option, so the name
+                # here could only ever echo the selection already on screen.
+                self._set_status('virtual camera active')
                 while not stop_event.is_set():
                     try:
                         held = self._vcam_queue.get(timeout=0.1)
@@ -2075,7 +2469,7 @@ class Bridge(QObject):
                     cam.send(held)
                     cam.sleep_until_next_frame()
         except Exception as e:
-            self._set_status(f'virtual camera error: {e}')
+            self._set_status(f'virtual camera error: {e}', error=True)
         finally:
             self._set_virtual_cam_active(False)
 

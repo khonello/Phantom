@@ -435,6 +435,7 @@ def group_agreement(embeddings: Sequence[Any]) -> float:
 def check_frame(
     config: FaceSwapConfig,
     detections: Sequence[Detection],
+    face_point: Optional[Tuple[float, float]] = None,
 ) -> GuardResult:
     """
     Evaluate the runtime guards that can be answered from detection alone.
@@ -451,6 +452,9 @@ def check_frame(
     Args:
         config: Thresholds
         detections: Every face found in this frame
+        face_point: A face named for *this* target specifically, overriding
+                    `config.target_face_point`. Photo mode carries one per
+                    uploaded photo, so the config's single value cannot say it
 
     Returns:
         GuardResult naming the first guard that failed
@@ -464,10 +468,13 @@ def check_frame(
         return GuardResult.passed()
 
     # A named face answers the question this guard exists to ask. It refuses
-    # a crowd because "which face did you mean?" has no safe default — once a
-    # template's author has answered it offline, there is nothing left to
-    # protect against, and refusing would reject a scene we shipped on purpose.
-    if config.guard_multi_face and len(detections) > 1 and config.target_face_point is None:
+    # a crowd because "which face did you mean?" has no safe default — once
+    # someone has answered it, whether a template's author offline or the
+    # operator clicking a face in their own photo, there is nothing left to
+    # protect against. Refusing anyway would reject a scene we shipped on
+    # purpose, or a choice the operator just made.
+    named = face_point or config.target_face_point
+    if config.guard_multi_face and len(detections) > 1 and named is None:
         return GuardResult.failed(MULTIPLE_FACES, f'{len(detections)} faces')
 
     if not detections:

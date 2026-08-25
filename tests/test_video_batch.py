@@ -42,6 +42,8 @@ from pipeline.config import FaceSwapConfig
 from pipeline.events import EventBus, BUS as GLOBAL_BUS, BATCH_PROGRESS, STATUS_CHANGED
 from pipeline.io import ffmpeg as ff
 from pipeline.processing.pipeline import ProcessingPipeline
+from pipeline.services import guards
+from pipeline.types import FrameSwap
 
 # The per-frame progress log would bury the results.
 logging.disable(logging.INFO)
@@ -83,10 +85,12 @@ def probe(path: str, stream: str, entries: str) -> str:
 class StubPipeline(ProcessingPipeline):
     """ProcessingPipeline with the ML stages replaced by a provable tint."""
 
-    def __init__(self, config, bus, stop_after=None):
+    def __init__(self, config, bus, stop_after=None, faces_at=None):
         super().__init__(config, bus)
         self.frames_seen = 0
         self._stop_after = stop_after
+        # 1-based frame number that reports more than one face, if any.
+        self._faces_at = faces_at
 
     def _build_processors(self) -> None:
         pass
@@ -94,15 +98,18 @@ class StubPipeline(ProcessingPipeline):
     def _reset_temporal_state(self) -> None:
         pass
 
-    def _swap_frame_faces(self, frame, stabilize):
+    def _swap_frame_detail(self, frame, stabilize, face_point=None):
         self.frames_seen += 1
         if self._stop_after and self.frames_seen >= self._stop_after:
             self._stop_event.set()
+        if self._faces_at and self.frames_seen == self._faces_at:
+            return FrameSwap(frame, 'more than one face (2 faces)',
+                             guards.MULTIPLE_FACES)
         # Force the red channel high - nothing in testsrc is uniformly red, so
         # its presence in the output proves this ran on every frame.
         frame = frame.copy()
         frame[:, :, 2] = 255
-        return frame
+        return FrameSwap(frame, faces=1)
 
 
 def fresh(session: str) -> tuple:
@@ -114,7 +121,8 @@ def fresh(session: str) -> tuple:
 
 
 def run_case(label: str, session: str, audio: bool, keep_fps: bool,
-             stop_after=None, keep_frames: bool = False) -> dict:
+             stop_after=None, keep_frames: bool = False,
+             faces_at=None) -> dict:
     print(f'\n{label}')
     target = os.path.join(WORK, f'{session}_target.mp4')
     output = os.path.join(WORK, f'{session}_out.mp4')
@@ -126,12 +134,14 @@ def run_case(label: str, session: str, audio: bool, keep_fps: bool,
 
     progress: list = []
     statuses: list = []
+    errors: list = []
     bus.on(BATCH_PROGRESS, lambda **kw: progress.append(kw))
     # emit_status publishes to the global BUS, not the injected one.
     handler = lambda **kw: statuses.append(kw.get('message', ''))  # noqa: E731
     GLOBAL_BUS.on(STATUS_CHANGED, handler)
+    GLOBAL_BUS.on('error', lambda **kw: errors.append(kw.get('message', '')))
 
-    pipe = StubPipeline(config, bus, stop_after=stop_after)
+    pipe = StubPipeline(config, bus, stop_after=stop_after, faces_at=faces_at)
     pipe._stop_event.clear()
     temp_dir = ff.get_temp_directory_path(target)
     pipe._process_video_batch(target, output)
@@ -141,7 +151,8 @@ def run_case(label: str, session: str, audio: bool, keep_fps: bool,
 
     return {
         'target': target, 'output': output, 'pipe': pipe,
-        'progress': progress, 'statuses': statuses, 'temp_dir': temp_dir,
+        'progress': progress, 'statuses': statuses, 'errors': errors,
+        'temp_dir': temp_dir,
     }
 
 
@@ -210,6 +221,59 @@ check('stopped early', r['pipe'].frames_seen == 10, f'seen={r["pipe"].frames_see
 check('temp directory cleaned up on cancel', not os.path.isdir(r['temp_dir']))
 check('cancellation reported',
       any('cancel' in s.lower() for s in r['statuses']))
+
+# -- Case 4b: a second face in shot stops the render --------------------
+# The frame used to be written unswapped and the render carried on, so a clip
+# with a passer-by silently stopped being a swap partway through. Only
+# multiple_faces does this: it describes the target, not one frame of it.
+r = run_case('Case 4b - two faces at frame 12', 'sess-4b', audio=True,
+             keep_fps=True, faces_at=12)
+check('no output written on abort', not os.path.isfile(r['output']))
+check('stopped at the offending frame', r['pipe'].frames_seen == 12,
+      f'seen={r["pipe"].frames_seen}')
+check('temp directory cleaned up on abort', not os.path.isdir(r['temp_dir']))
+check('abort reported on the error channel, not as a status',
+      any('2 faces' in e for e in r['errors']), '; '.join(r['errors']))
+check('the reason names the frame',
+      any('frame 12' in e for e in r['errors']), '; '.join(r['errors']))
+check('the reason names where in the clip',
+      any('00:00.5' in e for e in r['errors']), '; '.join(r['errors']))
+check('the reason says no file was written',
+      any('No output was written' in e for e in r['errors']), '; '.join(r['errors']))
+check('an abort is not reported as a cancellation',
+      not any('cancel' in s.lower() for s in r['statuses']))
+
+# -- Case 4c: other guards still pass the frame through -----------------
+print('\nCase 4c - a frame guarded for pose does not abort')
+ff.set_temp_scope('sess-4c')
+pose_target = os.path.join(WORK, 'sess-4c_target.mp4')
+pose_output = os.path.join(WORK, 'sess-4c_out.mp4')
+make_video(pose_target, audio=False)
+pose_config, pose_bus = fresh('sess-4c')
+pose_config.keep_fps = True
+
+
+class PoseGuardedPipeline(StubPipeline):
+    """One frame guarded for something that is about that frame alone."""
+
+    def _swap_frame_detail(self, frame, stabilize, face_point=None):
+        self.frames_seen += 1
+        if self.frames_seen == 12:
+            return FrameSwap(frame, 'face is turned too far away (48 degrees)',
+                             guards.EXTREME_POSE)
+        frame = frame.copy()
+        frame[:, :, 2] = 255
+        return FrameSwap(frame, faces=1)
+
+
+pose_pipe = PoseGuardedPipeline(pose_config, pose_bus)
+pose_pipe._stop_event.clear()
+pose_pipe._process_video_batch(pose_target, pose_output)
+pose_frames = int(probe(pose_target, 'v:0', 'stream=nb_frames') or 0)
+check('a pose-guarded frame does not stop the render',
+      pose_pipe.frames_seen == pose_frames,
+      f'seen={pose_pipe.frames_seen} input={pose_frames}')
+check('the render still produces its output', os.path.isfile(pose_output))
 
 # -- Case 5: keep_frames retains scratch --------------------------------
 r = run_case('Case 5 - keep_frames=True', 'sess-5', audio=True, keep_fps=True,

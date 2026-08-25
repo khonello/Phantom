@@ -12,7 +12,7 @@ Extends the basic types from pipeline/typing.py.
 
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, NamedTuple, Optional, Tuple
 import numpy as np
 import numpy.typing as npt
 from insightface.app.common import Face
@@ -175,6 +175,25 @@ class SwapResult:
             'detection': self.detection.to_dict() if self.detection else None,
             'frame_shape': self.frame.shape if self.frame is not None else None,
         }
+
+
+class FrameSwap(NamedTuple):
+    """
+    What one batch frame came back as.
+
+    The frame alone is enough for video, which passes an unswapped frame
+    through and carries on, and the human-readable reason is enough for a
+    still, which writes nothing and reports it. Neither is enough to decide
+    whether to *abort*: that needs the guard's reason code, because only
+    `multiple_faces` says something about the target rather than about one
+    frame in it. So the code travels with the other two rather than being
+    reconstructed by matching on message text.
+    """
+
+    frame: Frame
+    reason: str = ''    # human-readable; empty when every detected face swapped
+    code: str = ''      # guards.* reason code, empty unless a guard failed
+    faces: int = 0      # faces swapped
 
 
 @dataclass

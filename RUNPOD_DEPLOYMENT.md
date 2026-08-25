@@ -678,9 +678,13 @@ a pod billing a full GPU hour. The check refuses to start instead. See
 
 ## Security
 
-- Proxy URLs are pod-specific — treat them as secrets and do not share them
-- The WebSocket server has no authentication; it relies on RunPod's isolation
-- An SSH key registered on RunPod grants root on the pod
-- `RUNPOD_API_KEY` is forwarded into the pod so it can stop itself. A pod that
-  can stop itself can also stop your others — the key is not scoped
-- Production needs the WebSocket behind an authenticated reverse proxy
+**Proxy URLs are pod-specific — treat them as credentials and do not share
+them.** That is the only mitigation currently standing between a running pod
+and anyone on the internet.
+
+The full posture, including what is deliberately accepted and what must close
+before a paying customer, lives in **[docs/ACCEPTED_RISKS.md](docs/ACCEPTED_RISKS.md)**.
+The short version: the WebSocket API has **no authentication**, frames are
+broadcast to every connected client, and the forwarded `RUNPOD_API_KEY` is
+account-wide. The desktop's access-code gate does not change any of this — it
+is client-side and gates the UI, not the pod.

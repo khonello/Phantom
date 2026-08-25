@@ -448,20 +448,35 @@ def clean_temp(config: FaceSwapConfig, target_path: str) -> None:
 # File type utilities (migrated from pipeline/utilities.py)
 # ============================================================================
 
+# The image formats this application accepts, in one place because the file
+# dialogs offer exactly this list and a check that disagreed with the offer
+# would refuse a file the picker invited.
+#
+# It is a fixed tuple rather than a mimetype lookup. `mimetypes.guess_type`
+# was the previous rule and it silently dropped **.webp**: the mapping only
+# arrived in Python 3.11, and on Windows the module also consults
+# HKEY_CLASSES_ROOT, so the same webp resolved on one machine and not on the
+# next. A supported format failing by environment is worse than one failing
+# outright, because nothing about it looks broken.
+#
+# `.gif` and `.heic` are left out on purpose, and not as an oversight to be
+# corrected later: OpenCV has no decoder for either, so accepting one means
+# uploading a file that is certain to be refused after the round trip. Better
+# to say so while the file picker is still open.
+IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.webp', '.bmp')
+
+
 def is_image(image_path: str) -> bool:
     """
-    Check if path points to an image file.
+    Check if path points to an image file this application can read.
 
     Args:
         image_path: Path to check
 
     Returns:
-        True if path is an existing image file
+        True if path is an existing file with a supported image extension
     """
-    if image_path and os.path.isfile(image_path):
-        mimetype, _ = mimetypes.guess_type(image_path)
-        return bool(mimetype and mimetype.startswith('image/'))
-    return False
+    return bool(image_path) and os.path.isfile(image_path) and has_image_extension(image_path)
 
 
 def is_video(video_path: str) -> bool:
@@ -470,6 +485,12 @@ def is_video(video_path: str) -> bool:
 
     Args:
         video_path: Path to check
+
+    Deliberately still a mimetype lookup, unlike `is_image`. The image formats
+    are a closed set we decode ourselves with OpenCV and offer in a file
+    dialog, so the list has to be exact. Video is whatever FFmpeg can demux —
+    open-ended, never enumerated in a picker, and handed straight to FFmpeg to
+    accept or refuse. A fixed tuple there would reject working files.
 
     Returns:
         True if path is an existing video file
@@ -482,7 +503,10 @@ def is_video(video_path: str) -> bool:
 
 def has_image_extension(image_path: str) -> bool:
     """
-    Check if path has a common image extension.
+    Check if path has a supported image extension, existing or not.
+
+    The dot is part of the match. Without it `endswith('png')` also accepts a
+    file called `diagram-png`, which is not one.
 
     Args:
         image_path: Path to check
@@ -490,7 +514,7 @@ def has_image_extension(image_path: str) -> bool:
     Returns:
         True if path has an image extension
     """
-    return image_path.lower().endswith(('png', 'jpg', 'jpeg', 'webp'))
+    return image_path.lower().endswith(IMAGE_EXTENSIONS)
 
 
 def resolve_relative_path(path: str) -> str:

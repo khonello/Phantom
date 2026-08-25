@@ -319,6 +319,219 @@ check('scratch prefers the network volume on a pod',
 check('PHANTOM_TEMP_DIR is forwarded to the pod',
       'PHANTOM_TEMP_DIR' in forwarded_names)
 
+# ── QML bindings reach something ───────────────────────────────────────
+# A `bridge.x` that does not exist is not a parse error: QML resolves context
+# properties when the binding evaluates, so it surfaces as a silently empty
+# value while the app runs. On a rented GPU that is an expensive way to find a
+# typo, and it is the failure mode every new property this feature added is
+# exposed to.
+print('\nQML bindings reach something')
+
+import ast as _ast  # noqa: E402
+import re as _re  # noqa: E402
+
+_qml_src = read('desktop', 'main.qml')
+_used = sorted(set(_re.findall(r'\bbridge\.([A-Za-z_][A-Za-z0-9_]*)', _qml_src)))
+
+_bridge_tree = _ast.parse(read('desktop', 'bridge.py'))
+_bridge_cls = next(
+    (n for n in _bridge_tree.body
+     if isinstance(n, _ast.ClassDef) and n.name == 'Bridge'), None,
+)
+check('the Bridge class is where it is expected', _bridge_cls is not None)
+
+_exposed = set()
+for _node in (_bridge_cls.body if _bridge_cls else []):
+    if isinstance(_node, _ast.Assign):
+        for _t in _node.targets:
+            if isinstance(_t, _ast.Name):
+                _exposed.add(_t.id)
+    if isinstance(_node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+        for _dec in _node.decorator_list:
+            _name = ''
+            if isinstance(_dec, _ast.Call) and isinstance(_dec.func, _ast.Name):
+                _name = _dec.func.id
+            elif isinstance(_dec, _ast.Name):
+                _name = _dec.id
+            if _name in ('Property', 'Slot'):
+                _exposed.add(_node.name)
+
+_missing = [n for n in _used if n not in _exposed]
+check('every bridge.<member> the QML binds to exists',
+      not _missing,
+      'QML binds to nothing for: %s' % _missing)
+check('the check actually looked at something',
+      len(_used) > 50, '%d members referenced' % len(_used))
+
+# ── The declared command surface ───────────────────────────────────────
+# COMMANDS was read by nothing at all, so it had drifted both ways: five
+# entries no handler answered - a client method written against one would get
+# `Unknown command` - and five working commands missing entirely. It is only a
+# contract if something checks it.
+print('\nThe declared command surface')
+
+from pipeline.api.schema import COMMANDS, SERVER_COMMANDS  # noqa: E402
+
+_handlers_src = read('pipeline', 'api', 'handlers.py')
+_dispatched = set(_re.findall(r"command_type == '([a-z_]+)'", _handlers_src))
+_declared = set(COMMANDS)
+
+check('every declared command has a dispatch branch',
+      not (_declared - _dispatched),
+      'declared but unanswered: %s' % sorted(_declared - _dispatched))
+check('every dispatched command is declared',
+      not (_dispatched - _declared),
+      'dispatched but undeclared: %s' % sorted(_dispatched - _declared))
+
+_server_src = read('pipeline', 'api', 'server.py')
+for _name in SERVER_COMMANDS:
+    check('%s is answered by the server itself' % _name,
+          "action == '%s'" % _name in _server_src and _name not in _declared,
+          'handled before dispatch, so it belongs in neither COMMANDS nor handlers')
+
+# Every command the client can send must be one the server answers. This is the
+# direction that actually bites: a client method is what someone reaches for.
+_controller_src = read('desktop', 'controller.py')
+_sent = set(_re.findall(r"_send\(\s*'([a-z_]+)'", _controller_src))
+_sent |= set(_re.findall(r"_fire\(\s*'([a-z_]+)'", read('desktop', 'bridge.py')))
+_answered = _declared | set(SERVER_COMMANDS)
+check('every command the client can send is answered',
+      not (_sent - _answered),
+      'client would get Unknown command for: %s' % sorted(_sent - _answered))
+
+check('many_faces is deliberately not settable at runtime',
+      'set_many_faces' not in _declared
+      and 'def set_many_faces' not in _controller_src,
+      'it bypasses every runtime guard and both temporal EMAs; CLI only')
+check('keep_frames is deliberately not settable at runtime',
+      'set_keep_frames' not in _declared
+      and 'def set_keep_frames' not in _controller_src,
+      'debugging flag, and a disk filler on a pod; CLI only')
+
+# ── Output format defaults ─────────────────────────────────────────────
+# `--keep-fps` was store_true, so the default retimed every render to 30fps,
+# and `--keep-audio` was store_true with default=True, which can only produce
+# True - there was no way to drop audio at all.
+print('\nOutput format defaults')
+
+_core_src = read('pipeline', 'core.py')
+check('keep_fps defaults to preserving the source rate',
+      FaceSwapConfig().keep_fps is True,
+      'retiming duplicates frames on 24fps and discards motion on 60fps')
+for _flag, _why in (
+    ('keep-fps', 'retiming duplicates frames at 24fps and discards motion at 60'),
+    ('keep-audio', 'store_true with default=True could only ever be True'),
+):
+    _call = _re.search(
+        r"add_argument\('--%s'.*?\)\n" % _flag, _core_src, _re.DOTALL,
+    )
+    check('--%s is declared once and parses' % _flag, _call is not None)
+    _text = _call.group(0) if _call else ''
+    check('--%s has a real off switch' % _flag,
+          'BooleanOptionalAction' in _text, _why)
+    check('--%s defaults to keeping the source' % _flag,
+          'default=True' in _text,
+          'the CLI sets this unconditionally, so it - not the dataclass - '
+          'is the default that reaches a run')
+
+# ── What counts as a photo ─────────────────────────────────────────────
+# The file dialog and the check that follows it have to agree. They did not:
+# the picker offered *.webp while `is_image` asked `mimetypes`, which only
+# learned image/webp in Python 3.11 - and on Windows also consults the
+# registry, so the same file resolved on one machine and not the next.
+# Choosing a webp face did nothing at all, silently.
+print('\nWhat counts as a photo')
+
+from pipeline.io import ffmpeg as ff_helpers  # noqa: E402
+
+bridge_photo_src = read('desktop', 'bridge.py')
+ffmpeg_src = read('pipeline', 'io', 'ffmpeg.py')
+
+check('the accepted formats are named in one place',
+      'IMAGE_EXTENSIONS' in ffmpeg_src)
+check('and webp is among them, since the picker offers it',
+      '.webp' in ff_helpers.IMAGE_EXTENSIONS)
+check('the extension check is not a mimetype lookup',
+      'mimetypes' not in ffmpeg_src.split('def is_image')[1].split('def is_video')[0],
+      'mimetypes.guess_type is environment-dependent for webp and heic')
+
+for ext in ff_helpers.IMAGE_EXTENSIONS:
+    check('the dialog filter entry *%s passes the check' % ext,
+          ff_helpers.has_image_extension('photo' + ext))
+
+check('the dot is part of the match',
+      not ff_helpers.has_image_extension('diagram-png'),
+      'endswith("png") also accepts a file called diagram-png')
+
+for ext in ('.gif', '.heic', '.mp4', '.txt'):
+    check('%s is refused' % ext, not ff_helpers.has_image_extension('x' + ext))
+
+# The list is a claim about what OpenCV can decode, and nothing was checking
+# it. `.gif` is excluded on exactly this basis, so the basis is worth proving.
+import numpy as _np  # noqa: E402
+import cv2 as _cv2  # noqa: E402
+import tempfile as _tempfile  # noqa: E402
+
+_probe = _np.zeros((64, 64, 3), _np.uint8)
+_probe[:, :, 1] = 180
+_work = _tempfile.mkdtemp()
+for _ext in ff_helpers.IMAGE_EXTENSIONS:
+    _path = _os.path.join(_work, 'probe' + _ext)
+    _wrote = _cv2.imwrite(_path, _probe)
+    _back = _cv2.imread(_path) if _wrote else None
+    check('OpenCV round-trips %s' % _ext,
+          _back is not None and _back.shape == _probe.shape,
+          'the list claims these are readable; .gif is excluded for failing this')
+
+# Hex rather than an escaped byte literal: this is the smallest valid GIF,
+# and the point is that OpenCV refuses a *well-formed* one.
+_gif = _os.path.join(_work, 'x.gif')
+with open(_gif, 'wb') as _fh:
+    _fh.write(bytes.fromhex(
+        '47494638396101000100800000000000ffffff21f90401000000002c0000'
+        '0000010001000002024401003b'
+    ))
+check('and still cannot read a gif, which is why it is not on the list',
+      _cv2.imread(_gif) is None,
+      'if this ever passes, gif can be added rather than refused')
+
+check('both file dialogs offer the same list',
+      bridge_photo_src.count('_IMAGE_FILTER') >= 3
+      and "'Images (*.jpg" not in bridge_photo_src,
+      'a literal filter string in either dialog is how they drifted apart')
+check('an empty selection says why rather than returning quietly',
+      '_unusable_reason' in bridge_photo_src)
+check('a refusal is styled as one',
+      'statusError' in bridge_photo_src
+      and 'bridge.statusError' in read('desktop', 'main.qml'),
+      'every refusal used to render in the same grey as idle')
+
+# ── Naming a target face ───────────────────────────────────────────────
+# The point crosses five files between the operator's click and the guard it
+# answers, and a break anywhere in that chain is silent: the photo is simply
+# refused for holding two faces, exactly as if nobody had chosen.
+print('\nNaming a target face')
+
+schema_src = read('pipeline', 'api', 'schema.py')
+handlers_src = read('pipeline', 'api', 'handlers.py')
+guards_src = read('pipeline', 'services', 'guards.py')
+detect_src = read('pipeline', 'processing', 'frame_processor.py')
+controller_src = read('desktop', 'controller.py')
+
+check('the command is declared', "'set_target_faces'" in schema_src)
+check('and dispatched, not left as an unknown command',
+      "command_type == 'set_target_faces'" in handlers_src)
+check('the desktop can send it', 'set_target_faces' in controller_src)
+check('upload reports the faces it found',
+      '_count_target_faces' in handlers_src and 'face_boxes' in handlers_src)
+check('a new upload drops the previous choice',
+      "config.set('target_face_points', [])" in handlers_src,
+      'a stale point would name a face in a photo nobody looked at')
+check('the guard stands down for a named face',
+      'face_point or config.target_face_point' in guards_src)
+check('and selection prefers it over the largest face',
+      'self.face_point or self.config.target_face_point' in detect_src)
+
 # ── Access codes ───────────────────────────────────────────────────────
 # The gate spans four files and a Cloud Function, and the two rules that make
 # it correct are both invisible from any one of them.

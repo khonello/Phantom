@@ -18,7 +18,7 @@ import os
 import tempfile
 import threading
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # Temp directory where uploaded source images are saved server-side
 _UPLOAD_DIR = '/tmp/phantom_uploads'
@@ -509,6 +509,60 @@ def handle_set_alpha(config: FaceSwapConfig, value: float) -> ResponseMessage:
     )
 
 
+def handle_set_keep_fps(config: FaceSwapConfig, value: bool) -> ResponseMessage:
+    """
+    Preserve the target's own frame rate, or retime the output to 30fps.
+
+    An output-format choice rather than a quality one, which is why it is
+    settable at runtime while `many_faces` and `keep_frames` are not: it
+    decides what file the operator gets, not how the face looks.
+
+    It was declared and never implemented, so a desktop render inherited
+    `False` and quietly retimed every clip to 30fps - duration preserved, but
+    frames duplicated or dropped against the source cadence.
+
+    Args:
+        config: FaceSwapConfig
+        value: True to keep the source rate, False to retime to 30fps
+
+    Returns:
+        ResponseMessage with success status
+    """
+    config.set('keep_fps', bool(value))
+    emit_status(
+        'Output frame rate: source' if value else 'Output frame rate: 30fps',
+        scope='API',
+    )
+    return ResponseMessage(
+        type='set_keep_fps',
+        data={'value': bool(value)},
+        success=True,
+    )
+
+
+def handle_set_keep_audio(config: FaceSwapConfig, value: bool) -> ResponseMessage:
+    """
+    Keep the target's audio track in the rendered output, or drop it.
+
+    Args:
+        config: FaceSwapConfig
+        value: True to restore the source audio, False for a silent output
+
+    Returns:
+        ResponseMessage with success status
+    """
+    config.set('keep_audio', bool(value))
+    emit_status(
+        'Output audio: kept' if value else 'Output audio: dropped',
+        scope='API',
+    )
+    return ResponseMessage(
+        type='set_keep_audio',
+        data={'value': bool(value)},
+        success=True,
+    )
+
+
 def handle_set_enhance(config: FaceSwapConfig, value: bool) -> ResponseMessage:
     """
     Enable or disable GFPGAN face enhancement.
@@ -801,6 +855,7 @@ def _clear_template(config: FaceSwapConfig) -> None:
     """
     config.set('template_id', None)
     config.set('target_face_point', None)
+    config.set('target_face_points', [])
     config.set('target_foreground', None)
     config.set('output_dir', None)
 
@@ -896,6 +951,7 @@ def handle_set_template(config: FaceSwapConfig, template_id: str) -> ResponseMes
 def handle_upload_target(
     config: FaceSwapConfig,
     images: List[Dict[str, Any]],
+    pipeline: Optional[ProcessingPipeline] = None,
 ) -> ResponseMessage:
     """
     Receive up to four target photos as base64 bytes and stage them for a
@@ -910,12 +966,20 @@ def handle_upload_target(
     A malformed or oversized image is refused individually and the rest are
     kept, matching how the job itself treats a photo it cannot swap.
 
+    Each accepted photo is then *counted*: the response carries every face
+    found, normalised, so the desktop can ask which one the operator meant
+    before the job runs. Detection happens here rather than at swap time
+    because here is where the person is — a photo refused mid-job for holding
+    two faces tells them only that they already picked the wrong one.
+
     Args:
         config: FaceSwapConfig
         images: List of dicts with 'name' (filename) and 'data' (base64 string)
+        pipeline: ProcessingPipeline, for the detector. Without one the photos
+                  are still staged, just with no face counts
 
     Returns:
-        ResponseMessage with the staged server-side paths
+        ResponseMessage with the staged server-side paths and their faces
     """
     if not images:
         return ResponseMessage(
@@ -990,13 +1054,137 @@ def handle_upload_target(
     config.set('target_paths', saved)
     config.set('target_path', None)
     _clear_template(config)
+    # A choice made about the previous batch says nothing about this one, and a
+    # stale point would silently name a face in a photo nobody has looked at.
+    config.set('target_face_points', [])
     # Uploaded photos are written beside themselves, inside the job directory.
     config.set('output_dir', None)
 
     emit_status(f'Target photos uploaded: {len(saved)}', scope='API')
     return ResponseMessage(
         type='upload_target',
-        data={'paths': saved, 'count': len(saved), 'rejected': rejected},
+        data={
+            'paths': saved,
+            'count': len(saved),
+            'rejected': rejected,
+            'faces': _count_target_faces(saved, pipeline),
+        },
+        success=True,
+    )
+
+
+def _count_target_faces(
+    paths: List[str],
+    pipeline: Optional[ProcessingPipeline],
+) -> List[Dict[str, Any]]:
+    """
+    Every face in each staged photo, as normalised boxes.
+
+    Normalised for the same reason `face_point` is: the desktop draws these
+    over a scaled preview, and a pixel box would be wrong the moment the
+    preview is not the photo's own size.
+
+    Detection failing is not an upload failure. The photos are staged and the
+    job will run; the operator is simply not offered a choice, and a multi-face
+    photo is refused at swap time exactly as it was before.
+
+    Args:
+        paths: Staged photo paths
+        pipeline: ProcessingPipeline, or None
+
+    Returns:
+        One entry per photo, in the same order
+    """
+    entries: List[Dict[str, Any]] = []
+
+    for path in paths:
+        boxes: List[Dict[str, float]] = []
+        if pipeline is not None:
+            try:
+                boxes = pipeline.face_boxes(path)
+            except Exception as e:
+                emit_error(
+                    f'Could not count faces in {os.path.basename(path)}: '
+                    f'{type(e).__name__}: {e}',
+                    scope='HANDLERS',
+                )
+
+        entries.append({
+            'path': path,
+            'name': os.path.basename(path),
+            'boxes': boxes,
+        })
+
+    return entries
+
+
+def handle_set_target_faces(
+    config: FaceSwapConfig,
+    points: List[Any],
+) -> ResponseMessage:
+    """
+    Record which face the operator picked in each uploaded target photo.
+
+    Aligned with `target_paths` by index, `None` for a photo they were not
+    asked about. This is the operator's half of the seam a template's manifest
+    fills from the other side: it names the face, so `select_by_point` uses it
+    and the multi-face guard stands down for that photo alone.
+
+    Args:
+        config: FaceSwapConfig
+        points: One [x, y] normalised pair, or null, per target photo
+
+    Returns:
+        ResponseMessage echoing the stored points
+    """
+    targets = config.target_paths
+    if not targets:
+        return ResponseMessage(
+            type='set_target_faces',
+            data={},
+            success=False,
+            error='No target photos to name faces in — upload them first',
+        )
+
+    if len(points) > len(targets):
+        return ResponseMessage(
+            type='set_target_faces',
+            data={'targets': len(targets)},
+            success=False,
+            error=f'{len(points)} points for {len(targets)} target photos',
+        )
+
+    stored: List[Optional[Tuple[float, float]]] = []
+    for index, point in enumerate(points):
+        if point is None:
+            stored.append(None)
+            continue
+        try:
+            x, y = float(point[0]), float(point[1])
+        except (TypeError, ValueError, IndexError, KeyError):
+            return ResponseMessage(
+                type='set_target_faces',
+                data={'index': index, 'point': point},
+                success=False,
+                error=f'Point {index} is not an [x, y] pair',
+            )
+        if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
+            return ResponseMessage(
+                type='set_target_faces',
+                data={'index': index, 'point': [x, y]},
+                success=False,
+                error=f'Point {index} is outside the image: ({x:.3f}, {y:.3f})',
+            )
+        stored.append((x, y))
+
+    config.set('target_face_points', stored)
+    named = sum(1 for p in stored if p is not None)
+    emit_status(
+        f'Target face chosen in {named} of {len(targets)} photos', scope='API',
+    )
+    return ResponseMessage(
+        type='set_target_faces',
+        data={'points': [list(p) if p else None for p in stored]},
         success=True,
     )
 
@@ -1262,6 +1450,12 @@ def dispatch_command(
         elif command_type == 'set_alpha':
             return handle_set_alpha(config, float(data.get('value', 0.6)))
 
+        elif command_type == 'set_keep_fps':
+            return handle_set_keep_fps(config, bool(data.get('value', True)))
+
+        elif command_type == 'set_keep_audio':
+            return handle_set_keep_audio(config, bool(data.get('value', True)))
+
         elif command_type == 'set_enhance':
             return handle_set_enhance(config, bool(data.get('value', True)))
 
@@ -1287,7 +1481,10 @@ def dispatch_command(
             return handle_set_template(config, str(data.get('id', '')))
 
         elif command_type == 'upload_target':
-            return handle_upload_target(config, data.get('images', []))
+            return handle_upload_target(config, data.get('images', []), ctx.pipeline)
+
+        elif command_type == 'set_target_faces':
+            return handle_set_target_faces(config, data.get('points', []))
 
         elif command_type == 'get_photo_results':
             return handle_get_photo_results(

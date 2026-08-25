@@ -197,8 +197,9 @@ and still blocked on a real transfer path.
       empty library. The assets are a content decision — including where they
       come from and how they are licensed for this use — and that, not the
       code, is the real cost of this feature.
-- [ ] **Face selection as a shared predicate.** *Deferred deliberately — recorded
-      here so the reasoning is not re-derived later.*
+- [~] **Face selection as a shared predicate.** *Still half — the still case is
+      built, the video case is still deferred. Reasoning kept so it is not
+      re-derived later.*
 
       Every mode already answers "which face?" and answers it the same silent
       way: `select_primary` takes the largest detection, in live, render and
@@ -226,12 +227,31 @@ and still blocked on a real transfer path.
       land behind the same interface once there is real footage to tune the hold
       through occlusions against.
 
-      **Partly borrowed already.** Template targets needed the same predicate
-      and took the cheap half of it: `config.target_face_point`, consulted by
-      `DetectionProcessor` ahead of `select_primary`, plus the guard standing
-      down when a face is named. What is still missing is the *operator* naming
-      one — a picker on a still, and identity-following on a stream. The seam
-      is in place; only the ways of filling it are not.
+      **Half of it is now built.** Template targets took the cheap half first:
+      `config.target_face_point`, consulted by `DetectionProcessor` ahead of
+      `select_primary`, plus the guard standing down when a face is named. The
+      operator now fills the same seam on a **still** —
+      `config.target_face_points`, a list because photo mode carries up to four
+      targets and each asks separately; faces counted at upload so the question
+      is asked where the person is; a click on a box, stored as the box's
+      centre. Covered by `tests/test_photo_batch.py` and `tests/test_guards.py`.
+
+      **Still deferred: the video case.** Picking on a stream is picking an
+      *identity* and re-identifying it every frame, and the primitive for it
+      (`LandmarkStabilizer._identity_changed`, a cosine with a 3-of-6 window)
+      wants real footage to tune the hold through occlusions against. The
+      interface it would land behind is the one the still case just proved.
+- [x] **A render stops on a multi-face frame** rather than writing it
+      unswapped. The frame used to be passed through with the reason discarded,
+      so a clip with a passer-by silently stopped being a swap partway through
+      and still reported success. Only `multiple_faces` aborts: the other
+      guards describe one frame, this one describes the target. Reported via
+      `emit_error`, because the desktop reads a batch's success from whether an
+      error arrived. Covered by `tests/test_video_batch.py` cases 4b and 4c.
+- [x] **Guard reasons reach the operator.** The pipeline broadcast them all
+      along; `desktop/bridge.py` dropped `scope='GUARD'` while the pipeline was
+      running, which is exactly when they fire. Now a viewport badge — never
+      drawn on the frame, which reaches every participant on the call.
 - [ ] **Decide and implement the overflow policy** for a batch job that outlives
       its session: refuse / bill overflow / absorb / detach and hold the result.
 - [ ] **Decide whether upload time is billed.** Overlapping transfer with worker

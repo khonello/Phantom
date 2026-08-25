@@ -32,6 +32,11 @@ class FaceSwapConfig:
     # what answers the multi-face guard: the ambiguity was resolved offline.
     template_id: Optional[str] = None
     target_face_point: Optional[Tuple[float, float]] = None
+    # The same answer, given by the operator instead of by a manifest, once per
+    # uploaded photo. A list rather than a second scalar because photo mode
+    # carries up to four targets and each asks the question separately; index
+    # aligns with `target_paths`, and None means "nobody chose for this one".
+    target_face_points: List[Optional[Tuple[float, float]]] = field(default_factory=list)
     # RGBA layer drawn over the finished swap, for hair, glasses or a hand that
     # belongs in front of the face. Carried as a path rather than as a Template
     # so the pipeline stays unaware of the library.
@@ -44,7 +49,9 @@ class FaceSwapConfig:
 
     # Processing pipeline
     frame_processors: List[str] = field(default_factory=lambda: ['face_swapper'])
-    keep_fps: bool = False
+    # Hand back what was handed in: preserve the source rate unless asked to
+    # retime. `pipeline/core.py` carries the reasoning and the matching flag.
+    keep_fps: bool = True
     keep_audio: bool = True
     keep_frames: bool = False
     many_faces: bool = False
@@ -271,6 +278,7 @@ class FaceSwapConfig:
             'target_paths': self.target_paths,
             'template_id': self.template_id,
             'target_face_point': self.target_face_point,
+            'target_face_points': self.target_face_points,
             'target_foreground': self.target_foreground,
             'output_dir': self.output_dir,
             'output_path': self.output_path,

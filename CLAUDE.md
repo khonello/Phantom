@@ -30,7 +30,10 @@ same compositor.
 
 **Next actions live in [docs/PENDING_WORK.md](docs/PENDING_WORK.md)** — a runbook
 from starting the pod through to the outstanding implementation work.
-[docs/TODO.md](docs/TODO.md) remains the backlog.
+[docs/TODO.md](docs/TODO.md) remains the backlog, and
+**[docs/ACCEPTED_RISKS.md](docs/ACCEPTED_RISKS.md)** records what is knowingly
+wrong and why — including the unauthenticated WebSocket, which must close
+before a paying customer. Read it before assuming a gap is unnoticed.
 
 - Working: realtime stream, aligned-space compositing, RunPod deployment,
   desktop LIVE mode, batch **image** and **video**, **photo mode** (up to four
@@ -221,8 +224,10 @@ clicked. `color_correction` is left alone for a different reason — it is on an
 stays on (see below).
 
 ### Header toggles — what a consumer is allowed to change
-**One: ENHANCE.** `VCAM`, `COLOR` and `PREPROC` were all removed, and the
-distinction is worth keeping straight — a toggle implies a choice worth making.
+**None.** The header is status only: the app name on the left, the status
+message, connection state and the media tabs on the right. `VCAM`, `COLOR`,
+`PREPROC` and finally `ENHANCE` were all removed, and the distinction between
+the reasons is worth keeping straight — a toggle implies a choice worth making.
 
 - **VCAM** was removed because it was never a quality knob: it is where the
   output *goes*. The earlier note here said it "is the control that makes the
@@ -237,11 +242,20 @@ distinction is worth keeping straight — a toggle implies a choice worth making
   The camera is now simply **on**: opened when the app opens, released only when
   it closes — not tied to a mode or a session. An open device nobody has
   selected costs nothing, while a device that comes and goes is what makes a
-  conferencing app go looking for another one. The header shows its state.
-- **ENHANCE** is the one with genuine taste in it: restoration is what decides
-  whether the output reads as a real call or as AI, so "too plastic" is a
-  legitimate opinion. Binary is the wrong shape for it long-term — the real axis
-  is *how much* — but it stays until there is a strength slider.
+  conferencing app go looking for another one. The **VCAM badge in the
+  viewport's bottom-left corner** shows its state — the header carried a
+  second copy of the same bit and it was cut as redundant.
+- **ENHANCE** was removed last, and it is the subtlest of the four because the
+  opinion behind it is legitimate: restoration is what decides whether the
+  output reads as a real call or as AI, so "too plastic" is a real complaint.
+  What made it wrong was the *shape*. The believability axis is `enhancer_weight`
+  and `enhance_strength`, both already at a tuned `0.7` — restoration is
+  deliberately partial, keeping some of the input's imperfection. So the
+  toggle's off position was never "less plastic", it was **no restoration at
+  all**: a 128-native swap upscaled into a sharp frame, which is a soft face
+  that does not match the picture around it. A switch across an axis that is
+  not binary. It belongs behind a strength slider; until that exists,
+  `set_realism` is the honest way to A/B it.
 - **COLOR** was removed because it is correctness, not preference. It matches
   the swapped face's skin tone to the target; off produces a colour step at the
   boundary, which is failure mode 2. Turning it off never makes output better.
@@ -249,11 +263,17 @@ distinction is worth keeping straight — a toggle implies a choice worth making
   "the output stops looking like the operator's real camera" — the opposite of
   the design target. It is a rescue knob for terrible lighting.
 
-Both remain reachable via `set_realism`, the CLI and env: they were removed from
-the consumer's surface, not from the product. Note also that the header toggles
-are realtime-only, while the settings they set are global — a photo or render
-job inherits whatever the config holds, which is another reason not to expose
-knobs there that nobody should be turning.
+All of them remain reachable via `set_realism`, the CLI and env: they were
+removed from the consumer's surface, not from the product. That escape hatch is
+only real if the desktop stops asserting its own defaults — `startPipeline`
+used to fire `set_enhance`, `set_color_correction` and `set_preprocessing` on
+every start, which silently reverted a pipeline launched with `--no-enhance`.
+It now pushes **only** `set_quality`, the one setting the desktop actually owns
+a control for, and reads the rest back via `_sync_state_from_server`.
+
+Note also that the toggles were realtime-only, while the settings they set are
+global — a photo or render job inherits whatever the config holds, which is
+another reason not to expose knobs there that nobody should be turning.
 
 `tracker`, `blend`, `luminance_blend` and `redetect_interval` remain on
 `FaceSwapConfig` so the `set_blend` / `set_alpha` API commands keep working, but
@@ -382,11 +402,22 @@ never update temporal state. `FaceCompositor.composite` returns `None` rather th
 the untouched frame when it cannot produce a swap: on the live path the untouched
 frame is the operator's real face.
 
-Batch splits by what an unswapped output would mean:
+Batch splits by what an unswapped output would mean, and **multiple faces is
+the one guard that splits again**:
 
-- **Video** passes the original frame through. The target is a file the
-  operator supplied, not their camera, and one unswapped frame mid-clip is a
-  smaller defect than a hole.
+- **Video** passes the original frame through — for pose, confidence and
+  occlusion. The target is a file the operator supplied, not their camera, and
+  one unswapped frame mid-clip is a smaller defect than a hole. Those guards
+  describe a single frame: a turn of the head, a hand, a blurred moment.
+- **Video, multiple faces** stops the job and says where. That guard describes
+  the *target*, not a frame of it — a second person in shot will almost
+  certainly persist, so every frame they appear in is written unswapped and the
+  render silently stops being a swap partway through while reporting success.
+  The reason names the frame, the timecode and the count, and goes out through
+  `emit_error`: the desktop reads a batch's success from whether an error
+  arrived, so a warning would render as "processing complete". No partial file
+  survives — the abort precedes `create_video` and the existing `finally`
+  cleans the extracted frames.
 - **A still** writes nothing at all. There is no surrounding footage to carry
   it, so an unswapped photo is a copy of the input wearing the output's name —
   indistinguishable from success to whoever opens the folder, which is the
@@ -406,6 +437,45 @@ that lack it. The two are not on the same scale, so which was used is recorded.
 Thresholds are `guard_*` fields on `FaceSwapConfig`, settable via `set_realism`
 (clamped, not rejected). `guards` disables the runtime guards wholesale;
 `many_faces` bypasses them.
+
+### Naming a face
+The multi-face guard fires because "which face did you mean?" has no safe
+default, so **anyone who answers the question dismisses the guard**. Two can:
+
+| Who | How | Field |
+|---|---|---|
+| A template's author | `face_point` in the manifest, offline | `target_face_point` |
+| The operator | Clicks a face over their own photo | `target_face_points[i]` |
+
+Both are **normalised points, not indices** — detection order is not a stable
+contract, and an index that comes to mean a different person is the silent
+wrong-person swap the guards exist to prevent. `templates.select_by_point`
+resolves by containment, then nearest centre; `DetectionProcessor` consults it
+ahead of `select_primary` and `guards.check_frame` stands down when one is set.
+
+The operator's is a **list** because photo mode carries up to four targets and
+each asks separately; the config's single point would name a face in photos
+nobody looked at. Aligned with `target_paths`, `None` where nothing was asked,
+cleared by every new `upload_target` and by `_clear_template`. It is threaded
+explicitly through `_process_photos_batch` → `_process_image_batch` →
+`_swap_frame_detail` rather than by mutating config mid-loop.
+
+Faces are counted at **upload** (`handle_upload_target` → `face_boxes`), not at
+swap time, because that is where the person is: a photo refused mid-job tells
+them only that they already picked the wrong one.
+
+**Sources are deliberately excluded.** `check_source` has no such escape and
+should not get one — a source builds the identity every frame is swapped *to*,
+and averaging that out of a crowd is unrecoverable downstream.
+
+### The operator is told
+A guarded frame is silent by design on the *call* — nothing is drawn on it,
+because the frame reaches every participant. It was silent in the app too,
+which was an oversight: the pipeline broadcasts the reason as a `STATUS_CHANGED`
+with `scope='GUARD'`, and the bridge dropped it while the pipeline was running.
+It now sets `guardReason`, shown as a badge in the viewport beside the
+detection badge. Both edges arrive (`_guard_frame` on transition,
+`_clear_guard` when it lifts), so it is not a message that needs timing out.
 
 ### Photo mode
 A third job shape beside live and batch video: **one to four target photos, each
@@ -440,6 +510,95 @@ under the cap is uploaded byte-for-byte; only a camera original over it is
 re-encoded, quality first and dimensions only after, in 10% steps with a floor
 of 1600px on the long side. Losing detail defeats the point of a photo swap, so
 the transfer budget gives way before the image does.
+
+### Output format, and the commands that answer for it
+`keep_fps` and `keep_audio` decide what *file* the operator gets back, not how
+the face looks, which is why they are settable at runtime while `many_faces`
+and `keep_frames` are not. Both were declared in `COMMANDS` with no handler
+behind them, so a client method written against either returned
+`Unknown command`.
+
+Their defaults were worse than the missing handlers. `--keep-fps` was
+`store_true`, so **every render retimed to 30fps** unless asked otherwise —
+duplicating frames on a 24fps source, discarding motion on a 60fps one, and
+routing everyone through the branch the audio-desync bug lived on. Both
+`docs/USAGE.md` and `docs/TROUBLESHOOTING.md` already described it as "enabled
+by default", so the docs had the intended behaviour and the code disagreed.
+`--keep-audio` was `store_true` with `default=True`, which can only ever
+produce True — there was no way to drop audio at all.
+
+Both are now `argparse.BooleanOptionalAction` with `default=True`, so
+`--no-keep-fps` and `--no-keep-audio` exist and work, and the default hands
+back what was handed in. Note the CLI is what actually decides this:
+`core.py` runs `CONFIG.set('keep_fps', args.keep_fps)` unconditionally, so the
+dataclass default never reaches a CLI run — it is set to match rather than to
+lead.
+
+**The desktop deliberately does not push either on a render.** It has no
+control for them, and asserting a default it never chose is exactly the
+`set_enhance` mistake recorded above — `startPipeline` used to revert a
+pipeline launched with `--no-enhance`. Fixing the default fixes it for every
+path at once; sending it from the desktop would re-break the CLI's escape
+hatch.
+
+`COMMANDS` is now checked against `dispatch_command` in both directions by
+`tests/test_wiring.py`, along with the rule that every command the client can
+send is one the server answers. It had drifted both ways because nothing read
+it — it is documentation only, and documentation nothing checks is a comment.
+
+### What counts as a photo
+`IMAGE_EXTENSIONS` in `pipeline/io/ffmpeg.py` is the single list: `.jpg`,
+`.jpeg`, `.png`, `.webp`, `.bmp`. Every file dialog builds its filter from it
+(`_IMAGE_FILTER` in `desktop/bridge.py`) and `is_image` checks against it, so
+the picker cannot offer something the check refuses.
+
+It is a fixed tuple rather than `mimetypes.guess_type`, which is what it used
+to be. That silently dropped **webp**: the mapping only arrived in Python 3.11,
+and on Windows the module also reads `HKEY_CLASSES_ROOT`, so the same file
+resolved on one machine and not the next — while the dialog offered `*.webp`
+either way. Selecting one did nothing at all, with no message. A supported
+format failing by environment is worse than one failing outright, because
+nothing about it looks broken.
+
+`.gif` and `.heic` are excluded deliberately, not pending: OpenCV decodes
+neither, so accepting one means uploading a file certain to be refused after a
+round trip. Better to say so while the picker is still open. An *animated*
+webp lands on the other side of that line for the same reason rather than an
+opposite one — OpenCV reads its first frame, and the first frame is a real
+still of the person, which the guards then judge normally. It is accepted
+silently; nobody is told the animation was flattened.
+
+`tests/test_wiring.py` round-trips every extension on the list through
+`imwrite`/`imread` and asserts a well-formed gif still fails, so the list stays
+a checked claim about what OpenCV reads rather than a remembered one. `is_video` stays a
+mimetype lookup on purpose — video is whatever FFmpeg can demux, never
+enumerated in a dialog, so a fixed list there would reject working files.
+
+Two related rules the same bug exposed: a dialog that yields nothing usable
+**says why** (`_unusable_reason` names the file and whether it was a video or
+an unsupported format) rather than returning quietly, and `_set_status` takes
+an explicit `error` flag that colours the header line — every refusal used to
+render in the same grey as "idle".
+
+### The one-face notice
+Shown once, on a first run, over a blurred window; dismissed by the button or a
+click outside, and reopened from the `?` beside the media tabs. The flag lives
+in `prefs.json` under `Bridge._cache_dir()` — the first purely local state the
+desktop owns, since session state deliberately lives in Firestore so a reinstall
+does not cost the customer their hour. Unreadable prefs mean the card shows
+again, which is a repeat rather than a fault.
+
+It says **three rules, not one**. "Exactly one face" stopped being true when the
+picker landed: a target photo may hold several so long as the operator says
+which. A rule stated more strictly than the app enforces it teaches people to
+distrust the next one.
+
+The blur is why `main.qml` has an `appBody` wrapper: `MultiEffect` needs the
+window's content in one item to render through. The gate, the session card, the
+auto-stop dialog and the notice itself sit **outside** it — an overlay that
+blurred itself would be unreadable. `layer.enabled` is toggled rather than
+`blurEnabled`, so the effect costs nothing while the notice is closed, which is
+almost always: there is a live 30fps viewport underneath.
 
 ### Desktop navigation
 Two levels. The header's far right picks the **media tab** — VIDEO or IMAGE —

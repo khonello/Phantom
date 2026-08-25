@@ -104,26 +104,48 @@ PRESETS: Dict[str, Dict[str, Any]] = {
 MAX_PHOTO_TARGETS = 4
 MAX_PHOTO_BYTES = 6 * 1024 * 1024
 
-# Commands accepted by the control server (POST /control)
+# Every command the server accepts, and only those.
+#
+# This list is checked against `handlers.dispatch_command` by
+# `tests/test_wiring.py`, in both directions. It used to be neither checked nor
+# read by anything, and had drifted both ways: five entries no handler
+# answered - so a client method could be written against a declaration and get
+# `Unknown command` - and five working commands missing entirely.
+#
+# Two settings are deliberately **absent** rather than pending:
+#
+#   `many_faces`  swaps every face in frame, which bypasses every runtime
+#                 guard and both temporal EMAs. A live switch for it works
+#                 against the guards; it stays CLI/env (`--many-faces`).
+#   `keep_frames` retains the extracted PNG scratch - a debugging aid, and on
+#                 a pod a disk filler at roughly 4 MB per 1080p frame. CLI
+#                 only (`--keep-frames`).
+#
+# `keep_fps` and `keep_audio` are here because they are output-format choices,
+# not quality knobs: they decide what file the operator gets, not how the face
+# looks.
 COMMANDS: Dict[str, Dict[str, Any]] = {
     # Source / target / output
     'set_source':      {'path': str},
+    'set_source_paths': {'paths': list},
+    'upload_source':   {'images': list},
     'set_target':      {'path': str},
     'upload_target':   {'images': list},
+    'set_target_faces': {'points': list},
     'list_templates':  {},
     'set_template':    {'id': str},
     'get_photo_results': {},
     'set_output':      {'path': str},
-    # Processing settings
+    # Output format
     'set_keep_fps':    {'value': bool},
-    'set_keep_frames': {'value': bool},
     'set_keep_audio':  {'value': bool},
-    'set_many_faces':  {'value': bool},
     # Stream tuning
     'set_quality':     {'preset': str},
     'set_blend':       {'value': float},
     'set_alpha':       {'value': float},
     'set_enhance':     {'value': bool},
+    'set_color_correction': {'value': bool},
+    'set_preprocessing': {'value': bool},
     'set_realism':     {'values': dict},
     # Stream routing
     'set_input_url':   {'url': str},
@@ -133,11 +155,15 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
     'start':           {},
     'start_stream':    {},
     'stop':            {},
-    'stop_stream':     {},
     'cleanup_session': {},
+    'get_state':       {},
     'keep_alive':      {},
     'shutdown':        {},
 }
+
+# Answered by `WebSocketAPIServer` itself, before dispatch ever runs, so it is
+# not in COMMANDS and has no handler.
+SERVER_COMMANDS = ('health',)
 
 # Events emitted by the pipeline (GET /status, future WebSocket push)
 EVENTS: Dict[str, Dict[str, Any]] = {
@@ -220,6 +246,7 @@ class ResponseMessage(APIMessage):
 CMD_SET_SOURCE = 'set_source'
 CMD_SET_TARGET = 'set_target'
 CMD_UPLOAD_TARGET = 'upload_target'
+CMD_SET_TARGET_FACES = 'set_target_faces'
 CMD_LIST_TEMPLATES = 'list_templates'
 CMD_SET_TEMPLATE = 'set_template'
 CMD_GET_PHOTO_RESULTS = 'get_photo_results'

@@ -6,7 +6,9 @@ Refusing inputs that would produce a wrong swap, instead of swapping them badly.
 review in `pipeline/services/database.py` and the runtime path in
 `pipeline/processing/pipeline.py`.
 
-**Thresholds are not calibrated, but the measurement for it is built.** Run:
+**Thresholds are not calibrated, but the measurement for it is built.** This
+is a recorded, accepted risk rather than an oversight — see
+[ACCEPTED_RISKS.md](ACCEPTED_RISKS.md). Run:
 
 ```bash
 python pipeline.py --stream --guard-observe --guard-report calibration.json
@@ -37,6 +39,10 @@ Everything described here is present with one deliberate deviation: **zero faces
 is not a guarded frame.** It is the ordinary case of someone stepping out of
 shot, already handled by marking the stabilizer missing, and holding the last
 good frame there would keep a stale face over an empty chair.
+
+Two things have changed since, both about *multiple faces* specifically — see
+[Naming a face](#naming-a-face) and [What a render does](#what-a-render-does)
+below.
 
 ---
 
@@ -94,7 +100,8 @@ Applied when images are uploaded, before any embedding is built.
 
 | Guard | Rule |
 |---|---|
-| **Multiple faces** | Reject — we cannot know which person was meant |
+| **Multiple faces** | Reject — we cannot know which person was meant, and no
+picker can fix it: see [Naming a face](#naming-a-face) |
 | **No face** | Reject |
 | **Face too small** | Reject under ~110 px on the shorter side; the embedding would come from an upscaled blur |
 | **Blurred** | Reject below a Laplacian-variance floor; a soft source gives a soft swap on every frame |
@@ -143,6 +150,64 @@ frame ─▶ detect ─┬─ 0 faces ──────────────
 
 Detection already runs every frame, so all of these read data the pipeline
 already has. The cost is negligible.
+
+---
+
+## Naming a face
+
+The multi-face guard fires because *"which face did you mean?"* has no safe
+default. It follows that anyone who **answers** the question dismisses the
+guard, and there are now two ways to answer:
+
+| Who answers | How | Where |
+|---|---|---|
+| A template's author | `face_point` in the manifest, offline | `config.target_face_point` |
+| The operator | Clicks a face over their own photo | `config.target_face_points[i]` |
+
+Both are **normalised points, not indices.** Detection order is not a stable
+contract — it can shift with a model pack — and an index that quietly comes to
+mean a different person is exactly the silent wrong-person swap this document
+exists to prevent. `templates.select_by_point` resolves a point by containment,
+then by nearest centre.
+
+The operator's version is a list because photo mode carries up to four targets
+and each asks the question separately; a single point would name a face in
+photos nobody looked at. It is aligned with `target_paths` by index, `None` for
+a photo that was never ambiguous, and cleared by every new upload.
+
+Detection for the picker runs at **upload**, in `handle_upload_target`, not at
+swap time. That is where the person is: a photo refused mid-job tells them only
+that they already picked the wrong one.
+
+**Sources are deliberately excluded.** `check_source` has no such escape and
+should not get one. A source builds the identity that every subsequent frame is
+swapped *to*, and averaging that out of a crowd is wrong in a way nothing
+downstream recovers from.
+
+---
+
+## What a render does
+
+Batch splits by what an unswapped output would mean, and the split is now three
+ways rather than two:
+
+| | Guarded for pose, confidence, occlusion | Guarded for **multiple faces** |
+|---|---|---|
+| **Video** | Frame passed through, job continues | **Job stops**, no output written |
+| **Still** | Nothing written, reason recorded | Nothing written, reason recorded |
+
+Pass-through was the original rule for all of them, and it was wrong for one
+case. The other guards describe **one frame** — a turn of the head, a hand, a
+blurred moment — and one unswapped frame mid-clip is a smaller defect than a
+hole. A second face describes the **target**: it will almost certainly persist,
+so every frame it appears in is written unswapped, and the render silently stops
+being a swap partway through while reporting success.
+
+The abort names the frame, the timecode and the count, and goes out through
+`emit_error` — the desktop reads a batch's success from whether an error
+arrived, so a warning would let it render as "processing complete". No partial
+file is possible: the abort precedes `create_video`, and the extracted frames
+are cleaned in the existing `finally`.
 
 ---
 
@@ -244,6 +309,9 @@ guard_outlier_sim       …         cosine floor for source consistency — need
 | Virtual camera holds last frame | `desktop/bridge.py::_run_vcam` — re-send on empty queue |
 | Thresholds | `pipeline/config.py`, `pipeline/api/handlers.py` |
 | Rejection reasons in the UI | `desktop/bridge.py`, `desktop/main.qml` |
+| Render abort on multi-face | `pipeline/processing/pipeline.py::_process_frame_files` |
+| Operator naming a face | `pipeline/api/handlers.py::handle_set_target_faces`, `desktop/bridge.py::chooseFace` |
+| Guard reason reaching the operator | `desktop/bridge.py::guardReason` — a badge beside the viewport, never on the frame |
 
 Two fixes belong in the same pass, independent of the guards: replace leftmost
 with largest, and reset the stabilizer when the selected face changes identity —

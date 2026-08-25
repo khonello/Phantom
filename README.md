@@ -114,7 +114,8 @@ The GUI supports LIVE, VIDEO and IMAGE modes with:
 
 ```
 usage: pipeline.py [-h] [-s SOURCE_PATH] [-t TARGET_PATH] [-o OUTPUT_PATH]
-                   [--keep-fps] [--keep-audio] [--keep-frames] [--many-faces]
+                   [--keep-fps | --no-keep-fps] [--keep-audio | --no-keep-audio]
+                   [--keep-frames] [--many-faces]
                    [--video-encoder {libx264,libx265,libvpx-vp9}]
                    [--video-quality [0-51]] [--max-memory MAX_MEMORY]
                    [--execution-provider {cpu,cuda,rocm,dml}]
@@ -133,8 +134,10 @@ options:
   -s, --source              Source image or embedding (.npy file)
   -t, --target              Target image or video
   -o, --output              Output file or directory
-  --keep-fps                Preserve original frame rate
-  --keep-audio              Preserve original audio
+  --keep-fps                Preserve the source frame rate (default)
+  --no-keep-fps             Retime the output to 30fps instead
+  --keep-audio              Preserve the source audio (default)
+  --no-keep-audio           Render silent
   --keep-frames             Keep temporary extracted frames
   --many-faces              Process all faces (not just largest)
   --video-encoder           Encoder: libx264 (default), libx265, libvpx-vp9

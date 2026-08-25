@@ -241,6 +241,23 @@ check('small face guarded', r.reason == guards.TOO_SMALL, r.message)
 r = guards.check_frame(config, [make_detection(size=200, yaw_offset=0.5)])
 check('extreme pose guarded', r.reason == guards.EXTREME_POSE, r.message)
 
+crowd = [make_detection(x=50), make_detection(x=250)]
+r = guards.check_frame(config, crowd, face_point=(0.2, 0.5))
+check('a face named for this target answers the multi-face guard', r.ok, r.message)
+
+named = FaceSwapConfig()
+named.target_face_point = (0.2, 0.5)
+r = guards.check_frame(named, crowd)
+check('so does one named on the config, as a template names it', r.ok, r.message)
+
+r = guards.check_frame(config, crowd, face_point=None)
+check('and with neither, the crowd is still refused',
+      r.reason == guards.MULTIPLE_FACES, r.message)
+
+r = guards.check_frame(config, [make_detection(size=50)], face_point=(0.2, 0.5))
+check('naming a face does not disable the other guards',
+      r.reason == guards.TOO_SMALL, r.message)
+
 many = FaceSwapConfig()
 many.many_faces = True
 r = guards.check_frame(many, [make_detection(x=50), make_detection(x=250)])
