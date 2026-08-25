@@ -1336,21 +1336,33 @@ Window {
                         }
                     }
 
-                    // Bring the self-monitor back. Sits exactly where it
-                    // was, so the way back is where the thing went.
+                    // Bring the self-monitor back. Sits exactly where it was,
+                    // so the way back is where the thing went — and together
+                    // with the panel's own X it forms one toggle occupying one
+                    // slot, rather than two controls for the same thing.
+                    //
+                    // Styled as a control, not as a label. It was first written
+                    // in the palette of the panel's "YOU · UNPROCESSED" caption
+                    // — 8px, #33335a, a near-invisible border — which is right
+                    // for a caption sitting on top of content and wrong for the
+                    // only way back to the operator's own face. It now matches
+                    // the tab pills and the header's ?, the two things in this
+                    // app that are unmistakably pressable.
                     Rectangle {
                         anchors { top: parent.top; right: parent.right; topMargin: 16; rightMargin: 16 }
-                        width: 54; height: 22; radius: 6
+                        width: 62; height: 26; radius: 6
                         visible: bridge.pipelineRunning && miniScreen.manuallyHidden
-                        color: restoreHover.containsMouse ? "#1e1e38" : "#c0111120"
-                        border.color: "#1a1a30"; border.width: 1
+                        color: restoreHover.containsMouse ? "#1e1e38" : "#d0111120"
+                        border.color: restoreHover.containsMouse ? "#2e2e55" : "#1e1e38"
+                        border.width: 1
                         Behavior on color { ColorAnimation { duration: 120 } }
+                        Behavior on border.color { ColorAnimation { duration: 120 } }
 
                         Text {
                             anchors.centerIn: parent
                             text: "YOU"
-                            color: restoreHover.containsMouse ? "#a78bfa" : "#33335a"
-                            font.pixelSize: 8; font.letterSpacing: 1.5; font.weight: Font.Medium
+                            color: restoreHover.containsMouse ? "#c4b5fd" : "#334155"
+                            font.pixelSize: 9; font.letterSpacing: 1.5; font.weight: Font.Medium
                             Behavior on color { ColorAnimation { duration: 120 } }
                         }
 
