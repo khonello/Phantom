@@ -70,6 +70,24 @@ need it.
 **Closes when:** deployment is docker-mode only, or the orchestrator learns to
 prompt.
 
+### 🟠 The repo token persists on the network volume
+
+A private repo is cloned with the token in the URL
+(`RUNPOD_REPO_URL=https://<token>@github.com/khonello/Phantom.git`), so git
+writes that URL into `/workspace/Phantom/.git/config` — on the **network
+volume**, which survives `stop` and `terminate` and is reused by every future
+pod. `startup.sh` needs it there: `git pull --ff-only` runs on every launch and
+would otherwise prompt.
+
+**Why accepted:** it sits inside the same trust boundary as the forwarded
+`RUNPOD_API_KEY` — anyone who can read it already has root on the pod. Keeping
+the repo private is still the right call; this is the cost of that, not an
+argument against it.
+
+**Closes when:** the token is a fine-grained PAT scoped to this one repository
+with read-only contents access, so extracting it grants nothing else. Worth
+doing now — it is a GitHub settings change, not code.
+
 ### 🟡 Uploads share one directory on the pod
 
 `_UPLOAD_DIR = '/tmp/phantom_uploads'`. Target photos get a per-job
