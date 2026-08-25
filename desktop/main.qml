@@ -1336,6 +1336,32 @@ Window {
                         }
                     }
 
+                    // Bring the self-monitor back. Sits exactly where it
+                    // was, so the way back is where the thing went.
+                    Rectangle {
+                        anchors { top: parent.top; right: parent.right; topMargin: 16; rightMargin: 16 }
+                        width: 54; height: 22; radius: 6
+                        visible: bridge.pipelineRunning && miniScreen.manuallyHidden
+                        color: restoreHover.containsMouse ? "#1e1e38" : "#c0111120"
+                        border.color: "#1a1a30"; border.width: 1
+                        Behavior on color { ColorAnimation { duration: 120 } }
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: "YOU"
+                            color: restoreHover.containsMouse ? "#a78bfa" : "#33335a"
+                            font.pixelSize: 8; font.letterSpacing: 1.5; font.weight: Font.Medium
+                            Behavior on color { ColorAnimation { duration: 120 } }
+                        }
+
+                        HoverHandler { id: restoreHover }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: miniScreen.manuallyHidden = false
+                        }
+                    }
+
                     // ── Model loading overlay ─────────────────────────────
                     Rectangle {
                         anchors.fill: parent
@@ -1393,8 +1419,20 @@ Window {
                         border.width: 1
                         clip: true
 
+                        // Dismissing is a "not right now", not a permanent
+                        // choice: nothing used to clear this, so one click cost
+                        // the self-monitor for the life of the window - across a
+                        // stop and start, and with no way back on a paid hour.
                         property bool manuallyHidden: false
                         visible: bridge.pipelineRunning && !manuallyHidden
+
+                        Connections {
+                            target: bridge
+                            function onPipelineRunningChanged(running) {
+                                if (running)
+                                    miniScreen.manuallyHidden = false
+                            }
+                        }
 
                         FrameDisplay {
                             anchors.fill: parent
