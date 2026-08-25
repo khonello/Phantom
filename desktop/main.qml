@@ -1419,20 +1419,21 @@ Window {
                         border.width: 1
                         clip: true
 
-                        // Dismissing is a "not right now", not a permanent
-                        // choice: nothing used to clear this, so one click cost
-                        // the self-monitor for the life of the window - across a
-                        // stop and start, and with no way back on a paid hour.
+                        // The X is not a convenience, and this panel is not a
+                        // preview: it is the only place in the app where the
+                        // operator's *real* face is drawn. Closing it is what
+                        // they reach for when they share their screen, present,
+                        // or someone walks up behind them.
+                        //
+                        // So nothing reopens it on their behalf. An earlier
+                        // version cleared this when the pipeline started, to fix
+                        // the one-way door below - but that puts the real face
+                        // back on screen at the exact moment a new session
+                        // begins, which is when a screen is most likely still
+                        // being shared. The chip is the way back, and it is the
+                        // operator who presses it.
                         property bool manuallyHidden: false
                         visible: bridge.pipelineRunning && !manuallyHidden
-
-                        Connections {
-                            target: bridge
-                            function onPipelineRunningChanged(running) {
-                                if (running)
-                                    miniScreen.manuallyHidden = false
-                            }
-                        }
 
                         FrameDisplay {
                             anchors.fill: parent
