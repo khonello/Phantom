@@ -15,10 +15,23 @@ Dockerfile that failed the build loudly; in startup.sh it was swallowed by
 on CPU.
 
 `__path__` is the attribute that works for both regular and namespace packages.
+
+It can also hold **more than one root**. The pod's venv is created with
+`--system-site-packages` so the image's PyTorch is inherited, and `nvidia` is a
+namespace package, so `nvidia.cudnn.__path__` spans both the venv's
+site-packages and the image's dist-packages. `startup.sh` installs
+`nvidia-cudnn-cu12>=9` into the venv while the image ships cuDNN 8 in
+dist-packages — so returning the first root with a `lib` directory returned the
+cuDNN 8 one, and `libcudnn.so.9` was not in it. Which root is right is decided
+by which one actually holds the library, not by which is listed first.
 """
 
+import glob
 import os
 import sys
+
+# What onnxruntime-gpu dlopens. Only used to choose between roots.
+_SONAME = 'libcudnn.so.9'
 
 
 def cudnn_lib_dir() -> str:
@@ -46,10 +59,21 @@ def cudnn_lib_dir() -> str:
     if not roots:
         raise RuntimeError('nvidia.cudnn exposes neither __path__ nor __file__')
 
+    fallback = None
     for root in roots:
         candidate = os.path.join(root, 'lib')
-        if os.path.isdir(candidate):
+        if not os.path.isdir(candidate):
+            continue
+        if glob.glob(os.path.join(candidate, _SONAME + '*')):
             return candidate
+        if fallback is None:
+            fallback = candidate
+
+    # No root advertised the soname. One lib directory is still better than
+    # none — the caller verifies with a real dlopen either way, and a differently
+    # named build should not be turned into a hard failure here.
+    if fallback is not None:
+        return fallback
 
     raise RuntimeError(
         'no lib directory under: {}'.format(', '.join(roots)),

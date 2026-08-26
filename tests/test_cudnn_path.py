@@ -74,6 +74,45 @@ try:
 except RuntimeError as e:
     results.append(('missing lib dir raises', True, str(e)[:44]))
 
+# 5. Two roots, the soname in the second. The pod case: a venv built with
+#    --system-site-packages sees its own site-packages and the image's
+#    dist-packages, and only one of them holds the cuDNN 9 that was installed.
+sys_root = tempfile.mkdtemp()      # image's cuDNN 8 — listed first, wrong
+venv_root = tempfile.mkdtemp()     # venv's cuDNN 9 — listed second, right
+os.makedirs(os.path.join(sys_root, 'lib'))
+os.makedirs(os.path.join(venv_root, 'lib'))
+open(os.path.join(sys_root, 'lib', 'libcudnn.so.8'), 'w').close()
+open(os.path.join(venv_root, 'lib', 'libcudnn.so.9'), 'w').close()
+multi = types.ModuleType('nvidia.cudnn')
+multi.__file__ = None
+multi.__path__ = [sys_root, venv_root]
+install(multi)
+try:
+    got = mod.cudnn_lib_dir()
+    want = os.path.join(venv_root, 'lib')
+    results.append(('picks the root holding libcudnn.so.9, not the first',
+                    got == want, got))
+except Exception as e:
+    results.append(('picks the root holding libcudnn.so.9, not the first',
+                    False, repr(e)))
+
+# 6. Two roots, neither advertising the soname: still the first lib dir, since
+#    the caller's dlopen is the real verdict and a rename is not a build break.
+a, b = tempfile.mkdtemp(), tempfile.mkdtemp()
+os.makedirs(os.path.join(a, 'lib'))
+os.makedirs(os.path.join(b, 'lib'))
+neither = types.ModuleType('nvidia.cudnn')
+neither.__file__ = None
+neither.__path__ = [a, b]
+install(neither)
+try:
+    got = mod.cudnn_lib_dir()
+    results.append(('no soname anywhere falls back to the first lib dir',
+                    got == os.path.join(a, 'lib'), got))
+except Exception as e:
+    results.append(('no soname anywhere falls back to the first lib dir',
+                    False, repr(e)))
+
 fails = 0
 for label, passed, detail in results:
     print('  [{}] {} - {}'.format('PASS' if passed else 'FAIL', label, detail))
