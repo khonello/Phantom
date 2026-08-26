@@ -43,21 +43,39 @@ class LatencyBudget:
     stages: Dict[str, List[float]] = field(default_factory=dict)
     frames: int = 0
 
-    def record(self, detect_ms: float, swap_ms: float, total_ms: float) -> None:
+    def record(
+        self,
+        detect_ms: float,
+        swap_ms: float,
+        total_ms: float,
+        extra: Optional[Dict[str, float]] = None,
+    ) -> None:
         """
         Record one frame's stage timings, in milliseconds.
+
+        `swap+composite` was one number covering inference, restoration,
+        smoothing, colour matching, detail matching, masking and the paste. That
+        answers "does this preset hold" but not "what would be worth speeding
+        up" — and the second question is the one any optimisation has to be
+        judged against, since the largest term decides where effort goes and the
+        rest is noise. `extra` carries the breakdown the compositor measured for
+        this frame.
 
         Args:
             detect_ms: Preprocessing and detection
             swap_ms: Swap and compositing
             total_ms: Whole frame, capture to emit
+            extra: Optional per-stage breakdown, e.g. {'restore': 12.4}
         """
         self.frames += 1
-        for name, value in (
-            ('detect', detect_ms),
-            ('swap+composite', swap_ms),
-            ('total', total_ms),
-        ):
+
+        timings = [('detect', detect_ms), ('swap+composite', swap_ms)]
+        timings.extend(sorted((extra or {}).items()))
+        # Total last, so the report reads as a breakdown followed by the number
+        # the deadline is judged against.
+        timings.append(('total', total_ms))
+
+        for name, value in timings:
             bucket = self.stages.setdefault(name, [])
             if len(bucket) < self.limit:
                 bucket.append(value)

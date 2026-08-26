@@ -25,6 +25,8 @@ from pipeline.logging import emit_status, emit_error
 
 # Providers that mean "not on the accelerator we asked for".
 _CPU_PROVIDER = 'CPUExecutionProvider'
+_CUDA_PROVIDER = 'CUDAExecutionProvider'
+_TRT_PROVIDER = 'TensorrtExecutionProvider'
 
 
 class ExecutionProviderError(RuntimeError):
@@ -199,4 +201,87 @@ def verify(
         scope='RUNTIME',
     )
     summary['ok'] = True
+    summary['tensorrt'] = _report_tensorrt(config, actual)
     return summary
+
+
+def _report_tensorrt(
+    config: FaceSwapConfig,
+    actual: Dict[str, Optional[List[str]]],
+) -> Dict[str, Any]:
+    """
+    Report which models TensorRT actually claimed, when it was asked for.
+
+    Deliberately a **warning, not an error**, which is the one place this module
+    departs from fail-closed — and the reason is the same reason CPU fallback
+    raises. A model on CPU is a paid GPU hour producing nothing usable. A model
+    that fell back from TensorRT to CUDA is still on the GPU and still holds a
+    live call; it is merely not as fast as intended. Stopping the session over
+    it would cost the operator more than the fallback does.
+
+    It has to be *said*, though. TensorRT's whole failure mode is silence: the
+    provider registers, declines the graph, and CUDA runs it — indistinguishable
+    from a successful build except by the engine cache staying empty and the
+    first frame arriving on time when it should have been late.
+
+    Args:
+        config: Supplies `trt`
+        actual: Per-model provider lists, from `verify`
+
+    Returns:
+        A summary: whether it was requested, and which models it took
+    """
+    requested = bool(getattr(config, 'trt', False))
+    report: Dict[str, Any] = {'requested': requested}
+    if not requested:
+        return report
+
+    from pipeline.services.onnx_session import gpu_identity, trt_enabled_for_gpu
+
+    eligible = trt_enabled_for_gpu(config)
+    report['gpu'] = gpu_identity()
+    report['eligible'] = eligible
+
+    if not eligible:
+        emit_status(
+            f'TensorRT requested but {gpu_identity()} is not in trt_gpus — '
+            f'running on {_CUDA_PROVIDER}. Add it to TRT_GPUS if a '
+            f'multi-minute engine build is worth it on this card.',
+            scope='RUNTIME',
+        )
+        return report
+
+    claimed = sorted(
+        label for label, providers in actual.items()
+        if providers and _TRT_PROVIDER in providers
+    )
+    missing = sorted(
+        label for label, providers in actual.items()
+        if providers and _TRT_PROVIDER not in providers
+    )
+    report['claimed'] = claimed
+    report['missing'] = missing
+
+    if not claimed:
+        emit_error(
+            f'TensorRT was requested and {gpu_identity()} is eligible, but no '
+            f'model is running on it — every one fell back to '
+            f'{_CUDA_PROVIDER}. The session still works and still uses the GPU, '
+            f'so this is not fatal, but nothing was gained. Usual cause: the '
+            f'onnxruntime build has no TensorRT support, or the engine cache '
+            f'directory is not writable.',
+            scope='RUNTIME',
+        )
+    elif missing:
+        emit_status(
+            f'TensorRT claimed {", ".join(claimed)}; '
+            f'{", ".join(missing)} fell back to {_CUDA_PROVIDER}.',
+            scope='RUNTIME',
+        )
+    else:
+        emit_status(
+            f'TensorRT confirmed on {", ".join(claimed)}',
+            scope='RUNTIME',
+        )
+
+    return report

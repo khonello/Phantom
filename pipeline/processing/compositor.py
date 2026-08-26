@@ -22,7 +22,8 @@ Per face:
     7. grain        (frame space, monochrome, matched to the source noise)
 """
 
-from typing import Optional, Tuple
+import time
+from typing import Dict, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -242,6 +243,16 @@ class FaceCompositor:
         self._prev_real: Optional[Frame] = None
         self._working_size: Optional[int] = None
 
+        # Per-stage milliseconds for the frame just composited, read by the
+        # pipeline's latency budget. Same pattern as `masker.last_coverage`:
+        # the stage that measures a thing owns the number, and whoever needs it
+        # reads it afterwards rather than having a timer threaded through.
+        #
+        # Cheap enough to leave on — a `perf_counter` either side of calls that
+        # already cost milliseconds — and the alternative is a debug-only path
+        # that is never on when the question comes up.
+        self.last_stage_ms: Dict[str, float] = {}
+
     def reset(self) -> None:
         """Drop temporal state (face lost, source changed, pipeline restart)."""
         self._prev_fake = None
@@ -299,6 +310,17 @@ class FaceCompositor:
         matrix: Matrix,
     ) -> Optional[Frame]:
         """Implementation of `composite`."""
+        stages = self.last_stage_ms
+        stages.clear()
+        mark = time.perf_counter()
+
+        def elapsed(name: str) -> None:
+            """Record milliseconds since the last mark, under `name`."""
+            nonlocal mark
+            now = time.perf_counter()
+            stages[name] = (now - mark) * 1000.0
+            mark = now
+
         size = self._aligned_size(matrix, swapped.shape[0])
 
         # Rescale the swapper's affine to our working resolution. Scaling the
@@ -315,6 +337,7 @@ class FaceCompositor:
         mask = self.masker.build(
             face, aligned_matrix, real, (frame.shape[0], frame.shape[1]),
         )
+        elapsed('mask')
 
         if not guards.coverage_ok(self.config, self.masker.last_coverage):
             return None
@@ -323,19 +346,25 @@ class FaceCompositor:
 
         if self.config.enhance:
             fake = self._enhance(fake, frame, face, aligned_matrix)
+            elapsed('restore')
 
         # Temporal smoothing needs a stable subject identity. With multiple
         # faces the per-frame detection order is not stable, so smoothing
         # would blend between different people.
         if not self.config.many_faces:
             fake = self._smooth(fake, real)
+            elapsed('smooth')
 
         if self.config.color_correction:
             fake = self._match_color(fake, real, mask)
+            elapsed('colour')
 
         fake = self._match_detail(fake, real, mask)
+        elapsed('detail')
 
-        return self._paste(frame, fake, mask, aligned_matrix)
+        pasted = self._paste(frame, fake, mask, aligned_matrix)
+        elapsed('paste')
+        return pasted
 
     # ------------------------------------------------------------------
     # Aligned-space stages

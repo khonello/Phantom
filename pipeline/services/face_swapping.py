@@ -27,7 +27,7 @@ import numpy as np
 from pipeline.config import FaceSwapConfig
 from pipeline.types import Frame, Face
 from pipeline.services import swapper_models
-from pipeline.logging import emit_status, emit_error
+from pipeline.logging import emit_status, emit_error, emit_warning
 
 # ArcFace 5-point template, normalised to [0, 1]. Multiplied by the crop size at
 # use, so one constant serves 128 and 256 alike.
@@ -97,16 +97,54 @@ class FaceSwapper:
                     if not os.path.exists(model_path):
                         raise FileNotFoundError(f"Model not found: {model_path}")
 
-                    import onnxruntime as ort
-                    session_options = ort.SessionOptions()
-                    session_options.execution_mode = ort.ExecutionMode.ORT_PARALLEL
-                    session_options.intra_op_num_threads = 4
-
-                    self._swapper = insightface.model_zoo.get_model(
-                        model_path,
-                        providers=self.config.execution_providers,
-                    )
+                    self._swapper = self._build_inswapper(model_path)
         return self._swapper
+
+    def _build_inswapper(self, model_path: str) -> Any:
+        """
+        Load inswapper, giving it a session this pipeline configured.
+
+        InsightFace's `get_model` builds its own `InferenceSession` and accepts
+        only `providers` and `provider_options` — no `sess_options`, and no way
+        to point at converted fp16 weights. That is how this code came to build
+        a `SessionOptions`, set two fields on it and never pass it anywhere.
+
+        `INSwapper` takes a prepared session, so we build one through the shared
+        factory and hand it over. Note `model_file` stays the **fp32** path even
+        when the session runs fp16: INSwapper reads the `emap` projection out of
+        that file, and the source embedding is projected on the CPU in float32
+        before it ever reaches the model.
+
+        Falls back to InsightFace's own loader if anything about that shape has
+        changed between versions — a swapper that loads the old way is much
+        better than a session that does not load at all.
+
+        Args:
+            model_path: Path to the fp32 inswapper weights
+
+        Returns:
+            A live INSwapper
+        """
+        try:
+            from insightface.model_zoo.inswapper import INSwapper
+            from pipeline.services.onnx_session import create_session
+
+            # Static shapes: a 128px target crop and a 512-d source embedding.
+            session = create_session(
+                self.config, model_path, 'inswapper', static_shapes=True,
+            )
+            return INSwapper(model_file=model_path, session=session)
+        except Exception as e:
+            emit_warning(
+                f'Falling back to InsightFace session construction for the '
+                f'swapper ({type(e).__name__}: {e}). fp16, CUDA graphs and '
+                f'TensorRT do not apply to it.',
+                scope='SWAPPER',
+            )
+            return insightface.model_zoo.get_model(
+                model_path,
+                providers=self.config.execution_providers,
+            )
 
     def model(self) -> 'swapper_models.SwapperModel':
         """
@@ -144,10 +182,12 @@ class FaceSwapper:
                 return None
 
             try:
-                import onnxruntime as ort
+                from pipeline.services.onnx_session import create_session
 
-                session = ort.InferenceSession(
-                    path, providers=self.config.execution_providers,
+                # Static shapes: the target crop is always `model.size` square
+                # and the source is a 512-d embedding.
+                session = create_session(
+                    self.config, path, model.name, static_shapes=True,
                 )
 
                 # Introspected rather than assumed: exports differ in what they

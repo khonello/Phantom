@@ -559,10 +559,58 @@ DEBUG_FRAMES_STRIDE=3
 ```
 
 The forwarded list is `_FORWARDED_ENV` in `orchestrator.py` — model selection,
-the realism knobs, the guard settings, the debug-frame settings, `LOG_LEVEL` and
-`PHANTOM_TEMP_DIR`. It is a list rather than "forward everything" on purpose: the
-pod is a different machine, and blanket forwarding would send local paths and
-secrets that mean nothing there.
+the realism knobs, the guard settings, the inference speed levers, the
+debug-frame settings, `LOG_LEVEL` and `PHANTOM_TEMP_DIR`. It is a list rather
+than "forward everything" on purpose: the pod is a different machine, and
+blanket forwarding would send local paths and secrets that mean nothing there.
+
+### The speed levers
+
+Four settings trade inference time against risk, and all four default **off** so
+the out-of-the-box path is bit-identical to what it was before they existed.
+They matter here more than anywhere else, because a rented GPU is the only place
+they can honestly be measured.
+
+```env
+FP16=true                       # load -fp16.onnx weights where they exist
+CUDA_GRAPHS=true                # capture and replay the kernel launch sequence
+TRT=true                        # route through the TensorRT provider
+TRT_GPUS=RTX 4090,H100,L40S     # architectures worth a multi-minute engine build
+```
+
+`CUDA_GRAPHS` changes no numerics at all — it only removes per-kernel launch
+overhead, which is a real share of the cost for batch-1 models made of many
+small kernels. It applies to models whose input shapes are fixed (CodeFormer,
+XSeg, the swapper) and is ignored for the detector, whose shapes are not.
+
+`FP16` is the largest single win and the only one of the four that can change
+what the output looks like. Convert first, then A/B on footage rather than on a
+latency number:
+
+```bash
+python tools/convert_fp16.py /workspace/models/codeformer.onnx
+python pipeline.py --stream --debug-frames fp32/
+python pipeline.py --stream --fp16 --debug-frames fp16/
+python tools/compare_frames.py fp16/ --against fp32/
+```
+
+`TRT` builds an engine per model, which takes minutes and comes out of a paid
+hour. The engines are cached on the network volume under `/workspace/trt-cache`,
+keyed by GPU, TensorRT and ONNX Runtime versions, model fingerprint and
+precision — every property an engine is invalid across. Each architecture pays
+its build **once, ever**, so the cache warms itself as `start` lands on
+different cards.
+
+`TRT_GPUS` is why that is affordable. Auto-discovery picks across datacenters
+because availability is the binding constraint, so pinning to one GPU would
+trade "sometimes a slower card" for "sometimes no pod at all". Instead, the
+build is only spent on architectures fast enough to earn it; anything else runs
+on CUDA and says so. Budget roughly 0.5–1 GB of volume per architecture.
+
+A TensorRT fallback is reported but does **not** stop the session, unlike a CPU
+fallback. A model that fell back to CUDA is still on the GPU and still holds a
+live call; it is merely not as fast as intended, and stopping would cost the
+operator more than the fallback does.
 
 `tests/test_wiring.py` asserts it in both directions — every forwarded name is
 read by the pipeline, and no pipeline setting is stranded on the local machine.

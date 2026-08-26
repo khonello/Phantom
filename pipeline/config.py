@@ -61,6 +61,29 @@ class FaceSwapConfig:
     execution_providers: List[str] = field(default_factory=lambda: ['CPUExecutionProvider'])
     execution_threads: int = 8
 
+    # Inference speed levers. All default off, so the out-of-the-box path is
+    # bit-identical to what it was before they existed — each one is opted into
+    # and measured rather than assumed.
+    #
+    # `fp16` loads a converted half-precision copy of the weights when one has
+    # been produced (tools/convert_fp16.py). It is the largest single win and
+    # the only one of these that can change what the output looks like, so it
+    # is A/B'd on real footage before it ships, not judged on a latency number.
+    #
+    # `cuda_graphs` captures the kernel launch sequence once and replays it,
+    # which is worth having on batch-1 models made of many small kernels. It
+    # needs IOBinding with stable buffer addresses and static input shapes, so
+    # it only applies to models that declare themselves static.
+    #
+    # `trt` routes through the TensorRT provider. Engines are built once per
+    # GPU architecture and cached on the network volume; `trt_gpus` names the
+    # architectures worth spending a multi-minute build on, since that build
+    # comes out of a paid hour with an operator waiting.
+    fp16: bool = False
+    cuda_graphs: bool = False
+    trt: bool = False
+    trt_gpus: str = 'RTX 4090,RTX 5090,H100,H200,L40S,RTX 6000 Ada,RTX 4080'
+
     # Stream pipeline - quality presets
     quality: str = 'optimal'
     alpha: float = 0.6  # EMA on face landmarks (0.0 = max smoothing, 1.0 = off)

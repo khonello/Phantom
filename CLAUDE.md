@@ -763,6 +763,88 @@ produces unusable output while appearing to work, which defeats the reason for
 renting it. ONNX Runtime already emits a warning, and that warning is exactly
 what let this ship broken — the value here is that it halts.
 
+### ONNX sessions — one owner, four levers
+`pipeline/services/onnx_session.py` builds **every** ONNX session in the
+pipeline. Services say which model they want and whether its shapes are static;
+everything about how the session is constructed is decided in one place.
+
+It exists because nothing owned that moment. `face_swapping.py` constructed a
+`SessionOptions`, set two fields on it, and never passed it to the model — dead
+for as long as it had been there, and invisible to flake8 because the attribute
+assignments count as uses. Four speed levers all hook session construction, and
+bolting each onto three call sites independently is how a codebase acquires
+three subtly different answers to the same question.
+
+**All four default off.** The out-of-the-box path is bit-identical to what it
+was before they existed; each is opted into and measured rather than assumed.
+
+| Lever | Flag / env | Changes numerics | Notes |
+|---|---|---|---|
+| Pre-allocated IOBinding | always on | No | `BoundRunner`; falls back silently |
+| CUDA graphs | `--cuda-graphs` / `CUDA_GRAPHS` | No | Static shapes only |
+| fp16 weights | `--fp16` / `FP16` | **Yes** | A/B on footage before shipping |
+| TensorRT | `--trt` / `TRT` | Via fp16 | Per-architecture engine cache |
+
+`static_shapes` is the caller's declaration, not a guess. CUDA graph capture
+records **fixed device buffer addresses**, so a model whose input size changes
+between calls would replay a graph describing the previous shape. CodeFormer
+(always 512), XSeg (always its own input size) and the swapper (always
+`model.size`) qualify; the detector does not, because `det_size` moves with the
+preset.
+
+`BoundRunner` reuses output buffers rather than letting ORT allocate one per
+call. The copies themselves are not removable — the compositor is OpenCV on the
+CPU, so pixels come home between models regardless — but the allocation and the
+pageable-memory penalty are, at four to six inferences a frame. It degrades
+silently to a plain `run` on a symbolic output shape or a build without the
+binding API: this is a performance path, and a warning per frame would cost more
+than it reports.
+
+**fp16 is a copy, never a replacement.** `tools/convert_fp16.py` writes
+`<name>-fp16.onnx` beside the original with `keep_io_types=True`, so callers
+still hand it float32 and no second edit is needed in a second file per model.
+Reverting is a config flag rather than a 384 MB download. The op block list is
+not optional — reductions and normalisations accumulate across a whole feature
+map, which is where fp16's exponent runs out, and a model that produces NaN is
+not a faster model.
+
+**TensorRT engines are cached per architecture, not pinned to one.** The cache
+key is GPU, TensorRT and ORT versions, model fingerprint and precision — every
+property an engine is invalid across. Pinning to a single GPU would defeat
+`RUNPOD_DATACENTERS`, which exists because availability is the binding
+constraint; it would trade "sometimes a slower card" for "sometimes no pod at
+all", and on a paid session no pod is the worse failure. Each architecture pays
+its build once, ever, so the cache warms itself.
+
+`trt_gpus` bounds which cards are worth that build. Minutes of a paid hour with
+an operator waiting is a good trade amortised on a fast card and a bad one on a
+card that was never going to hold the deadline. It is a substring list rather
+than a copy of the orchestrator's `_GPU_PERF` — the two answer different
+questions and would drift.
+
+**A TensorRT fallback warns; it does not halt.** This is the one deliberate
+departure from the rule above, and it rests on the same reasoning. A model on
+CPU is a paid GPU hour producing nothing usable, so that halts. A model that
+fell back from TensorRT to CUDA is still on the GPU and still holds a live call
+— stopping the session over it would cost the operator more than the fallback
+does. It still has to be *said*, because TensorRT's failure mode is silence: the
+provider registers, declines the graph, and CUDA runs it.
+
+**What makes any of this falsifiable.** `swap+composite` used to be one number
+covering inference, restoration, smoothing, colour, detail, masking and the
+paste — enough to answer "does this preset hold", not "what is worth speeding
+up". `FaceCompositor.last_stage_ms` now carries the breakdown and
+`LatencyBudget.record` takes it as `extra`. Same pattern as
+`masker.last_coverage`: the stage that measures a thing owns the number, and
+whoever needs it reads it afterwards rather than having a timer threaded
+through. Read `restore` against `swap+composite` first — if restoration is not
+the dominant term, the premise behind fp16 and TensorRT is wrong here and
+should be rewritten rather than defended.
+
+Full reasoning, including why Nuitka is a distribution decision rather than a
+performance one and why Numba has almost nothing to do here, is in
+[docs/COMPILATION.md](docs/COMPILATION.md).
+
 ### Guard calibration
 Nine thresholds were chosen without data. `--guard-observe` evaluates and records
 every guard **without any of them acting**, because a session that enforces

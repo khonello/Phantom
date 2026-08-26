@@ -71,6 +71,7 @@ class _CodeFormerBackend:
     def __init__(self, config: FaceSwapConfig) -> None:
         self.config = config
         self._session: Optional[Any] = None
+        self._runner: Optional[Any] = None
         self._image_input = 'input'
         self._weight_input: Optional[str] = None
 
@@ -83,12 +84,16 @@ class _CodeFormerBackend:
                 return False
 
         try:
-            import onnxruntime as ort
+            from pipeline.services.onnx_session import BoundRunner, create_session
 
-            self._session = ort.InferenceSession(
-                model_path,
-                providers=self.config.execution_providers,
+            # Static shapes: the crop is always CROP_SIZE square and the
+            # fidelity weight is a scalar, so this model never sees a shape it
+            # has not seen before. That is what makes CUDA graph capture legal
+            # here and not on the detector.
+            self._session = create_session(
+                self.config, model_path, 'codeformer', static_shapes=True,
             )
+            self._runner = BoundRunner(self._session, 'codeformer')
 
             # Introspect rather than assume. The image input is whichever one
             # is not the scalar fidelity weight.
@@ -111,6 +116,7 @@ class _CodeFormerBackend:
                 scope='ENHANCER',
             )
             self._session = None
+            self._runner = None
             return False
 
     @staticmethod
@@ -158,7 +164,9 @@ class _CodeFormerBackend:
         if self._weight_input:
             inputs[self._weight_input] = np.array([weight]).astype(np.double)
 
-        output = self._session.run(None, inputs)[0][0]
+        runner = self._runner
+        raw = runner.run(inputs) if runner is not None else self._session.run(None, inputs)
+        output = raw[0][0]
 
         # Inverse of the preparation above.
         output = np.clip(output, -1, 1)

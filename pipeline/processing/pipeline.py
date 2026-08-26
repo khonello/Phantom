@@ -791,7 +791,11 @@ class ProcessingPipeline:
         # output below answers "how long did frame 240 take"; whether the preset
         # holds is a question about the distribution, and a 1-in-30 sample taken
         # only at debug level cannot answer it.
-        self._latency.record(detect_ms, swap_ms, total_ms)
+        # The compositor's own breakdown of the swap bucket, if it composited
+        # this frame. A guarded frame leaves it empty, which is correct — the
+        # stages it names did not run.
+        stages = self._compositor.last_stage_ms if self._compositor else None
+        self._latency.record(detect_ms, swap_ms, total_ms, dict(stages) if stages else None)
 
         if self.config.log_level != 'debug' or seq % self._TIMING_INTERVAL:
             return

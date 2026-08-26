@@ -141,6 +141,14 @@ def parse_args() -> None:
                         dest='grain', action='store_false', default=_env_bool('GRAIN'))
     program.add_argument('--no-occluder', help='disable occlusion masking',
                         dest='occluder', action='store_false', default=_env_bool('OCCLUDER'))
+    program.add_argument('--fp16', help='load half-precision weights where a -fp16.onnx copy exists',
+                        dest='fp16', action='store_true', default=_env_bool('FP16'))
+    program.add_argument('--cuda-graphs', help='capture and replay the CUDA kernel launch sequence',
+                        dest='cuda_graphs', action='store_true', default=_env_bool('CUDA_GRAPHS'))
+    program.add_argument('--trt', help='route inference through the TensorRT provider',
+                        dest='trt', action='store_true', default=_env_bool('TRT'))
+    program.add_argument('--trt-gpus', help='comma-separated GPU names worth building TensorRT engines for',
+                        dest='trt_gpus', default=os.environ.get('TRT_GPUS'))
     program.add_argument('--debug-frames', help='write (input, output) frame pairs to this directory',
                         dest='debug_frames_dir', default=os.environ.get('DEBUG_FRAMES_DIR'))
     program.add_argument('--debug-frames-stride', help='keep every Nth frame pair (default 1)',
@@ -211,6 +219,10 @@ def parse_args() -> None:
         ('enhance', args.enhance),
         ('grain', args.grain),
         ('occluder', args.occluder),
+        ('fp16', args.fp16),
+        ('cuda_graphs', args.cuda_graphs),
+        ('trt', args.trt),
+        ('trt_gpus', args.trt_gpus),
         ('debug_frames_dir', args.debug_frames_dir),
         ('debug_frames_stride', args.debug_frames_stride),
         ('debug_frames_limit', args.debug_frames_limit),

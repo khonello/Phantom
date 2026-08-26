@@ -72,6 +72,7 @@ class FaceMasker:
         """
         self.config = config
         self._session: Optional[Any] = None
+        self._runner: Optional[Any] = None
         self._input_name: str = 'input'
         self._input_size: int = 256
         self._input_nchw: bool = False
@@ -253,7 +254,12 @@ class FaceMasker:
             if self._input_nchw:
                 blob = blob.transpose(0, 3, 1, 2)
 
-            raw = session.run(None, {self._input_name: blob})[0]
+            runner = self._runner
+            inputs = {self._input_name: blob}
+            raw = (
+                runner.run(inputs) if runner is not None
+                else session.run(None, inputs)
+            )[0]
             occlusion = np.squeeze(raw).astype(np.float32)
 
             if occlusion.ndim != 2:
@@ -312,12 +318,14 @@ class FaceMasker:
                 return None
 
         try:
-            import onnxruntime as ort
+            from pipeline.services.onnx_session import BoundRunner, create_session
 
-            session = ort.InferenceSession(
-                model_path,
-                providers=self.config.execution_providers,
+            # Static shapes: XSeg always sees `_input_size` square, whatever
+            # the aligned crop was — the resize above guarantees it.
+            session = create_session(
+                self.config, model_path, 'xseg', static_shapes=True,
             )
+            self._runner = BoundRunner(session, 'xseg')
 
             # Introspect rather than assume — input name and layout differ
             # between exports of this model.
