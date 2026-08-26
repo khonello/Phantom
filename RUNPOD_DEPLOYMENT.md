@@ -397,6 +397,30 @@ and catches the expensive case where you left one running:
 | `RUNNING` | live and billing right now | connect the desktop, or `stop` |
 | `not found` | terminated; only the volume survives | `start` — see Part 5 |
 
+### When `resume` cannot get a GPU
+
+A stopped pod keeps its **host machine**, and resuming needs a GPU free on that
+specific machine. Rest long enough and someone else takes it:
+
+```
+ERROR: Resume failed: There are not enough free GPUs on the host machine
+       to start this pod.
+```
+
+Nothing is wrong with the pod, the volume or `.env` — the host is simply full,
+and no amount of retrying moves a pod off it. **Only a new pod can be scheduled
+somewhere with capacity**, so `resume` recognises this one failure and falls
+through to `start` by itself. Every other resume failure still stops, because
+falling back on any error would answer a typo'd pod ID with a billing pod.
+
+The fallback is cheap: the network volume carries the venv, the models and the
+repo, so the new pod is a warm start rather than a first one.
+
+It leaves one thing behind. The old pod stays stopped and keeps billing for its
+container disk, and `RUNPOD_POD_ID` now names the new pod — so `terminate` can
+no longer reach the old one. The orchestrator prints its ID as it falls through;
+delete it from the dashboard, **Pods → that ID → Terminate**.
+
 ### `resume`, not `start`
 
 They are not interchangeable, and the loop runs on `resume`.
@@ -728,6 +752,11 @@ Deeper RunPod-specific detail, and the history behind each workaround, is in
 **No GPU capacity across datacenters.** Raise `RUNPOD_MAX_PRICE`, lower
 `RUNPOD_MIN_VRAM`, or add a second datacenter — which needs its own volume there.
 `python runpod/orchestrator.py gpus` shows what is eligible and why.
+
+**`resume` says there are not enough free GPUs.** The host your pod is pinned
+to is full. `resume` falls through to `start` on its own — see [When `resume`
+cannot get a GPU](#when-resume-cannot-get-a-gpu), and remember to terminate the
+old pod from the dashboard.
 
 **SSH timeout.** The proxy accepts TCP before the container is ready. The
 orchestrator already retries 12 times at 10-second intervals; a failure past that

@@ -1233,8 +1233,32 @@ def cmd_start() -> None:
     timer.report()
 
 
+# Phrases RunPod uses when a stopped pod's host has no GPU left for it. Matched
+# as substrings because the wording carries the machine's own numbers, and
+# lowercased because it has not been consistent about capitalisation.
+_CAPACITY_MARKERS = (
+    "not enough free gpus",
+    "no free gpus",
+    "insufficient capacity",
+    "no longer available",
+)
+
+
+def _is_capacity_error(message: str) -> bool:
+    """
+    Whether a resume failure means the host is full rather than broken.
+
+    A stopped pod keeps its host assignment, so resuming needs a GPU free on
+    that specific machine. Someone else taking it is an ordinary outcome of
+    resting, not a fault in the pod or the config — and it is the one resume
+    failure a new pod actually fixes.
+    """
+    low = message.lower()
+    return any(marker in low for marker in _CAPACITY_MARKERS)
+
+
 def cmd_resume(pod_id: str) -> None:
-    """Resume a stopped pod by its ID."""
+    """Resume a stopped pod, falling back to a new one if its host is full."""
     mode = _get_deploy_mode()
     print("Deploy mode: {}".format(mode))
     _preflight_ssh_key(mode)
@@ -1251,8 +1275,31 @@ def cmd_resume(pod_id: str) -> None:
     try:
         runpod.resume_pod(pod_id, gpu_count=1)
     except Exception as exc:
-        print("ERROR: Resume failed: {}".format(exc))
-        sys.exit(1)
+        if not _is_capacity_error(str(exc)):
+            print("ERROR: Resume failed: {}".format(exc))
+            sys.exit(1)
+
+        # The pod is fine and so is the config; its host simply has no GPU
+        # spare. Resume cannot move a pod, so the only thing that helps is a
+        # new one — and the volume means that costs setup time, not the venv,
+        # the models or the repo.
+        print("Resume failed: {}".format(exc))
+        print("")
+        print("  A stopped pod stays pinned to the host it was created on, and")
+        print("  that host has no GPU free. Resume cannot place it elsewhere;")
+        print("  only a new pod can be scheduled somewhere with capacity.")
+        print("")
+        print("  Falling back to `start`. The network volume carries the venv,")
+        print("  the models and the repo, so this is a warm start.")
+        print("")
+        print("  Pod {} is left stopped. It bills for its container disk".format(pod_id))
+        print("  until deleted, and RUNPOD_POD_ID is about to name the new pod,")
+        print("  so `terminate` will no longer reach it — delete it from the")
+        print("  dashboard: Pods -> {} -> Terminate.".format(pod_id))
+        print("")
+
+        cmd_start()
+        return
 
     _boot_pod(pod_id, mode, timer)
     timer.report()

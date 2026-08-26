@@ -162,6 +162,19 @@ check('.env.example leaves GPU auto-discovery on',
       gpu_pin is not None and not gpu_pin.group(1).strip(),
       'a shipped RUNPOD_GPU_TYPES disables VRAM, price and architecture filtering')
 
+# A stopped pod keeps its host, so resting can end with that host's GPUs taken.
+# The fallback to a new pod is the only thing that recovers it, and it has to
+# stay gated: falling back on *any* resume failure would create a billing pod in
+# response to a typo'd ID or a bad key.
+resume_body = orch_src.split('def cmd_resume')[1].split(chr(10) + 'def ')[0]
+check('resume falls back to start when the host is full',
+      'cmd_start()' in resume_body)
+check('that fallback is gated, not unconditional',
+      '_is_capacity_error' in resume_body)
+check('the phrase RunPod actually returned still matches',
+      'not enough free gpus' in orch_src.lower(),
+      'RunPod said "There are not enough free GPUs on the host machine"')
+
 # ── The deploy guide describes the code that exists ────────────────────
 print('\nDeploy guide matches the code')
 
