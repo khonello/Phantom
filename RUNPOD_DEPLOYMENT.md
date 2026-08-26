@@ -171,23 +171,71 @@ once.
 This key is also forwarded into the pod so the pipeline can stop itself when
 `RUNPOD_MAX_UPTIME` expires. It is not scoped — see [Security](#security).
 
-### 1b — SSH public key → `RUNPOD_SSH_KEY_PATH`
+### 1b — SSH key → `RUNPOD_SSH_KEY_PATH`
 
-Only for `ssh` mode, which is the default.
+Only for `ssh` mode, which is the default. Both halves of this step must be done
+**before the first `start`** — the public half so RunPod can put it on the pod,
+the private half so the orchestrator can use it.
+
+**Generate the pair**, skipping this if you already have one:
 
 ```bash
-ssh-keygen -t ed25519 -C "you@email.com"      # skip if you already have one
-cat ~/.ssh/id_ed25519.pub                      # copy this
+ssh-keygen -t ed25519 -C "you@email.com"       # accept the default path
+                                               # leave the passphrase EMPTY
+cat ~/.ssh/id_ed25519.pub                      # copy this whole line
 ```
 
-**Settings → SSH Public Keys → Add SSH Key**, paste, save.
+That writes two files: `~/.ssh/id_ed25519` (private — never leaves your machine)
+and `~/.ssh/id_ed25519.pub` (public — the one you paste into RunPod).
 
-What goes into `.env` is the path to the **private** half, and it must be
-unencrypted — the orchestrator loads it with no passphrase prompt, so a
-protected key fails at the connect step rather than asking.
+Leave the passphrase empty. The orchestrator loads the key with no prompt, so a
+protected key fails at the connect step rather than asking for anything.
 
-Docker mode never SSHes, but register the key anyway: it is how you get a shell
-on a pod when something goes wrong.
+**Register the public half:** RunPod → **Settings → SSH Public Keys → Add SSH
+Key**, paste, save. RunPod writes the registered keys into each pod's
+`authorized_keys` **when the pod is created**, so a key added afterwards does not
+reach a pod that already exists — register first, then `start`.
+
+**Point `.env` at the private half:**
+
+```env
+RUNPOD_SSH_KEY_PATH=~/.ssh/id_ed25519
+```
+
+#### The `~` is expanded by whichever shell runs the orchestrator
+
+This is the one part that bites, and it is silent. The path is expanded with
+`os.path.expanduser`, against the home directory of the process running
+`orchestrator.py` — **not** the shell you happened to generate the key in.
+
+Generating in WSL and running the orchestrator from PowerShell is the common way
+to get this wrong: the key lands in `/home/<you>/.ssh/`, while the orchestrator
+looks in `C:\Users\<you>\.ssh\` and finds nothing. Copy it across, keeping the
+WSL copy:
+
+```bash
+wsl -e cp ~/.ssh/id_ed25519 /mnt/c/Users/<you>/.ssh/id_ed25519
+wsl -e cp ~/.ssh/id_ed25519.pub /mnt/c/Users/<you>/.ssh/id_ed25519.pub
+```
+
+Use `cp` through WSL rather than a PowerShell redirect — a redirect can add CRLF
+line endings or a BOM, and paramiko then rejects the key as malformed. An
+absolute path in `RUNPOD_SSH_KEY_PATH` works too, and sidesteps `~` entirely.
+
+Windows needs no `icacls` fix: paramiko does not enforce OpenSSH's permission
+checks.
+
+**The key never belongs in the repo.** Beyond the usual reasons, the repo is
+`git clone`d onto the pod at `/workspace/Phantom` — which is the network volume,
+and it survives `terminate`. A key committed here would be copied onto a rented
+machine and left on persistent storage after the pod is gone.
+
+`start` and `resume` load the key before creating or resuming anything, so a
+missing or unreadable key stops you while nothing is billing. Docker mode never
+SSHes and skips the check, but register a key anyway: it is how you get a shell
+on a pod when something goes wrong — the command for that is copied from the
+pod's own page in the dashboard, not built by hand; see
+[Troubleshooting](#troubleshooting).
 
 ### 1c — Network volume → `RUNPOD_DATACENTERS`
 
@@ -660,6 +708,13 @@ usually means the pod itself is unhealthy. Retry `start`.
 ssh <podHostId>@ssh.runpod.io
 tail -f /workspace/phantom-pipeline.log
 ```
+
+**Copy that first line from the dashboard** rather than assembling it: the
+running pod's page has **Connect → SSH**, which prints the whole command
+including `-i ~/.ssh/id_ed25519`. `podHostId` is per-pod, changes on every
+deploy, and is not the pod ID — nor is it returned by `runpod.get_pod()`, which
+is why the orchestrator queries GraphQL for it (see
+[runpod/TROUBLESHOOTING.md](runpod/TROUBLESHOOTING.md), and `_get_ssh_command`).
 
 The pipeline runs under `nohup`, not tmux — there is no session to attach to, and
 the log is the whole picture.

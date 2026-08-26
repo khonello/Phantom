@@ -885,6 +885,15 @@ def _load_ssh_key(key_path: str) -> object:
     """Load an SSH private key, trying ed25519, RSA, and ECDSA formats."""
     paramiko = _require_paramiko()
     path = os.path.expanduser(key_path)
+    if not os.path.isfile(path):
+        print("ERROR: SSH private key not found at {}".format(path))
+        print("  RUNPOD_SSH_KEY_PATH={} expands against the home directory of".format(key_path))
+        print("  whichever shell runs this script.")
+        if os.name == "nt":
+            print("  A key generated inside WSL lives in the WSL home, not the Windows one:")
+            print("    wsl -e cp ~/.ssh/id_ed25519 /mnt/c/Users/<you>/.ssh/id_ed25519")
+        print("  See RUNPOD_DEPLOYMENT.md, Part 1b.")
+        sys.exit(1)
     for key_class in (paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey):
         try:
             return key_class.from_private_key_file(path)
@@ -893,6 +902,27 @@ def _load_ssh_key(key_path: str) -> object:
             continue
     print("ERROR: Could not load SSH key from {}. Supported formats: ed25519, RSA, ECDSA.".format(path))
     sys.exit(1)
+
+
+def _preflight_ssh_key(mode: str) -> None:
+    """
+    Load the SSH key before anything starts billing.
+
+    `_load_ssh_key` is otherwise first reached inside `_setup_pod`, which runs
+    after the pod has been created (`start`) or resumed (`resume`). An
+    unreadable key therefore surfaced only once a GPU was already running, and
+    left a pod to be stopped by hand. Same principle as the execution-provider
+    check: fail before the money, not after.
+
+    Only the key needs hoisting. `RUNPOD_API_KEY` is checked in `main`, and
+    `RUNPOD_IMAGE` and `RUNPOD_DATACENTERS` are checked at the top of
+    `_deploy_new_pod`, all of them ahead of `create_pod`.
+    """
+    if mode != "ssh":
+        return
+    key_path = os.getenv("RUNPOD_SSH_KEY_PATH", "~/.ssh/id_ed25519")
+    _load_ssh_key(key_path)
+    print("SSH key OK: {}".format(os.path.expanduser(key_path)))
 
 
 def _wait_for_ssh_tcp(host: str, port: int) -> None:
@@ -1194,6 +1224,7 @@ def cmd_start() -> None:
     """Deploy a fresh pod and boot it. Always creates a new pod."""
     mode = _get_deploy_mode()
     print("Deploy mode: {}".format(mode))
+    _preflight_ssh_key(mode)
 
     timer = BootTimer("Cold start ({})".format(mode))
     timer.phase("provision")
@@ -1206,6 +1237,7 @@ def cmd_resume(pod_id: str) -> None:
     """Resume a stopped pod by its ID."""
     mode = _get_deploy_mode()
     print("Deploy mode: {}".format(mode))
+    _preflight_ssh_key(mode)
 
     pod = runpod.get_pod(pod_id)
     if pod is None:
