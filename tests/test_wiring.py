@@ -210,6 +210,18 @@ for _kw in ('Blackwell', 'RTX PRO'):
 
 # ── Deploy guide describes the code that exists ────────────────────────
 
+# startup.sh pulls the repo it is itself part of. Bash resumes a changed script
+# at the old byte offset in the new content, so a pull that moves HEAD has to be
+# followed by handing over to the new copy — otherwise a boot can run a spliced
+# mixture of both and look like the fix simply did not work.
+check('startup re-execs itself when the pull moves HEAD',
+      'exec bash' in startup_src and 'PHANTOM_STARTUP_REEXEC' in startup_src)
+check('that re-exec cannot loop',
+      startup_src.count('PHANTOM_STARTUP_REEXEC') >= 2,
+      'needs both the guard test and the export')
+
+# ── Deploy guide describes the code that exists ────────────────────────
+
 # ── The deploy guide describes the code that exists ────────────────────
 print('\nDeploy guide matches the code')
 

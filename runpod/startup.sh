@@ -88,9 +88,31 @@ fi
 echo ""
 echo "--- Code Sync ---"
 _phase "git-pull"
+# This pull updates the repository that contains *this script*, while bash is
+# part-way through executing it. Bash reads a script incrementally, by byte
+# offset, so a file that changes underneath it is resumed at the old offset in
+# the new content: blocks get skipped, repeated, or spliced together. A boot
+# that pulled a fix then behaved as though it had not is this, and it is
+# indistinguishable from the fix being wrong.
+#
+# So: if the pull moved HEAD, hand over to the new copy with exec and start
+# again from the top. PHANTOM_STARTUP_REEXEC makes that at most once, so a pull
+# that somehow keeps moving cannot loop.
 if [ -d "${PHANTOM_DIR}/.git" ]; then
     echo "Pulling latest changes..."
+    _GIT_BEFORE=$(git -C "${PHANTOM_DIR}" rev-parse HEAD 2>/dev/null || echo none)
     git -C "${PHANTOM_DIR}" pull --ff-only 2>&1 || echo "WARNING: git pull failed — using existing code."
+    _GIT_AFTER=$(git -C "${PHANTOM_DIR}" rev-parse HEAD 2>/dev/null || echo none)
+
+    if [ "${_GIT_BEFORE}" != "${_GIT_AFTER}" ]; then
+        if [ -n "${PHANTOM_STARTUP_REEXEC:-}" ]; then
+            echo "Code changed again after re-exec — continuing with what is loaded."
+        else
+            echo "Code changed (${_GIT_BEFORE:0:7} -> ${_GIT_AFTER:0:7}); re-running startup.sh from the new copy."
+            export PHANTOM_STARTUP_REEXEC=1
+            exec bash "${BASH_SOURCE[0]}" "$@"
+        fi
+    fi
 else
     echo "Not a git repo — skipping pull."
 fi
