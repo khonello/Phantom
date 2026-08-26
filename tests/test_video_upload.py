@@ -106,6 +106,53 @@ check('it takes no path from the caller',
 check('it reports both panes',
       'target' in (r.data or {}) and 'output' in (r.data or {}))
 
+print('')
+print('Getting the result back')
+
+# A render writes on the pipeline's filesystem, so on a pod the operator cannot
+# reach the file they just paid to produce. Reading it back is the other half of
+# uploading, and refuses the same way when there is nothing there.
+cfg.set('output_path', None)
+r = H.handle_get_output_info(cfg)
+check('output info is refused when nothing has been rendered',
+      not r.success, r.error or '')
+r = H.handle_get_output_chunk(cfg, 0, 1024)
+check('an output chunk is refused when nothing has been rendered',
+      not r.success, r.error or '')
+
+import tempfile as _tf  # noqa: E402
+
+_fd, _out = _tf.mkstemp(suffix='.mp4')
+os.close(_fd)
+with open(_out, 'wb') as _fh:
+    _fh.write(b'0123456789' * 10)
+cfg.set('output_path', _out)
+
+r = H.handle_get_output_info(cfg)
+check('output info reports the size',
+      r.success and (r.data or {}).get('size') == 100, str(r.data))
+
+r = H.handle_get_output_chunk(cfg, 0, 10)
+check('a chunk reads from the offset given',
+      r.success and base64.b64decode((r.data or {}).get('data', '')) == b'0123456789')
+check('and says it is not the end', not (r.data or {}).get('eof', True))
+
+r = H.handle_get_output_chunk(cfg, 90, 10)
+check('the final chunk is marked eof', r.success and (r.data or {}).get('eof'))
+
+r = H.handle_get_output_chunk(cfg, 500, 10)
+check('an offset past the end is refused', not r.success, r.error or '')
+
+# Neither takes a path. One that read any path a client named would serve
+# arbitrary files off the pod.
+for _fn in (H.handle_get_output_info, H.handle_get_output_chunk):
+    check('{} takes no path from the caller'.format(_fn.__name__),
+          'path' not in _fn.__code__.co_varnames[:_fn.__code__.co_argcount])
+
+os.remove(_out)
+cfg.set('output_path', None)
+
+
 print('\nThe two limits are different limits')
 
 # Bytes bound the transfer, seconds bound the render, and they do not track each

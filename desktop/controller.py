@@ -451,6 +451,15 @@ class PipelineClient:
         """Abandon an upload and delete the partial file server-side."""
         return self._send('upload_video_cancel', upload_id=upload_id)
 
+    def get_output_info(self) -> Dict[str, Any]:
+        """Name and size of the finished render, before fetching it."""
+        return self._send('get_output_info', _timeout=30.0)
+
+    def get_output_chunk(self, offset: int, length: int) -> Dict[str, Any]:
+        """Read one slice of the finished render."""
+        return self._send(
+            'get_output_chunk', _timeout=120.0, offset=offset, length=length)
+
     def get_render_thumbnails(self) -> Dict[str, Any]:
         """
         First frames of the configured render target and output.

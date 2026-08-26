@@ -1886,6 +1886,73 @@ class Bridge(QObject):
             f'target ready — {os.path.basename(local_path)} ({seconds:.0f}s)')
         return True
 
+    def _download_output(self) -> None:
+        """
+        Fetch the finished render back and save it beside the chosen target.
+
+        A render writes on the pipeline's filesystem. When that is a pod, the
+        operator has no way to reach the file they just paid to produce — so it
+        is read back in chunks and written locally, and `outputPath` is then
+        the local copy, because that is the one they can open.
+
+        Does nothing when the pipeline is local: the file is already where the
+        operator can see it, and copying it beside itself would be noise.
+        """
+        if not self._target_remote_path:
+            return
+
+        info = self._client.get_output_info()
+        if not info.get('success', True):
+            self._set_status(
+                f'render finished, but the file could not be read back: '
+                f'{info.get("error", "unknown")}',
+                error=True,
+            )
+            return
+
+        data = info.get('data') or {}
+        size = int(data.get('size', 0))
+        name = data.get('name') or 'output.mp4'
+        if size <= 0:
+            self._set_status('render finished, but the output is empty', error=True)
+            return
+
+        # Beside the video the operator picked, with the suffix batch already
+        # uses — the same rule photo mode follows for a swapped still.
+        local_dir = os.path.dirname(self._target_path) or os.getcwd()
+        local_path = os.path.join(local_dir, name).replace('\\', '/')
+
+        received = 0
+        try:
+            with open(local_path, 'wb') as fh:
+                while received < size:
+                    reply = self._client.get_output_chunk(
+                        received, VIDEO_CHUNK_BYTES)
+                    if not reply.get('success', True):
+                        raise OSError(reply.get('error', 'chunk refused'))
+                    chunk_data = (reply.get('data') or {})
+                    chunk = base64.b64decode(chunk_data.get('data', ''))
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    received += len(chunk)
+                    self._set_status(
+                        f'downloading result... {received * 100 // max(size, 1)}%')
+                    if chunk_data.get('eof'):
+                        break
+        except (OSError, ValueError) as e:
+            self._set_status(f'could not save the result: {e}', error=True)
+            return
+
+        if received < size:
+            self._set_status(
+                f'result is incomplete ({received} of {size} bytes)', error=True)
+            return
+
+        self._output_path = local_path
+        self.outputPathChanged.emit(local_path)
+        self._set_status(f'saved {name}')
+
     def _set_upload_progress(self, value: float) -> None:
         """Publish transfer progress, clamped."""
         self._upload_progress = max(0.0, min(1.0, value))
@@ -1925,10 +1992,17 @@ class Bridge(QObject):
             self._set_status('cannot reach server — not connected', error=True)
             return
 
-        # Auto-generate output path if none selected
+        # Auto-generate output path if none selected.
+        #
+        # Derived from the target the *pipeline* will open, not the one the
+        # operator picked: those are the same file only when the pipeline runs
+        # locally. Naming a Windows path to a pod asks it to write somewhere
+        # that is not a path there at all, and the render fails at the last
+        # step after all the work.
         if not self._output_path:
             import os
-            base, ext = os.path.splitext(self._target_path)
+            pipeline_target = self._target_remote_path or self._target_path
+            base, ext = os.path.splitext(pipeline_target)
             self._output_path = base + '_swapped' + ext
             self.outputPathChanged.emit(self._output_path)
 
@@ -2479,6 +2553,7 @@ class Bridge(QObject):
                     self._batch_complete = True
                     self.batchCompleteChanged.emit(True)
                     self._refresh_output_thumbnail()
+                    self._download_output()
                     if self._photo_targets:
                         # Fetching the images is a blocking request, and this
                         # runs on the socket's own receive thread — waiting

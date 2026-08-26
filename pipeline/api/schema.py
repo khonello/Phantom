@@ -159,6 +159,8 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
     'upload_video_end':   {'upload_id': str},
     'upload_video_cancel': {'upload_id': str},
     'get_render_thumbnails': {},
+    'get_output_info':  {},
+    'get_output_chunk': {'offset': int, 'length': int},
     'set_target_faces': {'points': list},
     'list_templates':  {},
     'set_template':    {'id': str},
@@ -279,6 +281,8 @@ CMD_UPLOAD_VIDEO_CHUNK = 'upload_video_chunk'
 CMD_UPLOAD_VIDEO_END = 'upload_video_end'
 CMD_UPLOAD_VIDEO_CANCEL = 'upload_video_cancel'
 CMD_GET_RENDER_THUMBNAILS = 'get_render_thumbnails'
+CMD_GET_OUTPUT_INFO = 'get_output_info'
+CMD_GET_OUTPUT_CHUNK = 'get_output_chunk'
 CMD_SET_TARGET_FACES = 'set_target_faces'
 CMD_LIST_TEMPLATES = 'list_templates'
 CMD_SET_TEMPLATE = 'set_template'

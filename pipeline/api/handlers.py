@@ -226,6 +226,29 @@ def handle_set_output(config: FaceSwapConfig, path: str) -> ResponseMessage:
             error='Output path cannot be empty',
         )
 
+    # An output path is chosen on the desktop and applied here, and the two are
+    # only the same filesystem when the pipeline runs locally. On a pod a
+    # Windows path is not a path at all, and a Linux one names a directory that
+    # very likely does not exist — either way the render fails at the last step,
+    # after all the work. Keep the filename the operator's choice implies and
+    # put it beside the uploaded target, which is somewhere this machine can
+    # certainly write.
+    directory = os.path.dirname(path)
+    if directory and not os.path.isdir(directory):
+        fallback_dir = (
+            os.path.dirname(config.target_path)
+            if config.target_path and os.path.isdir(os.path.dirname(config.target_path))
+            else _UPLOAD_DIR
+        )
+        os.makedirs(fallback_dir, exist_ok=True)
+        relocated = os.path.join(fallback_dir, os.path.basename(path))
+        emit_status(
+            f'Output directory {directory} is not on this machine — '
+            f'writing to {relocated}',
+            scope='API',
+        )
+        path = relocated
+
     # Normalize if directory
     if config.source_path and config.target_path:
         normalized = normalize_output_path(config.source_path, config.target_path, path)
@@ -1042,6 +1065,88 @@ def handle_get_render_thumbnails(config: FaceSwapConfig) -> ResponseMessage:
             'output': _first_frame_jpeg(output) if output and os.path.isfile(output) else None,
             'target_path': target,
             'output_path': output,
+        },
+    )
+
+
+def handle_get_output_info(config: FaceSwapConfig) -> ResponseMessage:
+    """
+    Size and name of the finished render, so the desktop can fetch it.
+
+    A render writes on the *pipeline's* filesystem. When that is a pod it is
+    another machine, so the operator has no way to reach the file they just paid
+    to produce — the same gap uploading solved in the other direction. Photo
+    mode already answers this by returning images inline; a video is too large
+    for that, so it is read back in chunks.
+
+    Args:
+        config: FaceSwapConfig, supplying `output_path`
+
+    Returns:
+        ResponseMessage with `name` and `size`, or an error if nothing is there
+    """
+    path = config.output_path
+    if not path or not os.path.isfile(path):
+        return ResponseMessage(
+            type='get_output_info', data={}, success=False,
+            error='No output file to download',
+        )
+    return ResponseMessage(
+        type='get_output_info',
+        data={
+            'name': os.path.basename(path),
+            'size': os.path.getsize(path),
+            'path': path,
+        },
+    )
+
+
+def handle_get_output_chunk(
+    config: FaceSwapConfig,
+    offset: int,
+    length: int,
+) -> ResponseMessage:
+    """
+    Read a slice of the finished render.
+
+    Takes no path, for the reason `get_render_thumbnails` does not: a command
+    that read any path a client named would serve arbitrary files off the pod.
+    It answers only for the output the config already points at.
+
+    Args:
+        config: FaceSwapConfig, supplying `output_path`
+        offset: Byte offset to read from
+        length: Bytes to read, clamped to the chunk size
+
+    Returns:
+        ResponseMessage with base64 `data` and whether the file ends here
+    """
+    path = config.output_path
+    if not path or not os.path.isfile(path):
+        return ResponseMessage(
+            type='get_output_chunk', data={}, success=False,
+            error='No output file to download',
+        )
+
+    size = os.path.getsize(path)
+    if offset < 0 or offset > size:
+        return ResponseMessage(
+            type='get_output_chunk', data={}, success=False,
+            error=f'Offset {offset} outside a {size} byte file',
+        )
+
+    length = max(1, min(int(length or VIDEO_CHUNK_BYTES), VIDEO_CHUNK_BYTES))
+    with open(path, 'rb') as fh:
+        fh.seek(offset)
+        chunk = fh.read(length)
+
+    return ResponseMessage(
+        type='get_output_chunk',
+        data={
+            'offset': offset,
+            'size': size,
+            'data': base64.b64encode(chunk).decode('ascii'),
+            'eof': offset + len(chunk) >= size,
         },
     )
 
@@ -1872,6 +1977,13 @@ def dispatch_command(
 
         elif command_type == 'get_render_thumbnails':
             return handle_get_render_thumbnails(config)
+
+        elif command_type == 'get_output_info':
+            return handle_get_output_info(config)
+
+        elif command_type == 'get_output_chunk':
+            return handle_get_output_chunk(
+                config, int(data.get('offset', 0)), int(data.get('length', 0)))
 
         elif command_type == 'upload_video_cancel':
             return handle_upload_video_cancel(str(data.get('upload_id', '')))
