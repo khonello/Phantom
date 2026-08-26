@@ -170,6 +170,52 @@ else
     echo "Run manually: ${PIP} install -r requirements-pipeline-gpu.txt"
 fi
 
+# ── 6a. One onnxruntime, and it has to be the GPU one ───────────────────
+# insightface depends on `onnxruntime` — the CPU wheel — and both packages
+# install into the same `onnxruntime/` directory. Whichever pip writes last
+# wins, and it writes the CPU one last, quietly replacing the GPU binaries
+# installed moments earlier in the same command.
+#
+# Nothing about that looks like a failure. The only symptom is
+# get_available_providers() returning ['AzureExecutionProvider',
+# 'CPUExecutionProvider'], which core.py turns into the argparse choices for
+# --execution-provider. So the pipeline rejects its own launch flag:
+#
+#   pipeline.py: error: argument --execution-provider: invalid choice: 'cuda'
+#
+# Outside the requirements-hash guard on purpose: a warm volume skips the pip
+# sync, and this has to be true on every boot, not just the ones that install.
+echo ""
+echo "--- ONNX Runtime ---"
+_phase "onnxruntime"
+if ${PIP} list --format=freeze 2>/dev/null | grep -q '^onnxruntime=='; then
+    echo "CPU onnxruntime present (pulled in by insightface) — removing."
+    ${PIP} uninstall -y onnxruntime
+    # Reinstall the GPU build: the CPU wheel overwrote files they share.
+    ${PIP} install --force-reinstall --no-deps 'onnxruntime-gpu>=1.15.0'
+else
+    echo "No CPU onnxruntime installed."
+fi
+
+# Verify the provider is actually on offer. Same reasoning as the cuDNN check
+# below: a pod that boots without CUDA bills a full GPU hour for CPU output.
+ORT_PROVIDERS=$(${PYTHON} -c "
+import onnxruntime
+print(','.join(onnxruntime.get_available_providers()))
+" 2>/dev/null || echo "")
+echo "Providers: ${ORT_PROVIDERS:-<none>}"
+case "${ORT_PROVIDERS}" in
+    *CUDAExecutionProvider*)
+        echo "Verified: CUDAExecutionProvider is available."
+        ;;
+    *)
+        echo "ERROR: onnxruntime offers no CUDAExecutionProvider."
+        echo "       --execution-provider cuda would be rejected as an invalid"
+        echo "       choice and the pipeline would never start."
+        exit 1
+        ;;
+esac
+
 # ── 6b. cuDNN 9 for ONNX Runtime ─────────────────────────────────────────────
 # onnxruntime-gpu requires libcudnn.so.9 which most RunPod base images don't
 # ship. Install nvidia-cudnn-cu12 with --no-deps to get just the .so files

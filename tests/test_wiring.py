@@ -175,6 +175,24 @@ check('the phrase RunPod actually returned still matches',
       'not enough free gpus' in orch_src.lower(),
       'RunPod said "There are not enough free GPUs on the host machine"')
 
+# insightface depends on the CPU `onnxruntime`, and both wheels write the same
+# `onnxruntime/` directory, so the CPU one lands last and shadows the GPU build.
+# The only symptom is an argparse error rejecting --execution-provider cuda, so
+# the repair and its verification both have to survive.
+startup_src = read('runpod', 'startup.sh')
+check('startup removes the CPU onnxruntime that shadows the GPU build',
+      'uninstall -y onnxruntime' in startup_src)
+check('startup reinstalls the GPU build after that removal',
+      'onnxruntime-gpu' in startup_src.split('uninstall -y onnxruntime')[1][:400])
+check('startup fails when CUDAExecutionProvider is missing',
+      'CUDAExecutionProvider' in startup_src and 'get_available_providers' in startup_src)
+
+# The pipeline is launched from a different subshell than startup.sh ran in, so
+# the cuDNN LD_LIBRARY_PATH only reaches it by being sourced again.
+check('the pipeline launch sources the cuDNN environment',
+      '/etc/profile.d/cudnn.sh' in orch_src.split('pipeline_cmd = (')[1][:400])
+
+
 # ── The deploy guide describes the code that exists ────────────────────
 print('\nDeploy guide matches the code')
 

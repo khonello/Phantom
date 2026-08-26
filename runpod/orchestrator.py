@@ -1170,8 +1170,15 @@ def _ssh_setup_and_start(ssh_address: str, key_path: str, timer: Optional["BootT
         # them through .bashrc is a convention rather than a guarantee. Each
         # _shell_run executes in a subshell, so this has to be part of the
         # command that actually launches the pipeline.
+        # /etc/profile.d/cudnn.sh carries the LD_LIBRARY_PATH that startup.sh
+        # worked out. startup.sh exported it into its own process, which is a
+        # child of this shell and cannot export back — and profile.d is read by
+        # login shells, which this is not. Without sourcing it here the pipeline
+        # starts with no cuDNN on the loader path, and ONNX falls back to CPU on
+        # a GPU that is billing.
         pipeline_cmd = (
             "[ -f /etc/rp_environment ] && . /etc/rp_environment;"
+            " [ -f /etc/profile.d/cudnn.sh ] && . /etc/profile.d/cudnn.sh;"
             " nohup {python} {pipeline} --execution-provider cuda"
             " > {log} 2>&1 &"
         ).format(
