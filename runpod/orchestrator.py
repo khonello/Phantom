@@ -32,7 +32,8 @@ Networking:
 
 GPU selection:
   - Auto-discovery (default): filters RunPod GPUs by RUNPOD_MIN_VRAM, RUNPOD_MAX_PRICE, and
-    architecture compatibility (must be <= _MAX_SUPPORTED_COMPUTE_CAP), cheapest first
+    architecture compatibility (must be <= _MAX_SUPPORTED_COMPUTE_CAP), fastest first
+  - AMD cards are excluded outright: the pipeline runs CUDAExecutionProvider
   - Manual override: set RUNPOD_GPU_TYPES to try specific GPUs in order
   - Architecture filter: GPUs with compute capability exceeding the image's PyTorch/ONNX
     support (e.g. Blackwell sm_120 on an sm_90 image) are automatically excluded
@@ -521,11 +522,72 @@ _GPU_COMPUTE_CAP = {
 }
 
 
+# ── GPU speed, for this workload ─────────────────────────────────────────────
+# One stream of small ONNX models, bound by latency rather than throughput. That
+# ordering is not FLOPS and is certainly not VRAM: it rewards clocks and cache,
+# and is indifferent to whether a card carries 24GB or 192GB, because nothing
+# here fills 24.
+#
+# Approximate and deliberately coarse — the ordering is what matters, not the
+# numbers. A measured session should replace an entry rather than argue with it.
+# Unknown GPUs score _GPU_PERF_UNKNOWN: tried, but after everything known-good,
+# since an unrecognised name is more often a new low-end part than a fast one.
+_GPU_PERF_UNKNOWN = 20
+
+_GPU_PERF = {
+    "RTX 4090": 100,
+    "H200": 95,
+    "H100": 95,
+    "RTX 6000 Ada": 88,
+    "L40S": 88,
+    "L40": 80,
+    "RTX 4080 SUPER": 78,
+    "RTX 4080": 74,
+    "A100": 70,
+    "RTX 5000 Ada": 66,
+    "RTX 3090 Ti": 62,
+    "RTX 3090": 58,
+    "A6000": 52,
+    "A40": 52,
+    "RTX 4000 Ada": 44,
+    "A5000": 42,
+    "A4500": 38,
+    "L4": 34,
+    "A4000": 32,
+    "RTX 2000 Ada": 30,
+    "V100": 25,
+}
+
+# Vendor prefixes that cannot run CUDAExecutionProvider at all. AMD's MI300X
+# lists at $0.50/hr with 192GB and passed every filter here, so a cheapest-first
+# search would reach for it — and every ONNX model in this pipeline would then
+# have no provider to run on. Cheap and unusable is the worst combination on a
+# rented GPU.
+_NON_CUDA_VENDORS = ("AMD", "Instinct", "MI300", "MI250", "MI210", "Radeon")
+
+
+def _is_cuda_gpu(gpu_id: str) -> bool:
+    """Whether a GPU can run the CUDA execution provider the pipeline requires."""
+    return not any(v.lower() in gpu_id.lower() for v in _NON_CUDA_VENDORS)
+
+
+def _gpu_perf(gpu_id: str) -> int:
+    """Relative speed for this workload; higher is faster."""
+    # Longest keyword first: "A40" is a substring of "RTX A4000", so shortest
+    # match wins would score an entry-level Ampere as a datacenter one.
+    for keyword in sorted(_GPU_PERF, key=len, reverse=True):
+        if keyword in gpu_id:
+            return _GPU_PERF[keyword]
+    return _GPU_PERF_UNKNOWN
+
+
 def _get_gpu_compute_cap(gpu_id: str) -> Optional[Tuple[int, int]]:
     """Return (major, minor) compute capability for a GPU ID, or None if unknown."""
-    for keyword, cap in _GPU_COMPUTE_CAP.items():
+    # Longest first, for the same reason as _gpu_perf: a short model keyword
+    # can sit inside a longer one and answer for the wrong card.
+    for keyword in sorted(_GPU_COMPUTE_CAP, key=len, reverse=True):
         if keyword in gpu_id:
-            return cap
+            return _GPU_COMPUTE_CAP[keyword]
     return None
 
 
@@ -562,15 +624,16 @@ def _discover_gpus(api_key: str, min_vram: int, max_price: float) -> List[Tuple[
 
     Queries all RunPod GPU types, filters by minimum VRAM, maximum
     per-hour price, and compute capability (must be <= _MAX_SUPPORTED_COMPUTE_CAP),
-    then sorts cheapest first.
+    then sorts fastest first.
 
     Returns:
-        List of (display_name, gpu_id, vram_gb, price) tuples, sorted by price.
+        List of (display_name, gpu_id, vram_gb, price) tuples, fastest first.
     """
     all_gpus = _get_gpu_types(api_key)
 
     candidates = []
     skipped_arch = []
+    skipped_vendor = []
     for gpu in all_gpus:
         gpu_id = gpu.get("id")
         name = gpu.get("displayName")
@@ -593,15 +656,28 @@ def _discover_gpus(api_key: str, min_vram: int, max_price: float) -> List[Tuple[
             skipped_arch.append((name, cap))
             continue
 
+        # The pipeline runs CUDA. A card that cannot is not a cheaper option,
+        # it is a pod that bills and produces nothing.
+        if not _is_cuda_gpu(gpu_id):
+            skipped_vendor.append(name)
+            continue
+
         candidates.append((name, gpu_id, vram, price))
 
     if skipped_arch:
         names = ", ".join("{} (sm_{}{})".format(n, c[0], c[1]) for n, c in skipped_arch)
         print("  Skipped (arch > sm_{}{}): {}".format(
             _MAX_SUPPORTED_COMPUTE_CAP[0], _MAX_SUPPORTED_COMPUTE_CAP[1], names))
+    if skipped_vendor:
+        print("  Skipped (no CUDA): {}".format(", ".join(skipped_vendor)))
 
-    # Sort by price ascending (cheapest first), then by VRAM descending as tiebreaker
-    candidates.sort(key=lambda c: (c[3], -c[2]))
+    # Fastest first, price only as a tiebreak. The price ceiling has already
+    # been applied above, so everything still here is affordable by definition
+    # and there is nothing left for cost to decide — while the difference
+    # between the fastest and slowest of them is the difference between a call
+    # and a slideshow. Cheapest-first put a card at the bottom of the range on
+    # a paid hour and called it a saving.
+    candidates.sort(key=lambda c: (-_gpu_perf(c[1]), c[3], -c[2]))
     return candidates
 
 
@@ -707,7 +783,7 @@ def _deploy_new_pod(mode: str) -> str:
     GPU selection:
     - If RUNPOD_GPU_TYPES is set: uses those exact GPUs in order (manual override)
     - Otherwise: auto-discovers GPUs by VRAM (>= RUNPOD_MIN_VRAM, default 16GB)
-      and price (<= RUNPOD_MAX_PRICE, default $1.00/hr), sorted cheapest first
+      and price (<= RUNPOD_MAX_PRICE, default $1.00/hr), sorted fastest first
 
     Iterates datacenters in priority order (from RUNPOD_DATACENTERS). Within each
     datacenter, tries each GPU candidate. Each datacenter is paired with its own
@@ -1366,7 +1442,7 @@ def cmd_gpus() -> None:
 
     # Print eligible GPUs first
     if auto_candidates:
-        print("Eligible GPUs (>= {}GB VRAM, <= ${:.2f}/hr, <= sm_{}{}) — sorted by price:".format(
+        print("Eligible GPUs (>= {}GB VRAM, <= ${:.2f}/hr, <= sm_{}{}) — fastest first:".format(
             min_vram, max_price, _MAX_SUPPORTED_COMPUTE_CAP[0], _MAX_SUPPORTED_COMPUTE_CAP[1]))
         for name, gpu_id, vram, price in auto_candidates:
             marker = " *" if name in manual_names else "  "

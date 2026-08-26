@@ -222,6 +222,23 @@ check('that re-exec cannot loop',
 
 # ── Deploy guide describes the code that exists ────────────────────────
 
+# Selection order. The price ceiling is applied before the sort, so everything
+# that survives is affordable and there is nothing left for cost to decide —
+# while the spread between fastest and slowest of them is the difference between
+# a call and a slideshow.
+check('GPU candidates are ordered by speed, not price',
+      '_gpu_perf(c[1])' in orch_src)
+check('AMD cards are excluded, since the pipeline needs CUDA',
+      '_is_cuda_gpu' in orch_src and 'MI300' in orch_src)
+# "A40" sits inside "RTX A4000". Shortest-match-wins scored an entry-level
+# Ampere as a datacenter one, and put it above cards twice its speed.
+for _fn in ('_gpu_perf', '_get_gpu_compute_cap'):
+    _body = orch_src.split('def {}'.format(_fn))[1].split(chr(10) + 'def ')[0]
+    check('{} matches the longest keyword first'.format(_fn),
+          'key=len' in _body and 'reverse=True' in _body)
+
+# ── Deploy guide describes the code that exists ────────────────────────
+
 # ── The deploy guide describes the code that exists ────────────────────
 print('\nDeploy guide matches the code')
 
