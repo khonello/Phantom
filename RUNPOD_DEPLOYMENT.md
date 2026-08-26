@@ -233,9 +233,19 @@ machine and left on persistent storage after the pod is gone.
 `start` and `resume` load the key before creating or resuming anything, so a
 missing or unreadable key stops you while nothing is billing. Docker mode never
 SSHes and skips the check, but register a key anyway: it is how you get a shell
-on a pod when something goes wrong — the command for that is copied from the
-pod's own page in the dashboard, not built by hand; see
-[Troubleshooting](#troubleshooting).
+on a pod when something goes wrong.
+
+**Nothing on a pod's page is needed here.** RunPod shows SSH connection details
+per pod, but only once that pod exists — which is *after* everything in Part 1.
+The two are not the same thing and are not needed at the same time:
+
+| | Where | When | Used by |
+|---|---|---|---|
+| Registering the public key | Settings → SSH Public Keys | once, **before** the first `start` | RunPod, writing `authorized_keys` at pod creation |
+| The `ssh …` connect line | the pod's page → Connect → SSH | only **after** a pod exists | you, by hand, for a shell |
+
+The orchestrator needs neither: it resolves the connect address itself. So the
+setup order has no circularity in it — register the key, then `start`.
 
 ### 1c — Network volume → `RUNPOD_DATACENTERS`
 
@@ -470,7 +480,7 @@ Every command is `python runpod/orchestrator.py <command>`.
 
 | Command | Does | Costs | Writes `.env` |
 |---|---|---|---|
-| `status` | state, GPU, cost/hr, uptime, URL | — | — |
+| `status` | state, GPU, cost/hr, uptime, URL, ready-to-paste `ssh` line | — | — |
 | `start` | **new** pod → setup → pipeline; prints the cold-start table | starts GPU billing | `RUNPOD_POD_ID`, `PHANTOM_API_URL` |
 | `resume` | boots the pod in `RUNPOD_POD_ID`, same setup path | starts GPU billing | `PHANTOM_API_URL` |
 | `stop` | pauses it; volume and container disk survive | ends GPU billing | — |
@@ -709,12 +719,23 @@ ssh <podHostId>@ssh.runpod.io
 tail -f /workspace/phantom-pipeline.log
 ```
 
-**Copy that first line from the dashboard** rather than assembling it: the
-running pod's page has **Connect → SSH**, which prints the whole command
-including `-i ~/.ssh/id_ed25519`. `podHostId` is per-pod, changes on every
-deploy, and is not the pod ID — nor is it returned by `runpod.get_pod()`, which
-is why the orchestrator queries GraphQL for it (see
-[runpod/TROUBLESHOOTING.md](runpod/TROUBLESHOOTING.md), and `_get_ssh_command`).
+Don't assemble that first line by hand — **`status` prints it**, ready to
+paste, whenever the pod is running:
+
+```
+$ python runpod/orchestrator.py status
+Pod:    phantom (abc123)
+Status: RUNNING
+...
+SSH:    ssh <podHostId>@ssh.runpod.io -i ~/.ssh/id_ed25519
+```
+
+`podHostId` is per-pod, changes on every deploy, and is not the pod ID — nor is
+it returned by `runpod.get_pod()`, which is why `_get_ssh_command` asks GraphQL
+for it (see [runpod/TROUBLESHOOTING.md](runpod/TROUBLESHOOTING.md)). The pod's
+own page in the dashboard shows the same line under **Connect → SSH**; `status`
+just saves the trip, and reads `RUNPOD_SSH_KEY_PATH` so the `-i` matches your
+actual `.env`.
 
 The pipeline runs under `nohup`, not tmux — there is no session to attach to, and
 the log is the whole picture.

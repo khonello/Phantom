@@ -1412,6 +1412,16 @@ def cmd_status(pod_id: str) -> None:
         else:
             proxy_url = _get_proxy_ws_url(pod_id)
             print("URL:    wss://{}/ws (proxy)".format(proxy_url))
+
+        # The dashboard shows this line on the pod's page, but only once the pod
+        # exists — and reading it there means leaving the terminal for a value
+        # that is already one GraphQL call away. podHostId is per-pod and is not
+        # returned by runpod.get_pod(), so printing it here is the difference
+        # between copying a command and reconstructing one.
+        ssh_cmd = _get_ssh_command(pod_id)
+        if ssh_cmd:
+            key_path = os.getenv("RUNPOD_SSH_KEY_PATH", "~/.ssh/id_ed25519")
+            print("SSH:    ssh {} -i {}".format(ssh_cmd, key_path))
     else:
         print("URL:    not available (pod status: {})".format(status))
 
