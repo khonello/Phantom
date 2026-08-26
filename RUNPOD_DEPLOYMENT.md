@@ -210,7 +210,7 @@ repo all live on it, so `start` skips the expensive steps once it is warm.
 
 Copy the **volume ID** from the storage list and pair it with its datacenter:
 
-    RUNPOD_DATACENTERS=EU-RO-1:z8now7p5ts
+    RUNPOD_DATACENTERS=EU-RO-1:<volume-id>
 
 The datacenter and the volume travel together because volumes are
 datacenter-local — a pod can only be placed where its volume lives. One entry is
@@ -238,7 +238,7 @@ working default and `.env.example` documents each one inline.
 ```env
 RUNPOD_API_KEY=rp_xxxxxxxxxxxxxxxxxxxx          # 1a
 RUNPOD_SSH_KEY_PATH=~/.ssh/id_ed25519           # 1b — ssh mode only
-RUNPOD_DATACENTERS=EU-RO-1:z8now7p5ts           # 1c
+RUNPOD_DATACENTERS=EU-RO-1:<volume-id>          # 1c
 RUNPOD_IMAGE=runpod/pytorch:2.2.0-py3.10-cuda12.1.1-devel-ubuntu22.04
 
 RUNPOD_POD_ID=                                  # 1d — written by `start`
@@ -372,7 +372,7 @@ unstateable-wrong: you cannot name a region without naming the volume that makes
 it usable.
 
 ```env
-RUNPOD_DATACENTERS=EU-RO-1:z8now7p5ts,US-KS-2:newvolumeid
+RUNPOD_DATACENTERS=EU-RO-1:<volume-id>,US-KS-2:<new-volume-id>
 ```
 
 The procedure:
