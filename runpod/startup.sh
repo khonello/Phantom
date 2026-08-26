@@ -188,21 +188,39 @@ fi
 echo ""
 echo "--- ONNX Runtime ---"
 _phase "onnxruntime"
-if ${PIP} list --format=freeze 2>/dev/null | grep -q '^onnxruntime=='; then
-    echo "CPU onnxruntime present (pulled in by insightface) — removing."
-    ${PIP} uninstall -y onnxruntime
-    # Reinstall the GPU build: the CPU wheel overwrote files they share.
-    ${PIP} install --force-reinstall --no-deps 'onnxruntime-gpu>=1.15.0'
-else
-    echo "No CPU onnxruntime installed."
-fi
 
-# Verify the provider is actually on offer. Same reasoning as the cuDNN check
-# below: a pod that boots without CUDA bills a full GPU hour for CPU output.
-ORT_PROVIDERS=$(${PYTHON} -c "
+_ort_providers() {
+    ${PYTHON} -c "
 import onnxruntime
 print(','.join(onnxruntime.get_available_providers()))
-" 2>/dev/null || echo "")
+" 2>/dev/null || echo ""
+}
+
+# Remove the CPU wheel first: while it is installed it owns the shared files,
+# so reinstalling the GPU build under it achieves nothing.
+if ${PIP} list --format=freeze 2>/dev/null | grep -q '^onnxruntime=='; then
+    echo "CPU onnxruntime present (pulled in by insightface) - removing."
+    ${PIP} uninstall -y onnxruntime
+fi
+
+# Then repair on the evidence, not on whether that removal just happened.
+# Uninstalling the CPU wheel deletes the files it overwrote, which are the GPU
+# build's own — so a venv can reach this point with no CPU wheel installed and
+# a gutted GPU one, and gating the reinstall on "did we just remove something"
+# skips the repair exactly when it is needed. The provider list is the thing
+# that has to be true; test that instead.
+ORT_PROVIDERS=$(_ort_providers)
+case "${ORT_PROVIDERS}" in
+    *CUDAExecutionProvider*)
+        echo "CUDAExecutionProvider already available."
+        ;;
+    *)
+        echo "No CUDAExecutionProvider (have: ${ORT_PROVIDERS:-<none>}) - reinstalling GPU build."
+        ${PIP} install --force-reinstall --no-deps 'onnxruntime-gpu>=1.15.0'
+        ORT_PROVIDERS=$(_ort_providers)
+        ;;
+esac
+
 echo "Providers: ${ORT_PROVIDERS:-<none>}"
 case "${ORT_PROVIDERS}" in
     *CUDAExecutionProvider*)
@@ -212,6 +230,8 @@ case "${ORT_PROVIDERS}" in
         echo "ERROR: onnxruntime offers no CUDAExecutionProvider."
         echo "       --execution-provider cuda would be rejected as an invalid"
         echo "       choice and the pipeline would never start."
+        echo "       Installed onnxruntime packages:"
+        ${PIP} list --format=freeze 2>/dev/null | grep -i onnxruntime || echo "       (none)"
         exit 1
         ;;
 esac

@@ -479,12 +479,20 @@ _MAX_SUPPORTED_COMPUTE_CAP = (9, 0)  # sm_90 (Hopper) — update when image upgr
 # Only architectures at risk of exceeding _MAX_SUPPORTED_COMPUTE_CAP need
 # entries — older GPUs that are guaranteed compatible can be omitted.
 _GPU_COMPUTE_CAP = {
-    # Blackwell (sm_120 / compute 12.0)
+    # Blackwell (sm_120 / compute 12.0).
+    #
+    # Match the family before the models. RunPod puts the architecture in the
+    # display name ("NVIDIA RTX PRO 4000 Blackwell"), and an enumeration of
+    # models is a list that goes stale the moment NVIDIA ships another one —
+    # which is how an RTX PRO 4000 was scheduled while 6000 and 4500 were
+    # listed. The whole RTX PRO line is Blackwell; earlier workstation parts
+    # are branded RTX A (Ampere) or RTX Ada.
+    "Blackwell": (12, 0),
+    "RTX PRO": (12, 0),
     "RTX 5090": (12, 0),
     "RTX 5080": (12, 0),
     "RTX 5070": (12, 0),
-    "RTX PRO 6000": (12, 0),
-    "RTX PRO 4500": (12, 0),
+    "RTX 5060": (12, 0),
     "B200": (12, 0),
     "B100": (12, 0),
     "GB200": (12, 0),
@@ -524,10 +532,13 @@ def _get_gpu_compute_cap(gpu_id: str) -> Optional[Tuple[int, int]]:
 def _is_gpu_compatible(gpu_id: str) -> bool:
     """Check if a GPU's architecture is supported by the current image.
 
-    Returns True if the GPU is compatible or if its architecture is unknown
-    (unknown GPUs are allowed through — RunPod will fail at pod creation if
-    truly incompatible, and we don't want to block GPUs we simply haven't
-    mapped yet).
+    Unknown architectures are allowed through, so that a GPU we simply have not
+    mapped is not blocked. Note what that costs, because this comment used to
+    claim otherwise: **RunPod does not refuse an incompatible GPU.** It
+    scheduled a Blackwell card against a CUDA 12.1 image without complaint, and
+    the mismatch surfaced only after the pod was up and billing. The filter is
+    the only thing standing between a wrong GPU and a paid hour, so the family
+    keywords above matter more than the model list.
     """
     cap = _get_gpu_compute_cap(gpu_id)
     if cap is None:

@@ -182,8 +182,14 @@ check('the phrase RunPod actually returned still matches',
 startup_src = read('runpod', 'startup.sh')
 check('startup removes the CPU onnxruntime that shadows the GPU build',
       'uninstall -y onnxruntime' in startup_src)
-check('startup reinstalls the GPU build after that removal',
-      'onnxruntime-gpu' in startup_src.split('uninstall -y onnxruntime')[1][:400])
+# Deliberately NOT "reinstall right after the uninstall". Removing the CPU
+# wheel deletes the files it overwrote, which are the GPU build's own, so a venv
+# can arrive with no CPU wheel and a gutted GPU one. The repair has to key off
+# the provider list, which is the condition that actually has to hold.
+check('the GPU reinstall is driven by the provider list, not the uninstall',
+      'force-reinstall' in startup_src
+      and startup_src.index('CUDAExecutionProvider')
+      < startup_src.index('force-reinstall'))
 check('startup fails when CUDAExecutionProvider is missing',
       'CUDAExecutionProvider' in startup_src and 'get_available_providers' in startup_src)
 
@@ -192,6 +198,17 @@ check('startup fails when CUDAExecutionProvider is missing',
 check('the pipeline launch sources the cuDNN environment',
       '/etc/profile.d/cudnn.sh' in orch_src.split('pipeline_cmd = (')[1][:400])
 
+
+# The architecture filter is the only thing between a Blackwell card and a paid
+# hour on an image whose torch and ONNX cannot use it — RunPod schedules one
+# without complaint. An RTX PRO 4000 got through while 6000 and 4500 were listed
+# by model, so the family keywords are what must not be lost.
+for _kw in ('Blackwell', 'RTX PRO'):
+    check('the GPU filter matches {} as a family'.format(_kw),
+          "\"{}\"".format(_kw) in orch_src,
+          'model-by-model entries go stale as NVIDIA ships more')
+
+# ── Deploy guide describes the code that exists ────────────────────────
 
 # ── The deploy guide describes the code that exists ────────────────────
 print('\nDeploy guide matches the code')
