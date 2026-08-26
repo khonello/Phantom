@@ -27,6 +27,9 @@ from pipeline.config import FaceSwapConfig
 from pipeline.api.schema import (
     MAX_PHOTO_BYTES,
     MAX_PHOTO_TARGETS,
+    MAX_VIDEO_BYTES,
+    MAX_VIDEO_SECONDS,
+    VIDEO_CHUNK_BYTES,
     ResponseMessage,
 )
 from pipeline.processing.pipeline import ProcessingPipeline
@@ -35,7 +38,9 @@ from pipeline.services import swapper_models
 from pipeline.services.database import SourceReview
 from pipeline.services.templates import TemplateLibrary
 from pipeline.logging import emit_status, emit_error, emit_warning
-from pipeline.io.ffmpeg import is_image, is_video, normalize_output_path
+from pipeline.io.ffmpeg import (
+    is_image, is_video, normalize_output_path, probe_duration,
+)
 
 
 @dataclass
@@ -948,6 +953,373 @@ def handle_set_template(config: FaceSwapConfig, template_id: str) -> ResponseMes
     )
 
 
+# In-progress video uploads, keyed by the id handed back at begin.
+#
+# Server-side state, which nothing else in this module keeps. A video is too
+# large for the one-message shape every other upload uses, so its transfer has a
+# beginning and an end, and something has to remember the middle.
+_VIDEO_UPLOADS: Dict[str, Dict[str, Any]] = {}
+
+
+def _first_frame_jpeg(path: str, max_side: int = 640) -> Optional[str]:
+    """
+    Read frame zero of a video as a base64 JPEG, for a preview thumbnail.
+
+    The render panes show what is going in and what came out, and neither file
+    is reachable from the desktop: both live on the pipeline's filesystem, which
+    on a pod is another machine. A path would be useless there, so the picture
+    travels instead — the same reason `get_photo_results` returns images rather
+    than paths.
+
+    Downscaled because it is a thumbnail: a 1080p first frame is ~200 KB of JPEG
+    to say something a 640px one says as well.
+
+    Args:
+        path: Video (or image) to read the first frame of
+        max_side: Long side to fit the thumbnail within
+
+    Returns:
+        Base64 JPEG, or None if the file could not be read
+    """
+    try:
+        import cv2
+
+        capture = cv2.VideoCapture(path)
+        try:
+            ok, frame = capture.read()
+        finally:
+            capture.release()
+
+        if not ok or frame is None:
+            return None
+
+        height, width = frame.shape[:2]
+        longest = max(height, width)
+        if longest > max_side:
+            scale = max_side / float(longest)
+            frame = cv2.resize(
+                frame, (int(width * scale), int(height * scale)),
+                interpolation=cv2.INTER_AREA,
+            )
+
+        ok, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        if not ok:
+            return None
+        return base64.b64encode(buffer.tobytes()).decode('ascii')
+    except Exception as e:
+        emit_warning(
+            f'Could not read a first frame from {path}: {type(e).__name__}: {e}',
+            scope='HANDLERS',
+        )
+        return None
+
+
+def handle_get_render_thumbnails(config: FaceSwapConfig) -> ResponseMessage:
+    """
+    First frames of the configured render target and its output.
+
+    Deliberately takes no path. A command that thumbnailed any path the client
+    named would read arbitrary files off the pod, so this answers only for what
+    the config already points at — which is exactly what the render panes show.
+
+    Either may be absent: the output does not exist until a render finishes, and
+    asking before then is normal rather than an error.
+
+    Args:
+        config: FaceSwapConfig, supplying `target_path` and `output_path`
+
+    Returns:
+        ResponseMessage with `target` and `output` base64 JPEGs, each possibly
+        None
+    """
+    target = config.target_path
+    output = config.output_path
+
+    return ResponseMessage(
+        type='get_render_thumbnails',
+        data={
+            'target': _first_frame_jpeg(target) if target and os.path.isfile(target) else None,
+            'output': _first_frame_jpeg(output) if output and os.path.isfile(output) else None,
+            'target_path': target,
+            'output_path': output,
+        },
+    )
+
+
+def _remove_quietly(path: str) -> None:
+    """Delete a refused upload; its own directory goes with it."""
+    try:
+        os.remove(path)
+        os.rmdir(os.path.dirname(path))
+    except OSError:
+        pass
+
+
+def _discard_video_upload(upload_id: str) -> None:
+    """Close and delete a partial upload, whatever state it is in."""
+    entry = _VIDEO_UPLOADS.pop(upload_id, None)
+    if not entry:
+        return
+    try:
+        entry["handle"].close()
+    except Exception:
+        pass
+    _remove_quietly(entry["path"])
+
+
+def handle_upload_video_begin(
+    config: FaceSwapConfig,
+    name: str,
+    size: int,
+) -> ResponseMessage:
+    """
+    Open a chunked upload for a target video.
+
+    Video needs a transfer path of its own because the photo one cannot stretch
+    to it: `upload_target` carries an image base64 in a single message, and the
+    server caps a message at 64 MB, which base64 turns into a 48 MB ceiling on
+    the file itself. Chunking takes the message size out of the product limit.
+
+    The declared size is refused here so an oversized file is stopped before any
+    of it is sent rather than after a minutes-long transfer. It is checked again
+    while chunks arrive, because a declaration is the client's claim and the
+    bytes are the fact.
+
+    Args:
+        config: FaceSwapConfig
+        name: Original filename, for the extension and the saved name
+        size: Declared total size in bytes
+
+    Returns:
+        ResponseMessage carrying `upload_id` and the chunk size to use
+    """
+    name = os.path.basename(name or "") or "target.mp4"
+
+    if not is_video(name):
+        return ResponseMessage(
+            type="upload_video_begin", data={}, success=False,
+            error=f"{name} is not a video format this pipeline can read",
+        )
+
+    if size <= 0:
+        return ResponseMessage(
+            type="upload_video_begin", data={}, success=False,
+            error="Declared size must be positive",
+        )
+
+    if size > MAX_VIDEO_BYTES:
+        return ResponseMessage(
+            type="upload_video_begin",
+            data={"max_bytes": MAX_VIDEO_BYTES},
+            success=False,
+            error=(
+                f"{size / (1024 * 1024):.0f} MB exceeds the "
+                f"{MAX_VIDEO_BYTES // (1024 * 1024)} MB limit"
+            ),
+        )
+
+    os.makedirs(_UPLOAD_DIR, exist_ok=True)
+    job_dir = tempfile.mkdtemp(prefix="video_", dir=_UPLOAD_DIR)
+    path = os.path.join(job_dir, name)
+
+    upload_id = os.path.basename(job_dir)
+    _VIDEO_UPLOADS[upload_id] = {
+        "path": path,
+        "handle": open(path, "wb"),
+        "written": 0,
+        "declared": size,
+        "next_seq": 0,
+    }
+
+    emit_status(
+        f"Receiving target video {name} ({size / (1024 * 1024):.0f} MB)...",
+        scope="API",
+    )
+    return ResponseMessage(
+        type="upload_video_begin",
+        data={"upload_id": upload_id, "chunk_bytes": VIDEO_CHUNK_BYTES},
+    )
+
+
+def handle_upload_video_chunk(
+    upload_id: str,
+    seq: int,
+    data: str,
+) -> ResponseMessage:
+    """
+    Append one chunk to an open upload.
+
+    Sequence numbers are checked rather than assumed. A single WebSocket
+    connection delivers in order, so an out-of-order chunk means a client bug or
+    a retry against a stale upload — and either way the assembled file would be
+    silently corrupt, which surfaces as a render failing minutes later for no
+    stated reason. Refusing here names the cause while it is still visible.
+
+    Args:
+        upload_id: From `upload_video_begin`
+        seq: Zero-based chunk index
+        data: Base64 chunk
+
+    Returns:
+        ResponseMessage with bytes received so far, for progress
+    """
+    entry = _VIDEO_UPLOADS.get(upload_id)
+    if entry is None:
+        return ResponseMessage(
+            type="upload_video_chunk", data={}, success=False,
+            error="Unknown or already-finished upload",
+        )
+
+    expected = entry["next_seq"]
+    if seq != expected:
+        _discard_video_upload(upload_id)
+        return ResponseMessage(
+            type="upload_video_chunk", data={}, success=False,
+            error=f"Chunk out of order (expected {expected}, got {seq})",
+        )
+
+    try:
+        chunk = base64.b64decode(data)
+    except Exception as e:
+        _discard_video_upload(upload_id)
+        return ResponseMessage(
+            type="upload_video_chunk", data={}, success=False,
+            error=f"Invalid base64 in chunk {seq}: {type(e).__name__}",
+        )
+
+    if entry["written"] + len(chunk) > MAX_VIDEO_BYTES:
+        _discard_video_upload(upload_id)
+        return ResponseMessage(
+            type="upload_video_chunk", data={}, success=False,
+            error=(
+                f"Upload exceeded the "
+                f"{MAX_VIDEO_BYTES // (1024 * 1024)} MB limit"
+            ),
+        )
+
+    entry["handle"].write(chunk)
+    entry["written"] += len(chunk)
+    entry["next_seq"] = seq + 1
+
+    return ResponseMessage(
+        type="upload_video_chunk",
+        data={"received": entry["written"], "declared": entry["declared"]},
+    )
+
+
+def handle_upload_video_end(
+    config: FaceSwapConfig,
+    upload_id: str,
+) -> ResponseMessage:
+    """
+    Close a completed upload, check its duration, and stage it as the target.
+
+    Duration is probed here rather than trusted from the client, for the reason
+    the byte count is re-checked: a limit only the desktop enforces is not a
+    limit. Bytes and seconds refuse different things — bytes bound the transfer,
+    seconds bound the render, and a well compressed ten minutes can be smaller
+    than a badly compressed one while costing twenty times as much to process.
+
+    A clip whose duration cannot be read is refused. An unknown duration against
+    a limit is not a pass, and ffprobe failing here usually means the file is
+    not the video it claimed to be.
+
+    Args:
+        config: FaceSwapConfig
+        upload_id: From `upload_video_begin`
+
+    Returns:
+        ResponseMessage with the server-side path and the clip's duration
+    """
+    entry = _VIDEO_UPLOADS.get(upload_id)
+    if entry is None:
+        return ResponseMessage(
+            type="upload_video_end", data={}, success=False,
+            error="Unknown or already-finished upload",
+        )
+
+    path = entry["path"]
+    try:
+        entry["handle"].close()
+    except Exception:
+        pass
+    _VIDEO_UPLOADS.pop(upload_id, None)
+
+    written = entry["written"]
+    if written == 0:
+        _remove_quietly(path)
+        return ResponseMessage(
+            type="upload_video_end", data={}, success=False,
+            error="No data received",
+        )
+
+    duration = probe_duration(path)
+    if duration is None:
+        _remove_quietly(path)
+        return ResponseMessage(
+            type="upload_video_end", data={}, success=False,
+            error="Could not read the clip — it may be corrupt or not a video",
+        )
+
+    if duration > MAX_VIDEO_SECONDS:
+        _remove_quietly(path)
+        return ResponseMessage(
+            type="upload_video_end",
+            data={"max_seconds": MAX_VIDEO_SECONDS, "duration": duration},
+            success=False,
+            error=(
+                f"{duration / 60:.1f} min exceeds the "
+                f"{MAX_VIDEO_SECONDS // 60} min limit"
+            ),
+        )
+
+    # Single-file target. Photo mode is signalled by which field holds the
+    # targets, so the list has to be cleared or a stale batch would win.
+    config.set("target_path", path)
+    config.set("target_paths", [])
+    config.set("target_face_points", [])
+    _clear_template(config)
+    config.set("output_dir", None)
+
+    emit_status(
+        f"Target video ready: {os.path.basename(path)} "
+        f"({written / (1024 * 1024):.0f} MB, {duration:.0f}s)",
+        scope="API",
+    )
+    return ResponseMessage(
+        type="upload_video_end",
+        data={
+            "path": path,
+            "bytes": written,
+            "duration": duration,
+            # Sent with the reply rather than fetched afterwards: the file is
+            # already open here, and the pane should fill the moment the
+            # transfer lands.
+            "thumbnail": _first_frame_jpeg(path),
+        },
+    )
+
+
+def handle_upload_video_cancel(upload_id: str) -> ResponseMessage:
+    """
+    Abandon an upload and delete what arrived.
+
+    Without this a cancelled transfer leaves its partial file on the volume
+    until the pod is discarded, and a 200 MB ceiling makes that worth cleaning
+    up. Successful whether or not the id was still open, so a cancel racing a
+    failure is not itself an error.
+
+    Args:
+        upload_id: From `upload_video_begin`
+
+    Returns:
+        ResponseMessage echoing the id
+    """
+    _discard_video_upload(upload_id)
+    return ResponseMessage(
+        type="upload_video_cancel", data={"upload_id": upload_id})
+
+
 def handle_upload_target(
     config: FaceSwapConfig,
     images: List[Dict[str, Any]],
@@ -1482,6 +1854,27 @@ def dispatch_command(
 
         elif command_type == 'upload_target':
             return handle_upload_target(config, data.get('images', []), ctx.pipeline)
+
+        elif command_type == 'upload_video_begin':
+            return handle_upload_video_begin(
+                config, str(data.get('name', '')), int(data.get('size', 0)))
+
+        elif command_type == 'upload_video_chunk':
+            return handle_upload_video_chunk(
+                str(data.get('upload_id', '')),
+                int(data.get('seq', -1)),
+                str(data.get('data', '')),
+            )
+
+        elif command_type == 'upload_video_end':
+            return handle_upload_video_end(
+                config, str(data.get('upload_id', '')))
+
+        elif command_type == 'get_render_thumbnails':
+            return handle_get_render_thumbnails(config)
+
+        elif command_type == 'upload_video_cancel':
+            return handle_upload_video_cancel(str(data.get('upload_id', '')))
 
         elif command_type == 'set_target_faces':
             return handle_set_target_faces(config, data.get('points', []))

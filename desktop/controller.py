@@ -415,6 +415,51 @@ class PipelineClient:
         """
         return self._send('upload_target', _timeout=60.0, images=images)
 
+    # ── Target video transfer ────────────────────────────────────────────────
+    # A video cannot use `upload_target`'s shape. That carries a file base64 in
+    # one message, and the server caps a message at 64 MB, which base64's 4/3
+    # inflation turns into a 48 MB ceiling on the file. Chunking keeps the
+    # message size out of the product limit.
+    #
+    # Each call is a normal request/response, so a chunk that is refused stops
+    # the transfer at that chunk rather than at the end of it.
+
+    def upload_video_begin(self, name: str, size: int) -> Dict[str, Any]:
+        """Open a chunked target-video upload. Returns `upload_id`."""
+        return self._send('upload_video_begin', name=name, size=size)
+
+    def upload_video_chunk(
+        self, upload_id: str, seq: int, data: str,
+    ) -> Dict[str, Any]:
+        """Send one base64 chunk. Sequence must be contiguous from zero."""
+        return self._send(
+            'upload_video_chunk', _timeout=120.0,
+            upload_id=upload_id, seq=seq, data=data,
+        )
+
+    def upload_video_end(self, upload_id: str) -> Dict[str, Any]:
+        """
+        Close the upload and stage the clip as the target.
+
+        The reply carries the server-side path, the probed duration and a
+        first-frame thumbnail. Given a generous timeout because the server
+        probes the file with ffprobe before answering.
+        """
+        return self._send('upload_video_end', _timeout=60.0, upload_id=upload_id)
+
+    def upload_video_cancel(self, upload_id: str) -> Dict[str, Any]:
+        """Abandon an upload and delete the partial file server-side."""
+        return self._send('upload_video_cancel', upload_id=upload_id)
+
+    def get_render_thumbnails(self) -> Dict[str, Any]:
+        """
+        First frames of the configured render target and output.
+
+        Both files live on the pipeline's filesystem, so the pictures travel
+        rather than paths — the same reason `get_photo_results` returns images.
+        """
+        return self._send('get_render_thumbnails', _timeout=30.0)
+
     def set_target_faces(
         self, points: List[Optional[List[float]]],
     ) -> Dict[str, Any]:

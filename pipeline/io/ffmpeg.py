@@ -131,6 +131,43 @@ def run_ffmpeg(config: FaceSwapConfig, args: List[str]) -> bool:
         return False
 
 
+def probe_duration(video_path: str) -> Optional[float]:
+    """
+    Read a clip's duration in seconds with ffprobe.
+
+    Used to enforce MAX_VIDEO_SECONDS on an uploaded target. Seconds and bytes
+    refuse different things: bytes bound the transfer, seconds bound the render,
+    and a well compressed ten minutes can be smaller than a badly compressed one
+    while costing twenty times as much to process.
+
+    Args:
+        video_path: Path to the video
+
+    Returns:
+        Duration in seconds, or None when it cannot be determined — the caller
+        decides what an unknown duration means, rather than having a fabricated
+        number decide for it
+    """
+    try:
+        command = [
+            'ffprobe',
+            '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            video_path,
+        ]
+        output = subprocess.check_output(
+            command, stderr=subprocess.DEVNULL).decode().strip()
+        seconds = float(output)
+        return seconds if seconds > 0 else None
+    except Exception as e:
+        emit_warning(
+            f'Could not probe duration for {video_path}: {type(e).__name__}: {e}',
+            scope='FFMPEG',
+        )
+        return None
+
+
 def detect_fps(video_path: str) -> float:
     """
     Detect FPS of a video file using ffprobe.

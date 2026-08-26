@@ -104,6 +104,29 @@ PRESETS: Dict[str, Dict[str, Any]] = {
 MAX_PHOTO_TARGETS = 4
 MAX_PHOTO_BYTES = 6 * 1024 * 1024
 
+# Video target limits, and the chunk the file is carried in.
+#
+# Video gets a transfer path of its own because a photo's cannot stretch to it:
+# `upload_target` carries an image base64 in one message, and the server caps a
+# message at 64 MB (`server.py`), which base64's 4/3 inflation turns into a 48 MB
+# ceiling on the file. Chunking means the message size stops being the product
+# limit — MAX_VIDEO_BYTES can move without the transport being rewritten.
+#
+# Two limits, because they refuse different things. Bytes bound the transfer;
+# seconds bound the *work*, and the two do not track each other — a well
+# compressed ten minutes can be smaller than a poorly compressed one, while
+# costing twenty times as much to render at ~130ms a frame.
+#
+# Duration is checked after assembly rather than trusted from the client: the
+# desktop reports what it probed, and a limit the server does not enforce is
+# not a limit.
+MAX_VIDEO_BYTES = 200 * 1024 * 1024
+MAX_VIDEO_SECONDS = 180
+
+# Comfortably inside the 64 MB message cap once base64 has inflated it by 4/3,
+# and large enough that a 200 MB file is ~50 messages rather than thousands.
+VIDEO_CHUNK_BYTES = 4 * 1024 * 1024
+
 # Every command the server accepts, and only those.
 #
 # This list is checked against `handlers.dispatch_command` by
@@ -131,6 +154,11 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
     'upload_source':   {'images': list},
     'set_target':      {'path': str},
     'upload_target':   {'images': list},
+    'upload_video_begin': {'name': str, 'size': int},
+    'upload_video_chunk': {'upload_id': str, 'seq': int, 'data': str},
+    'upload_video_end':   {'upload_id': str},
+    'upload_video_cancel': {'upload_id': str},
+    'get_render_thumbnails': {},
     'set_target_faces': {'points': list},
     'list_templates':  {},
     'set_template':    {'id': str},
@@ -246,6 +274,11 @@ class ResponseMessage(APIMessage):
 CMD_SET_SOURCE = 'set_source'
 CMD_SET_TARGET = 'set_target'
 CMD_UPLOAD_TARGET = 'upload_target'
+CMD_UPLOAD_VIDEO_BEGIN = 'upload_video_begin'
+CMD_UPLOAD_VIDEO_CHUNK = 'upload_video_chunk'
+CMD_UPLOAD_VIDEO_END = 'upload_video_end'
+CMD_UPLOAD_VIDEO_CANCEL = 'upload_video_cancel'
+CMD_GET_RENDER_THUMBNAILS = 'get_render_thumbnails'
 CMD_SET_TARGET_FACES = 'set_target_faces'
 CMD_LIST_TEMPLATES = 'list_templates'
 CMD_SET_TEMPLATE = 'set_template'
