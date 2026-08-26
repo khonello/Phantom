@@ -9,6 +9,12 @@ torchvision; sys_platform == 'darwin'
 # Core
 numpy>=1.24.2,<2.0
 opencv-contrib-python>=4.8.0
+# insightface depends on `onnxruntime`, the CPU wheel, and pip installs it
+# after onnxruntime-gpu below. Both write the same `onnxruntime/` directory,
+# so the CPU build silently replaces the GPU one and CUDAExecutionProvider
+# disappears. This file cannot express "resolve that dependency to the GPU
+# build" - runpod/startup.sh removes the CPU wheel afterwards and verifies
+# the provider is back.
 insightface>=0.7.3
 onnxruntime-gpu>=1.15.0; sys_platform != 'darwin'
 onnxruntime==1.15.0; sys_platform == 'darwin' and platform_machine != 'arm64'
