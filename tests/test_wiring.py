@@ -528,8 +528,11 @@ check('the accepted formats are named in one place',
       'IMAGE_EXTENSIONS' in ffmpeg_src)
 check('and webp is among them, since the picker offers it',
       '.webp' in ff_helpers.IMAGE_EXTENSIONS)
+# is_image's own body only. Slicing to the next `def is_video` swept up
+# whatever sat between them, and `is_video_name` legitimately uses mimetypes.
+_is_image_body = ffmpeg_src.split('def is_image')[1].split(chr(10) + 'def ')[0]
 check('the extension check is not a mimetype lookup',
-      'mimetypes' not in ffmpeg_src.split('def is_image')[1].split('def is_video')[0],
+      'mimetypes' not in _is_image_body,
       'mimetypes.guess_type is environment-dependent for webp and heic')
 
 for ext in ff_helpers.IMAGE_EXTENSIONS:

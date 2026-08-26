@@ -16,8 +16,17 @@ from PySide6.QtCore import QObject, Signal, Slot, Property, QTimer, Qt
 from PySide6.QtGui import QPixmap, QImage, QPainter
 from PySide6.QtQuick import QQuickPaintedItem
 
-from pipeline.io.ffmpeg import IMAGE_EXTENSIONS, is_image, is_video
-from pipeline.api.schema import MAX_PHOTO_BYTES, MAX_PHOTO_TARGETS, PRESETS
+from pipeline.io.ffmpeg import (
+    IMAGE_EXTENSIONS, is_image, is_video, probe_duration,
+)
+from pipeline.api.schema import (
+    MAX_PHOTO_BYTES,
+    MAX_PHOTO_TARGETS,
+    MAX_VIDEO_BYTES,
+    MAX_VIDEO_SECONDS,
+    VIDEO_CHUNK_BYTES,
+    PRESETS,
+)
 from desktop import auth
 from desktop import effects as overlay_effects
 from desktop import filters as look_filters
@@ -224,6 +233,8 @@ class Bridge(QObject):
     targetSetChanged = Signal(bool)
     targetLabelChanged = Signal(str)
     targetThumbnailChanged = Signal(str)
+    outputThumbnailChanged = Signal(str)
+    uploadProgressChanged = Signal(float)
     outputPathChanged = Signal(str)
     batchRunningChanged = Signal(bool)
     batchCompleteChanged = Signal(bool)
@@ -308,6 +319,13 @@ class Bridge(QObject):
         self._target_label: str = ''
         self._target_path: str = ''
         self._target_thumbnail: str = ''
+        self._output_thumbnail: str = ''
+        # Where the clip landed on the *pipeline's* filesystem. The local
+        # path stays in _target_path for the label; this is what `start`
+        # must be given, because that is the only one the pod can open.
+        self._target_remote_path: str = ''
+        self._upload_cancelled: bool = False
+        self._upload_progress: float = 0.0
         self._output_path: str = ''
         self._batch_running: bool = False
         self._batch_complete: bool = False
@@ -556,6 +574,23 @@ class Bridge(QObject):
     @Property(str, notify=targetThumbnailChanged)
     def targetThumbnail(self) -> str:
         return self._target_thumbnail
+
+    @Property(str, notify=outputThumbnailChanged)
+    def outputThumbnail(self) -> str:
+        """
+        First frame of the finished render, as a data URI.
+
+        A path would be useless: the output is written on the pipeline's
+        filesystem, which on a pod is another machine, so the QML's
+        `file:///` + path could only ever resolve when the pipeline runs
+        locally. The picture travels instead.
+        """
+        return self._output_thumbnail
+
+    @Property(float, notify=uploadProgressChanged)
+    def uploadProgress(self) -> float:
+        """Target-video transfer, 0.0 to 1.0. Zero when nothing is uploading."""
+        return self._upload_progress
 
     @Property(str, notify=outputPathChanged)
     def outputPath(self) -> str:
@@ -1697,6 +1732,10 @@ class Bridge(QObject):
             return
         self._target_path = path.replace('\\', '/')
         self._target_label = self._target_path.split('/')[-1]
+        # A clip staged for the previous choice must not answer for this one.
+        self._target_remote_path = ''
+        self._output_thumbnail = ''
+        self.outputThumbnailChanged.emit('')
         self._target_thumbnail = (
             self._target_path if self._current_mode == 'image' else ''
         )
@@ -1726,6 +1765,151 @@ class Bridge(QObject):
         self._output_path = path.replace('\\', '/')
         self.outputPathChanged.emit(self._output_path)
 
+    # ── Target video transfer ────────────────────────────────────────────
+    #
+    # `set_target` resolves with os.path.exists against the *pipeline's*
+    # filesystem, so a locally chosen video is simply absent when the pipeline
+    # runs on a pod — the picker accepts it and nothing can open it. Photos
+    # sidestepped this with `upload_target`; a video is too large for that
+    # shape, so it is chunked.
+    #
+    # Both limits are checked here as well as server-side. Not because the
+    # server's check can be skipped, but because a refusal after a two-minute
+    # transfer is a worse way to learn the same thing.
+
+    def _refuse_video(self, reason: str) -> None:
+        """Report why a chosen clip cannot be used, and keep the pane empty."""
+        self._set_status(reason, error=True)
+
+    @Slot()
+    def cancelUpload(self) -> None:
+        """Abandon a running transfer; the server deletes the partial file."""
+        self._upload_cancelled = True
+
+    def _upload_target_video(self, local_path: str) -> bool:
+        """
+        Send a target video to the pipeline in chunks and stage it there.
+
+        Args:
+            local_path: The file the operator picked
+
+        Returns:
+            True when the clip is staged and `_target_remote_path` is set
+        """
+        try:
+            size = os.path.getsize(local_path)
+        except OSError as e:
+            self._refuse_video(f'cannot read {os.path.basename(local_path)}: {e}')
+            return False
+
+        if size > MAX_VIDEO_BYTES:
+            self._refuse_video(
+                f'{size / (1024 * 1024):.0f} MB exceeds the '
+                f'{MAX_VIDEO_BYTES // (1024 * 1024)} MB limit'
+            )
+            return False
+
+        # Duration locally too, so a long clip is refused before the transfer
+        # rather than after it. The server probes again and has the last word.
+        duration = probe_duration(local_path)
+        if duration is not None and duration > MAX_VIDEO_SECONDS:
+            self._refuse_video(
+                f'{duration / 60:.1f} min exceeds the '
+                f'{MAX_VIDEO_SECONDS // 60} min limit'
+            )
+            return False
+
+        begin = self._client.upload_video_begin(os.path.basename(local_path), size)
+        if not begin.get('success', True):
+            self._refuse_video(f'upload refused: {begin.get("error", "unknown")}')
+            return False
+
+        upload_id = (begin.get('data') or {}).get('upload_id', '')
+        if not upload_id:
+            self._refuse_video('upload refused: server returned no upload id')
+            return False
+
+        self._upload_cancelled = False
+        sent = 0
+        seq = 0
+        try:
+            with open(local_path, 'rb') as fh:
+                while True:
+                    if self._upload_cancelled:
+                        self._client.upload_video_cancel(upload_id)
+                        self._set_upload_progress(0.0)
+                        self._set_status('upload cancelled')
+                        return False
+
+                    chunk = fh.read(VIDEO_CHUNK_BYTES)
+                    if not chunk:
+                        break
+
+                    reply = self._client.upload_video_chunk(
+                        upload_id, seq, base64.b64encode(chunk).decode('ascii'))
+                    if not reply.get('success', True):
+                        self._refuse_video(
+                            f'upload failed: {reply.get("error", "unknown")}')
+                        self._set_upload_progress(0.0)
+                        return False
+
+                    sent += len(chunk)
+                    seq += 1
+                    self._set_upload_progress(sent / float(size) if size else 0.0)
+                    self._set_status(
+                        f'uploading target... {sent * 100 // max(size, 1)}%')
+        except OSError as e:
+            self._client.upload_video_cancel(upload_id)
+            self._set_upload_progress(0.0)
+            self._refuse_video(f'read failed during upload: {e}')
+            return False
+
+        end = self._client.upload_video_end(upload_id)
+        self._set_upload_progress(0.0)
+        if not end.get('success', True):
+            self._refuse_video(f'upload refused: {end.get("error", "unknown")}')
+            return False
+
+        data = end.get('data') or {}
+        self._target_remote_path = data.get('path', '')
+        if not self._target_remote_path:
+            self._refuse_video('upload refused: server returned no path')
+            return False
+
+        thumbnail = data.get('thumbnail') or ''
+        if thumbnail:
+            self._target_thumbnail = 'data:image/jpeg;base64,' + thumbnail
+            self.targetThumbnailChanged.emit(self._target_thumbnail)
+
+        seconds = data.get('duration') or 0.0
+        self._set_status(
+            f'target ready — {os.path.basename(local_path)} ({seconds:.0f}s)')
+        return True
+
+    def _set_upload_progress(self, value: float) -> None:
+        """Publish transfer progress, clamped."""
+        self._upload_progress = max(0.0, min(1.0, value))
+        self.uploadProgressChanged.emit(self._upload_progress)
+
+    def _refresh_output_thumbnail(self) -> None:
+        """
+        Fetch the finished render's first frame.
+
+        Called on completion rather than polled: the output does not exist
+        before then, and asking earlier is a round trip that can only answer
+        None.
+        """
+        try:
+            reply = self._client.get_render_thumbnails()
+        except Exception:
+            return
+        data = reply.get('data') or {}
+        output = data.get('output') or ''
+        self._output_thumbnail = (
+            'data:image/jpeg;base64,' + output if output else ''
+        )
+        self.outputThumbnailChanged.emit(self._output_thumbnail)
+
     @Slot()
     def startBatch(self) -> None:
         """Start batch face swap processing on the selected target file."""
@@ -1748,11 +1932,22 @@ class Bridge(QObject):
             self._output_path = base + '_swapped' + ext
             self.outputPathChanged.emit(self._output_path)
 
+        # A video has to be transferred before the pipeline can be told to
+        # open it. Done here rather than at selection so the transfer starts
+        # when the operator commits to the render, not while they are still
+        # browsing — and so cancelling costs nothing.
+        if self._current_mode == 'video' and not self._target_remote_path:
+            if not self._upload_target_video(self._target_path):
+                return
+
         self._batch_complete = False
         self._batch_error = ''
+        self._output_thumbnail = ''
         self.batchCompleteChanged.emit(False)
+        self.outputThumbnailChanged.emit('')
         self._set_status('processing...')
-        self._client.set_target(self._target_path)
+        self._client.set_target(
+            self._target_remote_path or self._target_path)
         self._client.set_output(self._output_path)
         result = self._client.start()
         if result.get('success', False) is False and 'error' in result:
@@ -2283,6 +2478,7 @@ class Bridge(QObject):
                 else:
                     self._batch_complete = True
                     self.batchCompleteChanged.emit(True)
+                    self._refresh_output_thumbnail()
                     if self._photo_targets:
                         # Fetching the images is a blocking request, and this
                         # runs on the socket's own receive thread — waiting

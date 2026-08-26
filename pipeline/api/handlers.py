@@ -39,7 +39,7 @@ from pipeline.services.database import SourceReview
 from pipeline.services.templates import TemplateLibrary
 from pipeline.logging import emit_status, emit_error, emit_warning
 from pipeline.io.ffmpeg import (
-    is_image, is_video, normalize_output_path, probe_duration,
+    is_image, is_video, is_video_name, normalize_output_path, probe_duration,
 )
 
 
@@ -1095,7 +1095,7 @@ def handle_upload_video_begin(
     """
     name = os.path.basename(name or "") or "target.mp4"
 
-    if not is_video(name):
+    if not is_video_name(name):
         return ResponseMessage(
             type="upload_video_begin", data={}, success=False,
             error=f"{name} is not a video format this pipeline can read",

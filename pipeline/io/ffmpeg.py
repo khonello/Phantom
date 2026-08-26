@@ -502,6 +502,14 @@ def clean_temp(config: FaceSwapConfig, target_path: str) -> None:
 # to say so while the file picker is still open.
 IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.webp', '.bmp')
 
+# Containers common enough that mimetypes not knowing one is an environment
+# fault rather than a real answer. Not a closed set — `is_video` stays a
+# mimetype lookup so FFmpeg can still be handed anything it can demux.
+_VIDEO_EXTENSIONS = (
+    '.mp4', '.m4v', '.mov', '.avi', '.mkv', '.webm', '.wmv', '.flv', '.mpg',
+    '.mpeg', '.ts', '.3gp',
+)
+
 
 def is_image(image_path: str) -> bool:
     """
@@ -514,6 +522,32 @@ def is_image(image_path: str) -> bool:
         True if path is an existing file with a supported image extension
     """
     return bool(image_path) and os.path.isfile(image_path) and has_image_extension(image_path)
+
+
+def is_video_name(name: str) -> bool:
+    """
+    Whether a *filename* looks like a video, without the file existing.
+
+    `is_video` requires `os.path.isfile`, which is right for a path being handed
+    to FFmpeg and wrong for a chunked upload: at `upload_video_begin` the client
+    has sent a name and a size, and the file it names exists only on their
+    machine. Asking the existing helper there refuses every upload, since the
+    answer is always False.
+
+    Args:
+        name: Filename or path; only the extension is read
+
+    Returns:
+        True if the extension maps to a video mimetype
+    """
+    mimetype, _ = mimetypes.guess_type(name)
+    if mimetype and mimetype.startswith('video/'):
+        return True
+    # mimetypes is environment-dependent — on Windows it also reads
+    # HKEY_CLASSES_ROOT, so a machine can simply not know a common extension.
+    # The same trap dropped webp from the image path. These are the containers
+    # FFmpeg is actually handed, so recognise them regardless.
+    return os.path.splitext(name)[1].lower() in _VIDEO_EXTENSIONS
 
 
 def is_video(video_path: str) -> bool:

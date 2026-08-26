@@ -788,9 +788,11 @@ Window {
                                 // Image thumbnail (shown for image mode or if thumbnail available)
                                 Image {
                                     anchors.fill: parent
-                                    source: bridge.targetThumbnail !== ""
-                                            ? "file:///" + bridge.targetThumbnail
-                                            : ""
+                                    source: bridge.targetThumbnail === ""
+                                            ? ""
+                                            : (bridge.targetThumbnail.indexOf("data:") === 0
+                                               ? bridge.targetThumbnail
+                                               : "file:///" + bridge.targetThumbnail)
                                     fillMode: Image.PreserveAspectCrop
                                     smooth: true
                                     visible: bridge.targetThumbnail !== ""
@@ -1518,9 +1520,11 @@ Window {
                             // Thumbnail (image mode or video poster)
                             Image {
                                 anchors.fill: parent
-                                source: bridge.targetThumbnail !== ""
-                                        ? "file:///" + bridge.targetThumbnail
-                                        : ""
+                                source: bridge.targetThumbnail === ""
+                                        ? ""
+                                        : (bridge.targetThumbnail.indexOf("data:") === 0
+                                           ? bridge.targetThumbnail
+                                           : "file:///" + bridge.targetThumbnail)
                                 fillMode: Image.PreserveAspectFit
                                 smooth: true
                                 visible: bridge.targetThumbnail !== ""
@@ -1598,12 +1602,15 @@ Window {
                             // Output image (video mode, after complete)
                             Image {
                                 anchors.fill: parent
-                                source: (bridge.batchComplete && bridge.currentMode === "video" && bridge.outputPath !== "")
-                                        ? "file:///" + bridge.outputPath
-                                        : ""
+                                source: bridge.outputThumbnail !== ""
+                                        ? bridge.outputThumbnail
+                                        : ((bridge.batchComplete && bridge.currentMode === "video" && bridge.outputPath !== "")
+                                           ? "file:///" + bridge.outputPath
+                                           : "")
                                 fillMode: Image.PreserveAspectFit
                                 smooth: true
-                                visible: bridge.batchComplete && bridge.currentMode === "video" && bridge.outputPath !== ""
+                                visible: bridge.outputThumbnail !== ""
+                                         || (bridge.batchComplete && bridge.currentMode === "video" && bridge.outputPath !== "")
                                 cache: false
                             }
 
