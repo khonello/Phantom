@@ -20,9 +20,21 @@ grep -E '^RUNPOD_(API_KEY|DATACENTERS|POD_ID)=' .env
 | What you see | Where you are | Go to |
 |---|---|---|
 | No `.env` at all | fresh install | **Part 1** — the dashboard, which mints the values |
+| No `.env`, but the account already has a volume | **same account, new machine** | **Part 1**, reusing rather than creating — see below |
 | Keys present but blank | `.env.example` copied | **Part 2** — fill them in |
 | All filled, `RUNPOD_POD_ID` empty | set up, never deployed | **Part 3** — `start` |
 | All filled, `RUNPOD_POD_ID` set | **the steady state** | **Part 4** — `status`, then `resume` |
+
+**On a new machine with an account you already set up**, Part 1 still applies,
+but two of its four steps are lookups rather than acts. Nothing about the
+account is recreated:
+
+| Part 1 step | On a new machine |
+|---|---|
+| 1a API key | **mint a new one** — RunPod shows a secret once, so the old one is unrecoverable |
+| 1b SSH key | **check first** — the public half is likely registered already; only the *private* half is missing, so copy it across or add a second key |
+| 1c Volume | **copy the existing ID** out of Storage. Do **not** create a second one — it is a second monthly bill, in a datacenter your models are not on |
+| 1d Pod ID | leave blank, exactly as on a first run |
 
 Parts 1–3 happen once, ever. **Part 4 is the loop you live in**, and it is two
 commands to enter and one to leave:
@@ -173,83 +185,92 @@ This key is also forwarded into the pod so the pipeline can stop itself when
 
 ### 1b — SSH key → `RUNPOD_SSH_KEY_PATH`
 
-Only for `ssh` mode, which is the default. Both halves of this step must be done
-**before the first `start`** — the public half so RunPod can put it on the pod,
-the private half so the orchestrator can use it.
+Only for `ssh` mode, the default. There are two halves — a public one RunPod
+keeps, and a private one that stays on your machine — and **the public half is
+often already done**, because it is registered once per *account* and never
+again. Check before doing anything:
 
-**Generate the pair**, skipping this if you already have one:
+```bash
+curl -s https://api.runpod.io/graphql \
+  -H "Authorization: Bearer $RUNPOD_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"query { myself { pubKey } }"}'
+```
+
+- **A key comes back** → registration is done, permanently. Skip to step 3, and
+  only make sure the *private* half is on this machine.
+- **`"pubKey": null` or empty** → do all three steps.
+
+**1 — Generate the pair.** Skip if `~/.ssh/id_ed25519` already exists.
 
 ```bash
 ssh-keygen -t ed25519 -C "you@email.com"       # accept the default path
                                                # leave the passphrase EMPTY
-cat ~/.ssh/id_ed25519.pub                      # copy this whole line
 ```
 
-That writes two files: `~/.ssh/id_ed25519` (private — never leaves your machine)
-and `~/.ssh/id_ed25519.pub` (public — the one you paste into RunPod).
+Two files: `~/.ssh/id_ed25519` (private, never leaves your machine) and
+`~/.ssh/id_ed25519.pub` (public). The passphrase must be empty — the
+orchestrator loads the key with no prompt, so a protected key fails at the
+connect step rather than asking.
 
-Leave the passphrase empty. The orchestrator loads the key with no prompt, so a
-protected key fails at the connect step rather than asking for anything.
+**2 — Register the public half.** `cat ~/.ssh/id_ed25519.pub`, then RunPod →
+**Settings → SSH Public Keys → Add SSH Key**, paste, save. RunPod writes the
+registered keys into a pod's `authorized_keys` **when the pod is created**, so
+this must precede the first `start`. It is a one-time act you will not remember
+doing — hence the check above.
 
-**Register the public half:** RunPod → **Settings → SSH Public Keys → Add SSH
-Key**, paste, save. RunPod writes the registered keys into each pod's
-`authorized_keys` **when the pod is created**, so a key added afterwards does not
-reach a pod that already exists — register first, then `start`.
-
-**Point `.env` at the private half:**
+**3 — Point `.env` at the private half.**
 
 ```env
 RUNPOD_SSH_KEY_PATH=~/.ssh/id_ed25519
 ```
 
-#### The `~` is expanded by whichever shell runs the orchestrator
+#### What goes wrong
 
-This is the one part that bites, and it is silent. The path is expanded with
-`os.path.expanduser`, against the home directory of the process running
-`orchestrator.py` — **not** the shell you happened to generate the key in.
+- **`~` is expanded against whichever shell runs the orchestrator**, via
+  `os.path.expanduser` — not the shell you generated the key in. Generating in
+  WSL and running from PowerShell is the usual way to get this wrong: the key
+  sits in `/home/<you>/.ssh/` while the orchestrator looks in
+  `C:\Users\<you>\.ssh\`. Copy it across, keeping the WSL copy:
 
-Generating in WSL and running the orchestrator from PowerShell is the common way
-to get this wrong: the key lands in `/home/<you>/.ssh/`, while the orchestrator
-looks in `C:\Users\<you>\.ssh\` and finds nothing. Copy it across, keeping the
-WSL copy:
+  ```bash
+  wsl -e cp ~/.ssh/id_ed25519 /mnt/c/Users/<you>/.ssh/id_ed25519
+  wsl -e cp ~/.ssh/id_ed25519.pub /mnt/c/Users/<you>/.ssh/id_ed25519.pub
+  ```
 
-```bash
-wsl -e cp ~/.ssh/id_ed25519 /mnt/c/Users/<you>/.ssh/id_ed25519
-wsl -e cp ~/.ssh/id_ed25519.pub /mnt/c/Users/<you>/.ssh/id_ed25519.pub
-```
+  Use `cp` through WSL, not a PowerShell redirect — a redirect can add CRLF or a
+  BOM and paramiko then rejects the key. An absolute path in
+  `RUNPOD_SSH_KEY_PATH` sidesteps `~` entirely. No `icacls` fix is needed;
+  paramiko does not enforce OpenSSH's permission checks.
 
-Use `cp` through WSL rather than a PowerShell redirect — a redirect can add CRLF
-line endings or a BOM, and paramiko then rejects the key as malformed. An
-absolute path in `RUNPOD_SSH_KEY_PATH` works too, and sidesteps `~` entirely.
+- **The key never belongs in the repo.** The repo is `git clone`d onto the pod
+  at `/workspace/Phantom`, which is the network volume and survives
+  `terminate` — a committed key would be left on persistent rented storage
+  after the pod is gone.
 
-Windows needs no `icacls` fix: paramiko does not enforce OpenSSH's permission
-checks.
+- **A pod's SSH panel is a different thing.** It appears only once a pod exists,
+  which is after all of Part 1, so it is never part of setup:
 
-**The key never belongs in the repo.** Beyond the usual reasons, the repo is
-`git clone`d onto the pod at `/workspace/Phantom` — which is the network volume,
-and it survives `terminate`. A key committed here would be copied onto a rented
-machine and left on persistent storage after the pod is gone.
+  | | Where | When |
+  |---|---|---|
+  | Registering the public key | Settings → SSH Public Keys | once, **before** the first `start` |
+  | The `ssh …` connect line | the pod's page → Connect → SSH | only **after** a pod exists |
+
+  You need neither for a normal session: `status` prints the connect line, and
+  the orchestrator resolves the address itself.
 
 `start` and `resume` load the key before creating or resuming anything, so a
 missing or unreadable key stops you while nothing is billing. Docker mode never
-SSHes and skips the check, but register a key anyway: it is how you get a shell
-on a pod when something goes wrong.
-
-**Nothing on a pod's page is needed here.** RunPod shows SSH connection details
-per pod, but only once that pod exists — which is *after* everything in Part 1.
-The two are not the same thing and are not needed at the same time:
-
-| | Where | When | Used by |
-|---|---|---|---|
-| Registering the public key | Settings → SSH Public Keys | once, **before** the first `start` | RunPod, writing `authorized_keys` at pod creation |
-| The `ssh …` connect line | the pod's page → Connect → SSH | only **after** a pod exists | you, by hand, for a shell |
-
-The orchestrator needs neither: it resolves the connect address itself. So the
-setup order has no circularity in it — register the key, then `start`.
+SSHes and skips the check, but register a key anyway — it is how you get a shell
+when something goes wrong.
 
 ### 1c — Network volume → `RUNPOD_DATACENTERS`
 
-**Storage → Network Volumes → New Network Volume.**
+**Storage → Network Volumes.** If a volume is already listed, this step is a
+copy of its ID — skip to the bottom of this section. Create a second one only
+to add a *region* (Part 5a), never to set up a second machine.
+
+Otherwise, **New Network Volume.**
 
 | Field | Value |
 |---|---|
