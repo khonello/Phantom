@@ -16,14 +16,21 @@ on CPU.
 
 `__path__` is the attribute that works for both regular and namespace packages.
 
-It can also hold **more than one root**. The pod's venv is created with
-`--system-site-packages` so the image's PyTorch is inherited, and `nvidia` is a
-namespace package, so `nvidia.cudnn.__path__` spans both the venv's
-site-packages and the image's dist-packages. `startup.sh` installs
-`nvidia-cudnn-cu12>=9` into the venv while the image ships cuDNN 8 in
-dist-packages — so returning the first root with a `lib` directory returned the
-cuDNN 8 one, and `libcudnn.so.9` was not in it. Which root is right is decided
-by which one actually holds the library, not by which is listed first.
+But `import` is not a reliable way to find the *right* install here, and on the
+pod it actively points at the wrong one.
+
+The venv is created with `--system-site-packages` so the image's PyTorch is
+inherited, and `startup.sh` then installs `nvidia-cudnn-cu12>=9` into the venv
+while the image ships cuDNN 8 in its dist-packages. Two copies, and the venv's
+own interpreter resolved `nvidia.cudnn` to the image's: if any `sys.path` entry
+holds a **regular** `nvidia` package — one with `__init__.py` — it wins outright
+and every namespace portion found on earlier entries is discarded. The venv's
+cuDNN 9 becomes unreachable by import even though it is first on `sys.path`.
+
+So the search is done over the filesystem instead. `sys.path` says where
+packages live; walking it directly finds every `nvidia/cudnn` present, whatever
+`import` would have chosen. The right one is then the one that actually holds
+the library, not the one listed first.
 """
 
 import glob
@@ -44,19 +51,37 @@ def cudnn_lib_dir() -> str:
     Raises:
         RuntimeError: if the package is missing or has no lib directory
     """
+    roots = []
+
     try:
         import nvidia.cudnn
-    except ImportError as exc:
-        raise RuntimeError('nvidia-cudnn-cu12 is not installed') from exc
-
-    # Namespace packages report __file__ as None but always carry __path__.
-    roots = list(getattr(nvidia.cudnn, '__path__', None) or [])
-    if not roots:
+    except ImportError:
+        imported = None
+    else:
+        # Namespace packages report __file__ as None but always carry __path__.
+        roots.extend(getattr(nvidia.cudnn, '__path__', None) or [])
         module_file = getattr(nvidia.cudnn, '__file__', None)
         if module_file:
-            roots = [os.path.dirname(module_file)]
+            roots.append(os.path.dirname(module_file))
+        imported = nvidia.cudnn
+
+    # Whatever import chose, walk sys.path for the copies it did not. A regular
+    # `nvidia` package on any entry hides the namespace portions on all the
+    # others, so this is the only way to see a venv-local install sitting behind
+    # one from the image.
+    for entry in sys.path:
+        if not entry:
+            continue
+        candidate = os.path.join(entry, 'nvidia', 'cudnn')
+        if os.path.isdir(candidate):
+            roots.append(candidate)
+
+    seen = set()
+    roots = [r for r in roots if not (r in seen or seen.add(r))]
 
     if not roots:
+        if imported is None:
+            raise RuntimeError('nvidia-cudnn-cu12 is not installed')
         raise RuntimeError('nvidia.cudnn exposes neither __path__ nor __file__')
 
     fallback = None
@@ -73,6 +98,11 @@ def cudnn_lib_dir() -> str:
     # none — the caller verifies with a real dlopen either way, and a differently
     # named build should not be turned into a hard failure here.
     if fallback is not None:
+        print(
+            'warning: no {} under any of: {}; using {}'.format(
+                _SONAME, ', '.join(roots), fallback),
+            file=sys.stderr,
+        )
         return fallback
 
     raise RuntimeError(

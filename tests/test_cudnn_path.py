@@ -113,6 +113,32 @@ except Exception as e:
     results.append(('no soname anywhere falls back to the first lib dir',
                     False, repr(e)))
 
+# 7. The pod's actual failure: the image ships a *regular* nvidia package, so
+#    `import nvidia.cudnn` resolves to its cuDNN 8 and discards the venv's
+#    namespace portion entirely — the venv's cuDNN 9 is unreachable by import
+#    even though it is first on sys.path. Only a filesystem walk finds it.
+img_root = tempfile.mkdtemp()      # what import reports: cuDNN 8
+venv_site = tempfile.mkdtemp()     # on sys.path only: cuDNN 9
+os.makedirs(os.path.join(img_root, 'lib'))
+venv_lib = os.path.join(venv_site, 'nvidia', 'cudnn', 'lib')
+os.makedirs(venv_lib)
+open(os.path.join(img_root, 'lib', 'libcudnn.so.8'), 'w').close()
+open(os.path.join(venv_lib, 'libcudnn.so.9'), 'w').close()
+
+shadowed = types.ModuleType('nvidia.cudnn')
+shadowed.__file__ = None
+shadowed.__path__ = [img_root]
+install(shadowed)
+sys.path.insert(0, venv_site)
+try:
+    got = mod.cudnn_lib_dir()
+    results.append(('finds a venv install that import cannot see',
+                    got == venv_lib, got))
+except Exception as e:
+    results.append(('finds a venv install that import cannot see', False, repr(e)))
+finally:
+    sys.path.remove(venv_site)
+
 fails = 0
 for label, passed, detail in results:
     print('  [{}] {} - {}'.format('PASS' if passed else 'FAIL', label, detail))
