@@ -80,6 +80,29 @@ before a paying customer. Read it before assuming a gap is unnoticed.
 - **Realism**: `python pipeline.py --stream --debug-frames clip/` then
   `python tools/compare_frames.py clip/ [--against clip2/]`
 
+### Building for distribution
+- **Desktop standalone**: `python tools/build_desktop.py` (add `--print-only`
+  to see the command, `--release` to hide the console once it works)
+
+Only `desktop/` is compiled, and the reason is **distribution, not speed** — it
+ships to customers and the access-code gate, session clock and Firestore session
+plane are all enforced inside it, which as `.py` files comes out with a text
+editor. `pipeline/` is deliberately excluded: it runs inside a Docker image on a
+rented pod where nobody reads the source, its startup is dominated by model
+load, and compiling it would add twenty minutes to every image build while
+making tracebacks worse on the layer under active development.
+
+`--standalone`, never `--onefile`: unsigned single-file builds are routinely
+flagged as malware on Windows, which reads worse to a customer than a `.py`
+file. Code signing is the step after a build that works.
+
+The failure mode worth knowing: a build that loses `main.qml` or a QML module
+**compiles fine**, starts, produces no root object and exits `-1` saying
+nothing. `desktop/resources.py` resolves bundled files across source and frozen
+layouts and names every location it tried; `tests/test_desktop_build.py` checks
+the recorded QML module list against what `main.qml` actually imports, so the
+two cannot drift.
+
 ### Install Dependencies
 - **CPU (local dev)**: `pip install -r requirements-pipeline-cpu.txt`
 - **GPU (CUDA)**: `pip install -r requirements-pipeline-gpu.txt`

@@ -1,7 +1,6 @@
 # This Python file uses the following encoding: utf-8
 import sys
 import argparse
-from pathlib import Path
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -11,6 +10,7 @@ from PySide6.QtQml import QQmlApplicationEngine, qmlRegisterType
 
 from desktop.controller import PipelineClient
 from desktop.bridge import Bridge, FrameDisplay
+from desktop.resources import resource_path
 
 
 def main() -> None:
@@ -29,9 +29,13 @@ def main() -> None:
     engine = QQmlApplicationEngine()
     engine.rootContext().setContextProperty('bridge', bridge)
 
-    qml_file = Path(__file__).resolve().parent / 'main.qml'
+    # Resolved rather than assumed: in a standalone build main.qml is a data
+    # file, and a build that lost it otherwise exits -1 with nothing said.
+    qml_file = resource_path('main.qml')
     engine.load(qml_file)
     if not engine.rootObjects():
+        print('Failed to load {} — QML did not produce a root object.'.format(qml_file),
+              file=sys.stderr)
         sys.exit(-1)
 
     result = app.exec()

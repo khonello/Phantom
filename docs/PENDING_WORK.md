@@ -569,6 +569,112 @@ it did before.
 
 ---
 
+## Phase 2b — The inference speed levers
+
+Runs inside the same paid session as Phase 2, and reads the same latency report.
+The code landed in `c3dd55f`; **none of it has run on a GPU**, so every figure in
+[docs/COMPILATION.md](COMPILATION.md) is a prediction until this phase replaces
+it with a number.
+
+The hardware question is already closed. `orchestrator.py gpus` puts **RTX 4090
+first at $0.34/hr**, comfortably inside the $1.00 cap, so auto-discovery is
+already selecting the fastest eligible card and there is no cheaper win to take
+before optimising. See 2b.5 for the one hardware move that remains.
+
+All levers default off, so a baseline run needs no flags.
+
+### 2b.1 Baseline — no flags
+
+```bash
+python pipeline.py --stream
+# ... run a normal session, then stop it
+```
+
+The report prints per stage on stop. Record `detect`, `restore`, `smooth`,
+`colour`, `detail`, `mask`, `paste`, `swap+composite` and `total`, with the
+HOLDS/MISSES verdict, at each preset you care about.
+
+**Read `restore` against `swap+composite` first.** Everything downstream assumes
+restoration is the dominant term:
+
+| Reading | What to do |
+|---|---|
+| `restore` dominates | As predicted. Continue to 2b.2 |
+| `detect` dominates | Stop. The answer is `det_size` and the preset, not any lever here |
+| `total` >> the sum of stages | The cost is outside the compositor — capture, JPEG encode, or the proxy hop. None of these levers touch it |
+
+The third case is the one worth taking seriously: the desktop pushes webcam
+frames to the pod and reads them back through RunPod's proxy, and that round
+trip is tens of milliseconds no GPU affects.
+
+### 2b.2 CUDA graphs — free, do it second
+
+```bash
+CUDA_GRAPHS=true python pipeline.py --stream
+```
+
+Changes no numerics at all, so this is a pure latency read: same output, fewer
+kernel launches. Applies to CodeFormer, XSeg and the swapper; the detector is
+excluded because `det_size` moves with the preset and a captured graph records
+fixed buffer addresses.
+
+If it moves nothing, drop the flag rather than keep a lever nobody reads.
+
+### 2b.3 fp16 — the largest win, and the only risky one
+
+Convert first — it writes a copy, leaving the fp32 weights untouched:
+
+```bash
+python tools/convert_fp16.py /workspace/models/codeformer.onnx
+python tools/convert_fp16.py /workspace/models/inswapper_128.onnx
+```
+
+Then A/B on footage, not on the latency number:
+
+```bash
+python pipeline.py --stream --debug-frames /workspace/fp32/
+FP16=true python pipeline.py --stream --debug-frames /workspace/fp16/
+python tools/compare_frames.py /workspace/fp16/ --against /workspace/fp32/
+```
+
+This is the design target itself. `enhancer_weight` and `enhance_strength` were
+tuned to `0.7` because full restoration reads as AI, and "2x faster and slightly
+different" is not obviously a win in a product whose stated failure mode is *too
+clean*. Reverting is dropping the flag; the fp32 weights never moved.
+
+### 2b.4 TensorRT — only if 2b.2 and 2b.3 leave the deadline missed
+
+```bash
+TRT=true FP16=true python pipeline.py --stream
+```
+
+The first run on a given GPU **builds engines, which takes minutes of a paid
+hour**. They cache to `/workspace/trt-cache`, keyed by GPU, TensorRT and ORT
+versions, weights and precision, so each architecture pays that once ever.
+Budget roughly 0.5–1 GB of volume per architecture.
+
+Watch the startup log. A TensorRT fallback warns rather than halting — a model
+that fell back to CUDA is still on the GPU and still holds a call — but it means
+the minutes bought nothing, and TensorRT's failure mode is silence.
+
+`TRT_GPUS` bounds which cards are worth the build. The default covers the top
+eligible cards; `L40` (ranked 80, $0.69/hr) is the one arguable omission.
+
+### 2b.5 Record the numbers
+
+Replace the predictions in `docs/COMPILATION.md` with what you measured, and
+close the questions that the data settles. A lever that moved nothing should be
+recorded as such rather than left looking untried.
+
+**The one hardware move left:** `_MAX_SUPPORTED_COMPUTE_CAP = (9, 0)` excludes
+Blackwell, which costs a real field — RTX 5090 at $0.69/hr and RTX PRO 4500 at
+$0.34/hr are blocked by the image's PyTorch/ONNX support, not by price or
+availability. A 5090 is meaningfully faster than a 4090 at batch 1. Unlocking it
+means a base image on CUDA 12.8+, a PyTorch with sm_120, and a matching
+`onnxruntime-gpu`. Separate work, tracked in 4.1.
+
+---
+
 ## Phase 4 — Implementation, in order
 
 Only after Phase 3. Each item's priority depends on what the data says.
@@ -578,6 +684,11 @@ Only after Phase 3. Each item's priority depends on what the data says.
 - [ ] **Act on the guard calibration** — set the nine thresholds from the report
 - [ ] **Clear the 11 mypy errors** (Stage 0). Trivial, and the only remaining
       Stage 0 item
+- [ ] **Unlock Blackwell (sm_120).** Raise `_MAX_SUPPORTED_COMPUTE_CAP` once
+      the base image carries CUDA 12.8+, a PyTorch built for sm_120 and a
+      matching `onnxruntime-gpu`. It is the only upward hardware move left: RTX
+      5090 ($0.69/hr) and RTX PRO 4500 ($0.34/hr, 32GB) are excluded by the
+      image, not by price or availability
 - [ ] **Stop the pod on a fatal startup error.** If the pipeline now refuses to
       start — a provider fallback, say — the pod keeps billing until
       `RUNPOD_MAX_UPTIME`, up to ~$2 wasted. Belongs with Stage 4's "move
