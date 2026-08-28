@@ -1634,6 +1634,54 @@ def _warn_existing_pod(pod_id: str) -> None:
     print("Recover it from the RunPod dashboard if it needs stopping.\n")
 
 
+def cmd_logs(pod_id: str, lines: int = 120) -> bool:
+    """
+    Print the tail of the pipeline log on the pod.
+
+    There was no way to read it. Only port 9000 is exposed, the SSH proxy
+    carries neither SFTP nor exec_command, and the pipeline runs under nohup
+    writing to a file — so when it failed to become ready, the one artefact
+    that would say why was unreachable. Everything needed was already here:
+    the deploy opens an interactive shell for exactly this reason.
+
+    Args:
+        pod_id: Pod to read from
+        lines: How many trailing lines to print
+
+    Returns:
+        True if the log was read
+    """
+    ssh_address = _get_ssh_command(pod_id)
+    key_path = os.getenv("RUNPOD_SSH_KEY_PATH", "")
+    if not ssh_address or not key_path:
+        print("ERROR: need a running pod and RUNPOD_SSH_KEY_PATH to read logs.")
+        return False
+
+    paramiko = _require_paramiko()
+    username, host = ssh_address.rsplit("@", 1)
+
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        client.connect(
+            hostname=host, port=22, username=username,
+            pkey=_load_ssh_key(key_path), timeout=30,
+        )
+        shell = _open_shell(client)
+        _shell_run(
+            shell,
+            "tail -n {} {} 2>&1 || echo 'no log at {}'".format(
+                lines, _PIPELINE_LOG, _PIPELINE_LOG),
+            "pipeline-log",
+        )
+        return True
+    except Exception as exc:
+        print("ERROR: {}: {}".format(type(exc).__name__, exc))
+        return False
+    finally:
+        client.close()
+
+
 def cmd_push(pod_id: str, local_path: str, remote_path: Optional[str] = None) -> bool:
     """
     Copy a video onto the pod over the pipeline's WebSocket.
@@ -1785,7 +1833,7 @@ commands:
 Set RUNPOD_DEPLOY_MODE=ssh (development) or docker (production) in .env.
         """,
     )
-    parser.add_argument("command", choices=["start", "resume", "stop", "terminate", "status", "gpus", "datacenters", "push"])
+    parser.add_argument("command", choices=["start", "resume", "stop", "terminate", "status", "gpus", "datacenters", "push", "logs"])
     parser.add_argument("paths", nargs="*", help="push: <local> [remote]")
     args = parser.parse_args()
 
@@ -1805,6 +1853,12 @@ Set RUNPOD_DEPLOY_MODE=ssh (development) or docker (production) in .env.
         cmd_datacenters()
     elif args.command == "gpus":
         cmd_gpus()
+    elif args.command == "logs":
+        if not pod_id:
+            print("ERROR: RUNPOD_POD_ID not set in .env")
+            sys.exit(1)
+        count = int(args.paths[0]) if args.paths else 120
+        sys.exit(0 if cmd_logs(pod_id, count) else 1)
     elif args.command == "push":
         if not pod_id:
             print("ERROR: RUNPOD_POD_ID not set in .env")

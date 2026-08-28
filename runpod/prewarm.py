@@ -13,6 +13,7 @@ on the first frame instead. The swapper was never warmed at all, which
 matters more now: hyperswap is a 384 MB download.
 """
 
+import os
 import sys
 
 sys.path.insert(0, '.')
@@ -22,6 +23,22 @@ from pipeline.config import CONFIG  # noqa: E402
 # Apply the configured model's realism profile before anything loads, so the
 # warm-up exercises the same configuration the session will run.
 CONFIG.apply_model_profile()
+
+# And the same execution provider. This script set none, so it inherited the
+# config default of CPU and built four CPU sessions — warming the file cache
+# while proving nothing about whether CUDA works, and printing
+# "CPUExecutionProvider" in the deploy log for every model, which reads exactly
+# like the silent fallback this project exits non-zero to prevent.
+#
+# EXECUTION_PROVIDER matches what startup.sh passes the pipeline itself, so the
+# two cannot disagree about what is being warmed.
+_PROVIDER = os.environ.get('EXECUTION_PROVIDER', 'cuda').strip().lower()
+if _PROVIDER and _PROVIDER != 'cpu':
+    CONFIG.set('execution_providers', [
+        '{}ExecutionProvider'.format(_PROVIDER.upper() if _PROVIDER in ('cuda', 'rocm')
+                                     else _PROVIDER.capitalize()),
+        'CPUExecutionProvider',
+    ])
 
 FAILED = []
 
