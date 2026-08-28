@@ -214,8 +214,8 @@ async def _run(args: argparse.Namespace) -> int:
         # is compared against. It showed up as baseline reporting 490ms against
         # 147ms for the next configuration — a difference that was almost
         # entirely warm-up, and would have been read as a 3x win.
-        print('
-warm-up (discarded)')
+        print('')
+        print('warm-up (discarded)')
         await send('start_stream')
         await collect(args.warmup)
         await send('stop')

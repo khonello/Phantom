@@ -1,5 +1,9 @@
 [flake8]
-select = E3, E4, F
+# E9 is not a style class — it is "flake8 could not parse this file". Without
+# it, a file with a syntax error lints clean, which is exactly what happened:
+# a broken string literal in tools/sweep_levers.py passed flake8 and was found
+# by a paid pod session instead.
+select = E3, E4, E9, F
 # Vendored third-party code. `desktop/.qtcreator/...` is a checked-in virtualenv,
 # so without this the documented `flake8 pipeline.py pipeline desktop` lints all
 # of PySide6 and numpy and drowns our own findings.

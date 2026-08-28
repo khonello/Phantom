@@ -938,7 +938,7 @@ back to the other backend or off — rather than failing.
 - `ignore_missing_imports = True` allows third-party stubs to be optional
 
 ### Linting & Testing
-- flake8 checks: E3, E4, F
+- flake8 checks: E3, E4, **E9**, F. E9 is not a style class — it is "could not parse this file". Without it a syntax error lints clean, which is how a broken string literal reached a paid pod session
 - Exception: `pipeline/core.py` ignores E402 (imports after code) for performance-critical initialization
 - Run before commit: `mypy pipeline desktop` and
   `flake8 pipeline.py pipeline desktop tests tools runpod firebase`
