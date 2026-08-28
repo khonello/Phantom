@@ -118,8 +118,57 @@ async def _run(args: argparse.Namespace) -> int:
     print('Connecting to {}'.format(url))
     async with websockets.connect(url, max_size=None) as socket:
 
-        async def send(action: str, **payload: Any) -> None:
+        async def send(action: str, **payload: Any) -> Dict[str, Any]:
+            """
+            Send a command and wait for its acknowledgement.
+
+            The first version fired and forgot, which made every failure look
+            identical: a refused `set_source`, a stream that never started and
+            a stream that ran perfectly all produced the same silent "no report
+            captured". A measurement tool that cannot say why it found nothing
+            is not much of a measurement tool.
+
+            Args:
+                action: Command name
+                **payload: Command fields
+
+            Returns:
+                The server response, or an empty dict if none arrived
+            """
             await socket.send(json.dumps({'action': action, **payload}))
+
+            deadline = time.time() + 15.0
+            while time.time() < deadline:
+                try:
+                    raw = await asyncio.wait_for(
+                        socket.recv(), timeout=max(0.1, deadline - time.time()),
+                    )
+                except asyncio.TimeoutError:
+                    break
+                if isinstance(raw, bytes):
+                    continue
+                try:
+                    message = json.loads(raw)
+                except ValueError:
+                    continue
+
+                if args.verbose:
+                    print('    < {}'.format(str(message)[:200]))
+
+                # An error from anywhere is worth surfacing, not only one
+                # carrying this command's name.
+                if message.get('event') == 'ERROR' or message.get('level') == 'error':
+                    print('    ERROR: {}'.format(
+                        message.get('message') or message.get('error')))
+
+                if message.get('action') == action or message.get('type') == action:
+                    if not message.get('success', True):
+                        print('    REFUSED {}: {}'.format(
+                            action, message.get('error', 'no reason given')))
+                    return dict(message)
+
+            print('    no acknowledgement for {} within 15s'.format(action))
+            return {}
 
         async def collect(seconds: float) -> str:
             """Read messages for `seconds`, returning any PERF status text."""
@@ -138,6 +187,11 @@ async def _run(args: argparse.Namespace) -> int:
                     message = json.loads(raw)
                 except ValueError:
                     continue
+                if args.verbose:
+                    print('    < {}'.format(str(message)[:200]))
+                if message.get('event') == 'ERROR' or message.get('level') == 'error':
+                    print('    ERROR: {}'.format(
+                        message.get('message') or message.get('error')))
                 if message.get('scope') == _PERF_SCOPE:
                     report += str(message.get('message', '')) + '\n'
             return report
@@ -186,7 +240,9 @@ async def _run(args: argparse.Namespace) -> int:
                     parsed['verdict'],
                 ))
             else:
-                print('  no report captured — was the stream producing frames?')
+                print('  no report captured. The pipeline reports only when it '
+                      'processed at least one frame, so the stream produced '
+                      'none. Re-run with --verbose to see why.')
 
     if args.out:
         with open(args.out, 'w', encoding='utf-8') as handle:
@@ -240,6 +296,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument('--settle', type=float, default=8.0,
                         help='pause after a lever change, for session rebuild')
     parser.add_argument('--out', default='sweep.json', help='write results here')
+    parser.add_argument('--verbose', action='store_true',
+                        help='print every message the pipeline sends')
     args = parser.parse_args(argv)
 
     try:
