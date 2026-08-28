@@ -564,6 +564,50 @@ debug-frame settings, `LOG_LEVEL` and `PHANTOM_TEMP_DIR`. It is a list rather
 than "forward everything" on purpose: the pod is a different machine, and
 blanket forwarding would send local paths and secrets that mean nothing there.
 
+### Getting a measurement clip onto the pod
+
+A speed comparison needs **two files on the pod**, and they are different
+things:
+
+| | What it is | Where it goes |
+|---|---|---|
+| **Source** | A *still image* of the face being swapped **in** | `/workspace/face.jpg` |
+| **Clip** | A *video* standing in for the webcam feed — the frames being swapped | `/workspace/clip.mp4` |
+
+The clip is what the operator's camera would have sent, so it should be a
+person facing the camera as they would on a call. Record it on the actual
+webcam: the design target is what a real video call looks like, sensor noise
+and compression included, and a clean studio video measures a workload the
+product never sees.
+
+Neither can be uploaded through the app. `upload_target` carries photos inline
+over the WebSocket at 6 MB each, and `set_target` resolves paths against the
+*pipeline's* filesystem, which on a pod is another machine. So copy them over
+SSH:
+
+```bash
+python runpod/orchestrator.py push clip.mp4
+python runpod/orchestrator.py push face.jpg
+```
+
+Both land in `/workspace`, which is the network volume and therefore survives
+the pod. Pass a second argument to choose the destination.
+
+**Encode the clip at the preset's capture resolution.** With `--input-url` the
+pipeline does *not* set capture width, height or frame rate — those are only
+applied to a real webcam — so the file plays at whatever it was encoded at, and
+that is what decides how much work each frame is. A 1080p clip measures a
+workload no preset ever runs:
+
+```bash
+ffmpeg -i raw.mp4 -vf scale=640:360 -r 20 -c:v libx264 -crf 20 clip.mp4
+```
+
+**Make it longer than the sweep needs.** Frames are read as fast as they decode
+rather than paced to real time, so a clip is consumed faster than its running
+length, and the stream simply ends at EOF. Two to three minutes covers a 60
+second measurement per configuration comfortably.
+
 ### The speed levers
 
 Four settings trade inference time against risk, and all four default **off** so

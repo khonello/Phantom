@@ -1608,6 +1608,78 @@ def _warn_existing_pod(pod_id: str) -> None:
     print("Recover it from the RunPod dashboard if it needs stopping.\n")
 
 
+def cmd_push(pod_id: str, local_path: str, remote_path: Optional[str] = None) -> bool:
+    """
+    Copy a local file onto the pod's network volume over SFTP.
+
+    Exists because there is no other way to get a *video* onto the pod.
+    `upload_target` carries photos inline over the WebSocket, capped at 6MB
+    each, and `set_target` resolves paths against the pipeline's own
+    filesystem — which on a pod is another machine. A measurement clip is
+    neither small enough for the first nor present for the second.
+
+    Args:
+        pod_id: Pod to copy to
+        local_path: File on this machine
+        remote_path: Destination; defaults to /workspace/<basename>, which is
+                     the network volume and therefore survives the pod
+
+    Returns:
+        True on success
+    """
+    if not os.path.isfile(local_path):
+        print("ERROR: no such file: {}".format(local_path))
+        return False
+
+    destination = remote_path or "/workspace/{}".format(os.path.basename(local_path))
+
+    ssh_address = _get_ssh_command(pod_id)
+    if not ssh_address:
+        print("ERROR: could not resolve the pod's SSH address.")
+        print("       The pod must be running, and RUNPOD_SSH_KEY_PATH set.")
+        return False
+
+    key_path = os.getenv("RUNPOD_SSH_KEY_PATH", "")
+    if not key_path:
+        print("ERROR: RUNPOD_SSH_KEY_PATH is not set in .env")
+        return False
+
+    paramiko = _require_paramiko()
+    username, host = ssh_address.rsplit("@", 1)
+    size_mb = os.path.getsize(local_path) / (1024 * 1024)
+
+    print("Copying {} ({:.1f} MB) to {}:{}".format(
+        os.path.basename(local_path), size_mb, host, destination))
+
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        client.connect(
+            hostname=host, port=22, username=username,
+            pkey=_load_ssh_key(key_path), timeout=30,
+        )
+        sftp = client.open_sftp()
+        try:
+            last = [0.0]
+
+            def progress(sent: int, total: int) -> None:
+                pct = sent * 100.0 / total if total else 0.0
+                if pct - last[0] >= 10.0 or sent == total:
+                    last[0] = pct
+                    print("  {:.0f}%".format(pct))
+
+            sftp.put(local_path, destination, callback=progress)
+        finally:
+            sftp.close()
+        print("Done: {}".format(destination))
+        return True
+    except Exception as exc:
+        print("ERROR: {}: {}".format(type(exc).__name__, exc))
+        return False
+    finally:
+        client.close()
+
+
 def main() -> None:
     """Parse args and dispatch to the right command."""
     parser = argparse.ArgumentParser(
@@ -1626,7 +1698,8 @@ commands:
 Set RUNPOD_DEPLOY_MODE=ssh (development) or docker (production) in .env.
         """,
     )
-    parser.add_argument("command", choices=["start", "resume", "stop", "terminate", "status", "gpus", "datacenters"])
+    parser.add_argument("command", choices=["start", "resume", "stop", "terminate", "status", "gpus", "datacenters", "push"])
+    parser.add_argument("paths", nargs="*", help="push: <local> [remote]")
     args = parser.parse_args()
 
     api_key = os.getenv("RUNPOD_API_KEY")
@@ -1645,6 +1718,18 @@ Set RUNPOD_DEPLOY_MODE=ssh (development) or docker (production) in .env.
         cmd_datacenters()
     elif args.command == "gpus":
         cmd_gpus()
+    elif args.command == "push":
+        if not pod_id:
+            print("ERROR: RUNPOD_POD_ID not set in .env")
+            sys.exit(1)
+        if not args.paths:
+            print("ERROR: push needs a local file")
+            print("  python runpod/orchestrator.py push clip.mp4")
+            print("  python runpod/orchestrator.py push face.jpg /workspace/face.jpg")
+            sys.exit(1)
+        local = args.paths[0]
+        remote = args.paths[1] if len(args.paths) > 1 else None
+        sys.exit(0 if cmd_push(pod_id, local, remote) else 1)
     elif args.command in ("resume", "stop", "terminate", "status"):
         if not pod_id:
             print("ERROR: RUNPOD_POD_ID not set in .env")
