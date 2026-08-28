@@ -70,7 +70,7 @@ import socket
 import sys
 import time
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -1610,19 +1610,27 @@ def _warn_existing_pod(pod_id: str) -> None:
 
 def cmd_push(pod_id: str, local_path: str, remote_path: Optional[str] = None) -> bool:
     """
-    Copy a local file onto the pod's network volume over SFTP.
+    Copy a video onto the pod over the pipeline's WebSocket.
 
-    Exists because there is no other way to get a *video* onto the pod.
-    `upload_target` carries photos inline over the WebSocket, capped at 6MB
-    each, and `set_target` resolves paths against the pipeline's own
-    filesystem — which on a pod is another machine. A measurement clip is
-    neither small enough for the first nor present for the second.
+    **Not SFTP.** Only port 9000 is exposed (see `_exposed_ports`), so there is
+    no direct SSH, and RunPod's SSH *proxy* does not carry the SFTP subsystem —
+    `open_sftp` fails with "Channel closed". That is the same class of
+    limitation as the proxy dropping `exec_command`, which is why deploys use
+    `invoke_shell` instead.
+
+    Port 9000 does work, and the pipeline already has a chunked video upload
+    built for exactly this gap, with its own size and format checks. This
+    drives it rather than adding a second transfer path.
+
+    The file lands under the pipeline's upload directory, and the returned path
+    is what `--input-url` or `set_target` should be given.
 
     Args:
         pod_id: Pod to copy to
-        local_path: File on this machine
-        remote_path: Destination; defaults to /workspace/<basename>, which is
-                     the network volume and therefore survives the pod
+        local_path: Video on this machine
+        remote_path: Ignored — the pipeline chooses the destination, so that a
+                     client cannot name a path on the pod. Accepted only so the
+                     argument does not silently do something different.
 
     Returns:
         True on success
@@ -1631,53 +1639,86 @@ def cmd_push(pod_id: str, local_path: str, remote_path: Optional[str] = None) ->
         print("ERROR: no such file: {}".format(local_path))
         return False
 
-    destination = remote_path or "/workspace/{}".format(os.path.basename(local_path))
+    if remote_path:
+        print("NOTE: the destination is chosen by the pipeline; ignoring '{}'."
+              .format(remote_path))
 
-    ssh_address = _get_ssh_command(pod_id)
-    if not ssh_address:
-        print("ERROR: could not resolve the pod's SSH address.")
-        print("       The pod must be running, and RUNPOD_SSH_KEY_PATH set.")
-        return False
-
-    key_path = os.getenv("RUNPOD_SSH_KEY_PATH", "")
-    if not key_path:
-        print("ERROR: RUNPOD_SSH_KEY_PATH is not set in .env")
-        return False
-
-    paramiko = _require_paramiko()
-    username, host = ssh_address.rsplit("@", 1)
-    size_mb = os.path.getsize(local_path) / (1024 * 1024)
-
-    print("Copying {} ({:.1f} MB) to {}:{}".format(
-        os.path.basename(local_path), size_mb, host, destination))
-
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
-        client.connect(
-            hostname=host, port=22, username=username,
-            pkey=_load_ssh_key(key_path), timeout=30,
-        )
-        sftp = client.open_sftp()
-        try:
-            last = [0.0]
+        import asyncio
+        import base64
+        import json as _json
+        import websockets
+    except ImportError:
+        print("ERROR: websockets is required for push.")
+        print("  Run: pip install websockets")
+        return False
 
-            def progress(sent: int, total: int) -> None:
-                pct = sent * 100.0 / total if total else 0.0
-                if pct - last[0] >= 10.0 or sent == total:
-                    last[0] = pct
-                    print("  {:.0f}%".format(pct))
+    name = os.path.basename(local_path)
+    size = os.path.getsize(local_path)
+    url = "wss://{}/ws".format(_get_proxy_ws_url(pod_id))
 
-            sftp.put(local_path, destination, callback=progress)
-        finally:
-            sftp.close()
-        print("Done: {}".format(destination))
-        return True
+    print("Uploading {} ({:.1f} MB) to {}".format(name, size / (1024 * 1024), url))
+
+    async def run() -> bool:
+        async with websockets.connect(url, max_size=None, open_timeout=60) as socket:
+
+            async def call(action: str, **payload: Any) -> Dict[str, Any]:
+                await socket.send(_json.dumps({"action": action, **payload}))
+                while True:
+                    raw = await socket.recv()
+                    if isinstance(raw, bytes):
+                        continue  # a video frame from a running stream
+                    message = _json.loads(raw)
+                    if message.get("type", "").startswith("upload_video"):
+                        return message
+                    # Anything else is unsolicited status; keep waiting.
+
+            begin = await call("upload_video_begin", name=name, size=size)
+            if not begin.get("success", True):
+                print("ERROR: {}".format(begin.get("error", "upload refused")))
+                return False
+
+            upload_id = begin.get("data", {}).get("upload_id", "")
+            chunk_bytes = int(begin.get("data", {}).get("chunk_bytes", 4 * 1024 * 1024))
+
+            sent = 0
+            seq = 0
+            with open(local_path, "rb") as handle:
+                while True:
+                    block = handle.read(chunk_bytes)
+                    if not block:
+                        break
+                    reply = await call(
+                        "upload_video_chunk",
+                        upload_id=upload_id,
+                        seq=seq,
+                        data=base64.b64encode(block).decode("ascii"),
+                    )
+                    if not reply.get("success", True):
+                        print("ERROR: {}".format(reply.get("error", "chunk refused")))
+                        await call("upload_video_cancel", upload_id=upload_id)
+                        return False
+                    sent += len(block)
+                    seq += 1
+                    print("  {:.0f}%".format(sent * 100.0 / size))
+
+            done = await call("upload_video_end", upload_id=upload_id)
+            if not done.get("success", True):
+                print("ERROR: {}".format(done.get("error", "upload failed")))
+                return False
+
+            path = done.get("data", {}).get("path", "")
+            print("Done: {}".format(path))
+            print("")
+            print("Use it with:")
+            print("  python pipeline.py --stream --input-url {}".format(path))
+            return True
+
+    try:
+        return bool(asyncio.run(run()))
     except Exception as exc:
         print("ERROR: {}: {}".format(type(exc).__name__, exc))
         return False
-    finally:
-        client.close()
 
 
 def main() -> None:

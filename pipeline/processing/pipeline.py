@@ -908,10 +908,28 @@ class ProcessingPipeline:
         warmup_frames = getattr(self.config, 'warmup_frames', 0)
 
         try:
+            # A file input loops rather than ending. Measuring a lever means
+            # streaming for a fixed wall-clock time, and frames are read as
+            # fast as they decode rather than paced to real time — so a clip is
+            # consumed far quicker than its running length and would otherwise
+            # end the run early, leaving later configurations with no data.
+            #
+            # Only for a file. On a webcam or a network stream a failed read
+            # means the device or the connection is gone, and looping would
+            # turn that into a silent stall instead of a stop.
+            loops = bool(
+                self.config.input_url and os.path.isfile(str(self.config.input_url))
+            )
+
             while not self._stop_event.is_set():
                 ret, frame = cap.read()
                 if not ret:
-                    break
+                    if not loops:
+                        break
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
 
                 frame_count += 1
                 seq += 1
