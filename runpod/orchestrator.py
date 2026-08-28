@@ -288,6 +288,32 @@ def _get_proxy_ws_url(pod_id: str) -> str:
     return "{}-9000.proxy.runpod.net".format(pod_id)
 
 
+def _resolve_ws_url(pod_id: str) -> Optional[str]:
+    """
+    WebSocket URL for the pipeline on this pod.
+
+    Port 9000 is exposed as **tcp**, and RunPod's `proxy.runpod.net` subdomains
+    only serve HTTP ports — so for this pod the proxy hostname does not resolve
+    at all, which surfaces as `gaierror: getaddrinfo failed`. A TCP port gets a
+    public IP and a mapped port instead, and that is what actually works.
+
+    Same order `_wait_for_ports_ssh` uses: public IP first, proxy only as a
+    fallback for pods that do have one.
+
+    Args:
+        pod_id: Pod to resolve
+
+    Returns:
+        A ws:// or wss:// URL, or None if the pod exposes neither
+    """
+    public = _get_port_address(pod_id, 9000)
+    if public:
+        return "ws://{}/ws".format(public)
+
+    proxy = _get_proxy_ws_url(pod_id)
+    return "wss://{}/ws".format(proxy) if proxy else None
+
+
 def _get_ssh_command(pod_id: str) -> Optional[str]:
     """
     Return SSH user@host string for RunPod's SSH proxy.
@@ -1655,7 +1681,11 @@ def cmd_push(pod_id: str, local_path: str, remote_path: Optional[str] = None) ->
 
     name = os.path.basename(local_path)
     size = os.path.getsize(local_path)
-    url = "wss://{}/ws".format(_get_proxy_ws_url(pod_id))
+
+    url = _resolve_ws_url(pod_id)
+    if not url:
+        print("ERROR: could not resolve the pipeline address. Is the pod running?")
+        return False
 
     print("Uploading {} ({:.1f} MB) to {}".format(name, size / (1024 * 1024), url))
 
@@ -1712,6 +1742,10 @@ def cmd_push(pod_id: str, local_path: str, remote_path: Optional[str] = None) ->
             print("")
             print("Use it with:")
             print("  python pipeline.py --stream --input-url {}".format(path))
+            host_port = url.split("://", 1)[1].rsplit("/ws", 1)[0]
+            host, _, port = host_port.partition(":")
+            print("  python tools/sweep_levers.py --host {} --port {}{}".format(
+                host, port or "9000", " --tls" if url.startswith("wss") else ""))
             return True
 
     try:
