@@ -137,6 +137,7 @@ class FaceMasker:
         """Release the occluder session (memory cleanup)."""
         with self._lock:
             self._session = None
+            self._runner = None
             self._occluder_ready = False
 
     # ------------------------------------------------------------------

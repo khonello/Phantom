@@ -674,6 +674,20 @@ _REALISM_FIELDS: Dict[str, Any] = {
     'color_strength': lambda v: min(1.0, max(0.0, float(v))),
     'grain': lambda v: bool(v),
     'occluder': lambda v: bool(v),
+    # Inference speed levers. Live-switchable for the same reason the swapper
+    # is: the only way to know what a lever is worth is to compare it against
+    # the same clip, and a pod session is paid for by the hour. Restarting the
+    # pipeline to change one would mean a cold start per measurement.
+    #
+    # The first four rebuild every ONNX session, which the pipeline's config
+    # listener does. That costs model load — seconds, not the minutes a pod
+    # restart costs — and TensorRT additionally builds or loads an engine.
+    'fp16': lambda v: bool(v),
+    'cuda_graphs': lambda v: bool(v),
+    'cuda_streams': lambda v: bool(v),
+    'trt': lambda v: bool(v),
+    # Needs no rebuild: the server reads it per frame.
+    'async_encode': lambda v: bool(v),
 }
 
 

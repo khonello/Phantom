@@ -332,6 +332,42 @@ class ProcessingPipeline:
             self.config.apply_model_profile(value)
             self._reset_temporal_state()
 
+        # A speed lever changed -> every ONNX session has to be rebuilt, because
+        # all four are decided at session construction and none can be changed
+        # on a live session. Dropping them here means they reload lazily on the
+        # next frame with the new options.
+        #
+        # This exists so a measurement session does not need a pod restart per
+        # lever. Model load is seconds; a cold start is minutes of a paid hour,
+        # and six levers measured that way would be most of the hour.
+        #
+        # Temporal state goes with them: fp16 changes what the models output,
+        # and a smoothed buffer holding fp32 pixels would blend the two.
+        elif field in ('fp16', 'cuda_graphs', 'cuda_streams', 'trt', 'trt_gpus'):
+            self._rebuild_sessions()
+
+    def _rebuild_sessions(self) -> None:
+        """
+        Drop every ONNX session so it reloads with the current speed levers.
+
+        Sessions are rebuilt lazily on the next frame that needs one, so this
+        returns immediately and the cost lands on that frame. On the live path
+        that is a visible hitch of a second or two — acceptable for a
+        deliberate A/B, and the reason these are not exposed to a consumer.
+        """
+        if self._swapper:
+            self._swapper.clear()
+        if self._enhancer:
+            self._enhancer.clear()
+        if self._masker:
+            self._masker.reset()
+        self._reset_temporal_state()
+        emit_status(
+            'ONNX sessions dropped — rebuilding with the current speed levers '
+            'on the next frame.',
+            scope='RUNTIME',
+        )
+
     def run_stream(self) -> None:
         """
         Run realtime streaming pipeline (webcam or network stream).
