@@ -20,6 +20,17 @@ onnxruntime-gpu>=1.15.0; sys_platform != 'darwin'
 onnxruntime==1.15.0; sys_platform == 'darwin' and platform_machine != 'arm64'
 onnxruntime-silicon==1.13.1; sys_platform == 'darwin' and platform_machine == 'arm64'
 
+# fp16 conversion (tools/convert_fp16.py). `onnx` also arrives transitively via
+# insightface — INSwapper reads the emap projection out of the model file with
+# it — but the conversion path needs it explicitly, and onnxconverter-common
+# ships nowhere else. Both are small.
+#
+# These are on the *pod's* requirements because that is where the weights live:
+# /workspace/models is the only place the models exist, so the conversion runs
+# there. A missing dependency here is a paid hour spent on pip.
+onnx>=1.14.0
+onnxconverter-common>=1.13.0
+
 # GPU memory management
 tensorflow>=2.12.0
 

@@ -318,6 +318,66 @@ else
     exit 1
 fi
 
+# ── 6c. TensorRT for ONNX Runtime (opt-in) ───────────────────────────────────
+# onnxruntime-gpu ships the TensorRT execution provider but dlopens libnvinfer
+# at runtime, and nothing in the base image provides it. Without this the
+# provider never registers and TRT=true does nothing at all.
+#
+# Gated on TRT because the wheels are ~2GB and most sessions do not want them.
+# The flag is forwarded from .env by the orchestrator, so asking for TensorRT in
+# .env is what installs it.
+#
+# NOT fatal, deliberately — and this is the one place that differs from 6b
+# above. Missing cuDNN means every ONNX model silently runs on CPU, which is a
+# paid GPU hour producing nothing usable, so that exits 1. Missing TensorRT
+# means the models run on CUDA instead: still on the GPU, still holding a live
+# call, merely not as fast as intended. Halting the session over it would cost
+# the operator more than the fallback does. See docs/COMPILATION.md.
+if [ "${TRT:-}" = "true" ] || [ "${TRT:-}" = "1" ]; then
+    echo ""
+    echo "--- TensorRT ---"
+    _phase "tensorrt"
+
+    TRT_OK=$(${PYTHON} -c "
+import onnxruntime
+print('yes' if 'TensorrtExecutionProvider' in onnxruntime.get_available_providers() else 'no')
+" 2>/dev/null || echo "no")
+
+    if [ "${TRT_OK}" = "yes" ]; then
+        echo "TensorrtExecutionProvider already available."
+    else
+        echo "Installing tensorrt (~2GB, this is why it is opt-in)..."
+        ${PIP} install --no-deps tensorrt tensorrt-cu12 tensorrt_libs 2>/dev/null             || ${PIP} install tensorrt             || echo "WARNING: tensorrt install failed."
+
+        TRT_LIB_DIR=$(${PYTHON} "${PHANTOM_DIR}/runpod/tensorrt_path.py" || echo "")
+        if [ -n "${TRT_LIB_DIR}" ]; then
+            export LD_LIBRARY_PATH="${TRT_LIB_DIR}:${LD_LIBRARY_PATH:-}"
+            echo "export LD_LIBRARY_PATH=\"${TRT_LIB_DIR}:\${LD_LIBRARY_PATH:-}\""                 > /etc/profile.d/tensorrt.sh
+            echo "LD_LIBRARY_PATH: ${TRT_LIB_DIR}"
+        else
+            echo "WARNING: TensorRT lib dir not found."
+        fi
+    fi
+
+    # Ask onnxruntime, not the filesystem. A library that loads proves nothing
+    # about whether the provider registered against this onnxruntime build —
+    # the TensorRT major version has to match, and a mismatch shows up here
+    # rather than as an error anywhere else.
+    TRT_FINAL=$(${PYTHON} -c "
+import onnxruntime
+print('yes' if 'TensorrtExecutionProvider' in onnxruntime.get_available_providers() else 'no')
+" 2>/dev/null || echo "no")
+
+    if [ "${TRT_FINAL}" = "yes" ]; then
+        echo "Verified: TensorrtExecutionProvider is registered."
+    else
+        echo "WARNING: TensorRT was requested but the provider is not registered."
+        echo "         Models will run on CUDA instead — correct, just not as fast."
+        echo "         Usually a version mismatch between tensorrt and onnxruntime-gpu."
+        echo "         Continuing: a CUDA session is worth more than no session."
+    fi
+fi
+
 # ── 7. GFPGAN model download ──────────────────────────────────────────────────
 echo ""
 echo "--- GFPGAN Model ---"
