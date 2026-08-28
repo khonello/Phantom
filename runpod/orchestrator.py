@@ -118,7 +118,7 @@ _FORWARDED_ENV = (
     # Inference speed levers. These matter more here than anywhere: the whole
     # point of them is to be A/B'd against a rented GPU, so a lever that cannot
     # reach the pod cannot be measured at all.
-    "FP16", "CUDA_GRAPHS", "TRT", "TRT_GPUS",
+    "FP16", "CUDA_GRAPHS", "CUDA_STREAMS", "ASYNC_ENCODE", "TRT", "TRT_GPUS",
     # Measurement
     "DEBUG_FRAMES_DIR", "DEBUG_FRAMES_STRIDE", "DEBUG_FRAMES_LIMIT",
     "LOG_LEVEL",

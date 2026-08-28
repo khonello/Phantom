@@ -93,7 +93,9 @@ class WebSocketAPIServer:
         # Frame broadcast queue — decouples pipeline thread from network I/O.
         # Pipeline thread puts encoded frames here; a dedicated sender thread
         # drains and broadcasts them so slow clients never stall processing.
-        self._frame_queue: queue.Queue[bytes] = queue.Queue(maxsize=2)
+        # Holds encoded bytes, or (frame, capture_ts) when `async_encode`
+        # moves the JPEG encode onto the sender thread.
+        self._frame_queue: 'queue.Queue[Any]' = queue.Queue(maxsize=2)
         self._frame_sender_thread: Optional[threading.Thread] = None
 
         # Start time for uptime reporting
@@ -544,6 +546,18 @@ class WebSocketAPIServer:
                     data = self._frame_queue.get_nowait()
                 except queue.Empty:
                     break
+
+            # Encode here rather than at emit, when asked to. Two effects, and
+            # the second is the one that was not obvious: the encode comes off
+            # the pipeline thread, *and* it only happens to the frame actually
+            # being sent. The drain above discards intermediate frames, so
+            # encoding at emit time paid for pictures nobody ever saw.
+            if isinstance(data, tuple):
+                encoded = self._encode_frame(data[0], data[1])
+                if encoded is None:
+                    continue
+                data = encoded
+
             self._broadcast_binary(data)
 
     # ── Event handlers ───────────────────────────────────────────────────────
@@ -560,6 +574,44 @@ class WebSocketAPIServer:
             seq: Sequence number
             capture_ts: Capture timestamp in nanoseconds (time.perf_counter_ns)
         """
+        payload: Any
+        if getattr(self.config, 'async_encode', False):
+            # Defer the encode to the sender thread. The frame is not copied:
+            # the compositor returns a new array per frame, and the held frame
+            # a guard re-sends is only ever read.
+            payload = (frame, capture_ts)
+        else:
+            encoded = self._encode_frame(frame, capture_ts)
+            if encoded is None:
+                return
+            payload = encoded
+
+        try:
+            self._frame_queue.put_nowait(payload)
+        except queue.Full:
+            # Drop oldest, enqueue latest — keeps display current
+            try:
+                self._frame_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._frame_queue.put_nowait(payload)
+            except queue.Full:
+                pass
+
+    def _encode_frame(self, frame: Any, capture_ts: int) -> Optional[bytes]:
+        """
+        JPEG-encode one frame, with the capture timestamp as an 8-byte header.
+
+        The header lets the desktop compute round-trip latency for A/V sync.
+
+        Args:
+            frame: numpy frame array
+            capture_ts: Capture timestamp in nanoseconds
+
+        Returns:
+            The payload, or None if encoding failed
+        """
         import cv2
         try:
             # Preset-driven rather than fixed at 85: this is the return leg the
@@ -570,23 +622,12 @@ class WebSocketAPIServer:
             success, jpeg_data = cv2.imencode(
                 '.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality]
             )
-            if success:
-                header = struct.pack('<q', capture_ts)
-                payload = header + jpeg_data.tobytes()
-                try:
-                    self._frame_queue.put_nowait(payload)
-                except queue.Full:
-                    # Drop oldest, enqueue latest — keeps display current
-                    try:
-                        self._frame_queue.get_nowait()
-                    except queue.Empty:
-                        pass
-                    try:
-                        self._frame_queue.put_nowait(payload)
-                    except queue.Full:
-                        pass
+            if not success:
+                return None
+            return struct.pack('<q', capture_ts) + jpeg_data.tobytes()
         except Exception as e:
             emit_error(f'Frame encoding error: {e}', exception=e, scope='API_SERVER')
+            return None
 
     def _on_status_changed(
         self,

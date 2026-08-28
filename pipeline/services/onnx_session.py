@@ -330,6 +330,20 @@ def build_providers(
             if static_shapes and getattr(config, 'cuda_graphs', False):
                 options['enable_cuda_graph'] = 1
 
+            # Host<->device copies on their own stream, so a transfer can
+            # overlap compute instead of serialising behind it. Worth having
+            # here because this pipeline alternates device and host constantly
+            # — the compositor is OpenCV on the CPU, so every model hands its
+            # output back before the next one runs.
+            #
+            # Not combined with CUDA graphs: a captured graph replays a fixed
+            # sequence against fixed buffers, and a copy running outside the
+            # graph's stream is exactly the ordering assumption capture makes.
+            # Where both are asked for, graphs win — they are the larger and
+            # better-understood effect.
+            if getattr(config, 'cuda_streams', False) and 'enable_cuda_graph' not in options:
+                options['do_copy_in_default_stream'] = 0
+
             providers.append((name, options) if options else name)
             continue
 

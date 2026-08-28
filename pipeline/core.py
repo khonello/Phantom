@@ -145,6 +145,10 @@ def parse_args() -> None:
                         dest='fp16', action='store_true', default=_env_bool('FP16'))
     program.add_argument('--cuda-graphs', help='capture and replay the CUDA kernel launch sequence',
                         dest='cuda_graphs', action='store_true', default=_env_bool('CUDA_GRAPHS'))
+    program.add_argument('--cuda-streams', help='copies on a separate CUDA stream, overlapping transfer with compute',
+                        dest='cuda_streams', action='store_true', default=_env_bool('CUDA_STREAMS'))
+    program.add_argument('--async-encode', help='JPEG-encode on the sender thread, not the pipeline thread',
+                        dest='async_encode', action='store_true', default=_env_bool('ASYNC_ENCODE'))
     program.add_argument('--trt', help='route inference through the TensorRT provider',
                         dest='trt', action='store_true', default=_env_bool('TRT'))
     program.add_argument('--trt-gpus', help='comma-separated GPU names worth building TensorRT engines for',
@@ -221,6 +225,8 @@ def parse_args() -> None:
         ('occluder', args.occluder),
         ('fp16', args.fp16),
         ('cuda_graphs', args.cuda_graphs),
+        ('cuda_streams', args.cuda_streams),
+        ('async_encode', args.async_encode),
         ('trt', args.trt),
         ('trt_gpus', args.trt_gpus),
         ('debug_frames_dir', args.debug_frames_dir),

@@ -81,8 +81,19 @@ class FaceSwapConfig:
     # comes out of a paid hour with an operator waiting.
     fp16: bool = False
     cuda_graphs: bool = False
+    # Copies on a separate CUDA stream, so a transfer can overlap compute.
+    # Ignored where CUDA graphs are active — capture assumes one stream.
+    cuda_streams: bool = False
     trt: bool = False
     trt_gpus: str = 'RTX 4090,RTX 5090,H100,H200,L40S,RTX 6000 Ada,RTX 4080'
+
+    # Move the JPEG encode off the pipeline thread and onto the sender thread
+    # that was already there waiting on the network. Two effects: the encode
+    # leaves the critical path, and because the sender drains to the newest
+    # frame before encoding, frames that were going to be dropped are no longer
+    # encoded at all. Costs memory — the queue then holds raw frames rather
+    # than JPEGs — which is why it is bounded at two and opt-in.
+    async_encode: bool = False
 
     # Stream pipeline - quality presets
     quality: str = 'optimal'

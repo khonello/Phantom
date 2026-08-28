@@ -151,6 +151,106 @@ making inference cheaper is what widens that field.
 
 ---
 
+## The wider optimisation surface
+
+A deliberate sweep of the usual GPU-pipeline techniques, so the ones not taken
+are on record as decisions rather than oversights.
+
+| Technique | Status |
+|---|---|
+| fp16 inference | Implemented, unmeasured |
+| TensorRT | Implemented, unmeasured |
+| ORT CUDA/TensorRT execution | Implemented; `execution.py::verify` raises on a silent CPU fallback |
+| Model input resolution | Implemented thoroughly |
+| Batching | **Not applicable to live; open for RENDER** |
+| Avoiding GPU-CPU transfers | Partial — structurally capped |
+| Keeping tensors on the GPU | Deferred, with a better path than first thought |
+| CUDA streams | Implemented (`cuda_streams`) |
+| Asynchronous processing | Partly implemented (`async_encode`) |
+| Reusing detections across frames | **Rejected on purpose** |
+| Reusing alignment information | Implemented |
+
+### Why the transfers are structurally capped
+
+The per-frame path alternates device and host about four times: detector (GPU)
+to landmarks on the CPU, a warp to build the arcface crop, the swapper (GPU),
+the crop back to the CPU, warps to build the FFHQ crop, CodeFormer (GPU), the
+restored crop back, colour and detail, XSeg (GPU), the mask back, paste, grain.
+
+**Each transfer exists because the next consumer is an OpenCV call on the CPU.**
+IOBinding makes every one of them cheaper — pinned memory, no per-call
+allocation — but cannot remove one. The count is set by how often control
+alternates between devices, and that alternation is the architecture.
+
+### Keeping tensors on the GPU — deferred, and why the first reasoning was weak
+
+This is the fix for the above: compositing on the GPU collapses four round
+trips into one. It was first deferred on the grounds that it needs `cv2.cuda`,
+which is a real problem — **PyPI OpenCV is not built with CUDA**, so it would
+mean compiling OpenCV on the pod or shipping a custom image.
+
+That framing was too narrow. **torch is already a GPU dependency**, and
+`affine_grid` / `grid_sample` plus a handful of elementwise ops cover what
+`FaceCompositor` does, with no new dependency at all. So the deferral should
+rest on the honest reasons instead:
+
+- `compositor.py` is around a thousand lines of tuned, quality-critical code,
+  and GPU resampling is not bit-identical to `warpAffine` with `INTER_CUBIC`.
+  On a target this subtle — grain, detail matching, colour ramps — that needs
+  an A/B on footage, not a latency number.
+- **Asynchronous processing may make it unnecessary.** If the CPU composites
+  frame N while the GPU infers frame N+1, the compositor stops being on the
+  critical path at all. Doing the cheap, no-quality-risk thing first and
+  re-measuring beats rewriting the file that most decides how the output looks.
+
+Revisit only if pipelining lands and the GPU is still starved.
+
+### Asynchronous processing — what was done and what was not
+
+**Done: the JPEG encode moved off the pipeline thread** (`async_encode`). The
+websocket *send* was already on a dedicated thread, but `cv2.imencode` ran
+synchronously in the `FRAME_READY` handler, so every frame was encoded on the
+pipeline thread while the sender thread sat waiting.
+
+The second effect is the one that was not obvious. The sender **drains to the
+newest frame** before broadcasting, so under load frames were encoded and then
+immediately discarded. Encoding after the drain means only the frame actually
+sent is ever encoded — and the saving grows exactly when the pipeline is
+behind, which is when it is worth having.
+
+**Not done: decoupling capture from processing.** It matters less than it
+looks. In push mode, which is the deployment that actually runs, the desktop
+sends frames into `frame_queue` and `_stream_loop_push` reads from it, so
+**capture is already decoupled there**. A capture thread would only help the
+local `VideoCapture` path.
+
+**Not done: pipelining detect / swap / composite as separate stages.** That is
+the deep version, a large change to the live path, and it should wait on the
+stage breakdown showing where the time actually goes.
+
+### Batching
+
+Live is inherently batch-1: one operator, one face, one frame, bound by latency
+rather than throughput. Nothing to win.
+
+**RENDER is the real opportunity and is untaken.** Offline video has no frame
+deadline and currently processes one frame at a time. It is also where a larger
+GPU would pay off, unlike the live path.
+
+**Verify before building it:** the swapper and CodeFormer exports may carry a
+fixed batch dimension of 1, in which case batching needs different model
+exports rather than different calling code. That cannot be checked here — it
+needs the weights, which live on the pod.
+
+### Reusing detections — rejected, not overlooked
+
+Detection runs on **every** frame, deliberately. Face tracking was *replaced* by
+per-frame detection plus landmark EMA, because a stale box carried forward
+produces a face lagging the head it sits on, which is failure mode 3.
+`redetect_interval` survives on `FaceSwapConfig` with **no readers at all**.
+
+---
+
 ## Nuitka — accepted for `desktop/`, rejected for `pipeline/`
 
 ### The reason is distribution, not speed
