@@ -97,6 +97,53 @@ Estimates above are labelled as such. This session's lesson was that the
 reasoning about *where* time goes held, and the predictions of *how much* each
 lever would buy did not survive contact with a measurement.
 
+**Frame rate, estimated from the measured L4 numbers.** GPU stages scale with
+the card; the ~20ms of CPU compositing and encode does not, which is what sets
+the floor:
+
+| | restore | detect | CPU | total | fps |
+|---|---|---|---|---|---|
+| L4 (measured) | 110ms | 16ms | ~20ms | 146ms | **~7** |
+| RTX 4090 (est.) | ~44ms | ~6ms | ~20ms | ~70ms | **~14** |
+| RTX 4090 + fp16 (est.) | ~24ms | ~6ms | ~20ms | ~50ms | **~20** |
+
+So a 4090 roughly doubles the frame rate and still misses 20fps on its own.
+**4090 + fp16 is the first combination that plausibly holds the `optimal`
+preset**, and it lands right on the deadline rather than comfortably inside it.
+
+### Proposed: refuse mediocre GPUs, wait instead
+
+**Not implemented.** Recorded because this session was measured on an L4 by
+accident, and the card turned out to matter more than every lever combined.
+
+Auto-discovery sorts by `_GPU_PERF` and takes the fastest *available*, which
+means it silently accepts a 34-ranked card when a 100-ranked one is busy. The
+proposal is to restrict `start` to a **top tier** — 4090 and its equals — and,
+when none is free, **wait a minute and retry, up to about five minutes**,
+rather than dropping down the list.
+
+This deliberately reverses the reasoning in commit 45ba27c and in
+docs/COMPILATION.md, which argued that pinning trades "sometimes a slower card"
+for "sometimes no pod at all", and that no pod is the worse failure on a paid
+session. That argument assumed pinning meant *failing*. A bounded wait is not a
+pin: it costs nothing, because **billing starts when a pod runs, not while you
+are waiting for one**. Landing on an L4 costs a whole session of data that
+cannot be compared against anything else — which is exactly what happened.
+
+Two properties worth keeping in the design:
+
+- **What happens at the timeout differs by purpose.** A measurement session
+  should fail rather than accept a slower card, since a comparison across two
+  architectures is not a comparison. A customer session should fall back, since
+  some service beats none. That makes it a flag, not a constant.
+- **A narrow tier is what makes the TensorRT engine cache pay.** Engines are
+  keyed per architecture and each pays its build once; across a dozen eligible
+  cards the cache rarely hits, across three or four it is warm almost always.
+  The same holds for any future per-GPU tuning — a small, known set is what
+  makes "optimise for this card" a sentence that means something.
+
+Lives in `_discover_gpus` and `cmd_start` in `runpod/orchestrator.py`.
+
 ## Quick Commands
 
 ### Running
