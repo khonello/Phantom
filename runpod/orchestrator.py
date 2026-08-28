@@ -1739,13 +1739,25 @@ def cmd_push(pod_id: str, local_path: str, remote_path: Optional[str] = None) ->
 
             path = done.get("data", {}).get("path", "")
             print("Done: {}".format(path))
-            print("")
-            print("Use it with:")
-            print("  python pipeline.py --stream --input-url {}".format(path))
+
+            # Print the finished command rather than a template. Every part of
+            # it is only knowable here: resume assigns a new public IP and
+            # mapped port, and the destination is chosen by the pipeline.
+            # Leaving the operator to assemble those by hand is how the wrong
+            # host got used once already.
             host_port = url.split("://", 1)[1].rsplit("/ws", 1)[0]
             host, _, port = host_port.partition(":")
-            print("  python tools/sweep_levers.py --host {} --port {}{}".format(
-                host, port or "9000", " --tls" if url.startswith("wss") else ""))
+            source = "{}/.github/examples/source.jpg".format(_REMOTE_PHANTOM_DIR)
+
+            print("")
+            print("Run the sweep with:")
+            print("")
+            print("  python tools/sweep_levers.py --host {} --port {}{} "
+                  "--input-url {} --source {} --seconds 60 --out sweep.json".format(
+                      host, port or "9000",
+                      " --tls" if url.startswith("wss") else "",
+                      path, source))
+            print("")
             return True
 
     try:
