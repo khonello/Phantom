@@ -91,7 +91,8 @@ class _CodeFormerBackend:
             # has not seen before. That is what makes CUDA graph capture legal
             # here and not on the detector.
             self._session = create_session(
-                self.config, model_path, 'codeformer', static_shapes=True,
+                self.config, model_path, 'codeformer',
+                static_shapes=True, bound=True,
             )
             self._runner = BoundRunner(self._session, 'codeformer')
 

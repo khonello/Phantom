@@ -300,6 +300,7 @@ def build_providers(
     config: FaceSwapConfig,
     model_path: str,
     static_shapes: bool = False,
+    bound: bool = False,
 ) -> List[Provider]:
     """
     The provider list for one model, with per-provider options attached.
@@ -312,6 +313,10 @@ def build_providers(
                        buffer addresses, so a model whose input size changes
                        between calls would replay a graph describing the
                        previous shape
+        bound: True when the caller runs this session through `BoundRunner`.
+               CUDA graphs need IOBinding as well as static shapes, and a
+               session that is asked to capture but then driven with a plain
+               `run` fails at inference rather than at construction
 
     Returns:
         Providers in priority order, ready to hand to `InferenceSession`
@@ -327,7 +332,13 @@ def build_providers(
             # share of the cost for batch-1 models made of many small kernels.
             # They require IOBinding with stable buffer addresses, so this is
             # only offered where the caller has said shapes are static.
-            if static_shapes and getattr(config, 'cuda_graphs', False):
+            # Both conditions, not just static shapes. `inswapper` runs
+            # inside InsightFace's INSwapper, which calls `session.run`
+            # directly — there is no way to hand it a binding. Capturing a
+            # graph on a session driven that way produced "Face swap failed:
+            # list index out of range" on every frame: the replay returns
+            # nothing and the caller indexes an empty list.
+            if static_shapes and bound and getattr(config, 'cuda_graphs', False):
                 options['enable_cuda_graph'] = 1
 
             # Host<->device copies on their own stream, so a transfer can
@@ -406,6 +417,7 @@ def create_session(
     model_path: str,
     label: str,
     static_shapes: bool = False,
+    bound: bool = False,
 ) -> Any:
     """
     Build an `InferenceSession` for one model.
@@ -416,6 +428,9 @@ def create_session(
                     one exists and `fp16` is set
         label: Short name for log lines, e.g. `codeformer`
         static_shapes: Whether every input has a fixed shape — gates CUDA graphs
+        bound: Whether the caller drives this session through `BoundRunner` —
+               also gates CUDA graphs, which cannot be captured against a
+               session run without a binding
 
     Returns:
         A live session
@@ -428,7 +443,7 @@ def create_session(
     import onnxruntime as ort
 
     weights = resolve_weights(config, model_path)
-    providers = build_providers(config, weights, static_shapes)
+    providers = build_providers(config, weights, static_shapes, bound)
     options = default_session_options(config)
 
     session = ort.InferenceSession(
@@ -439,7 +454,7 @@ def create_session(
     detail = 'fp16' if weights.endswith(_FP16_SUFFIX) else 'fp32'
     if _TRT in active:
         detail += ', TensorRT'
-    elif static_shapes and getattr(config, 'cuda_graphs', False) and _CUDA in active:
+    elif static_shapes and bound and getattr(config, 'cuda_graphs', False) and _CUDA in active:
         detail += ', CUDA graph'
 
     emit_status(

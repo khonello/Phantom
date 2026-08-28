@@ -129,7 +129,9 @@ class FaceSwapper:
             from insightface.model_zoo.inswapper import INSwapper
             from pipeline.services.onnx_session import create_session
 
-            # Static shapes: a 128px target crop and a 512-d source embedding.
+            # Static shapes, but deliberately not `bound`: INSwapper calls
+            # `session.run` itself, so there is no binding to capture a CUDA
+            # graph against and asking for one fails at inference.
             session = create_session(
                 self.config, model_path, 'inswapper', static_shapes=True,
             )

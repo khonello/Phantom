@@ -324,7 +324,8 @@ class FaceMasker:
             # Static shapes: XSeg always sees `_input_size` square, whatever
             # the aligned crop was — the resize above guarantees it.
             session = create_session(
-                self.config, model_path, 'xseg', static_shapes=True,
+                self.config, model_path, 'xseg',
+                static_shapes=True, bound=True,
             )
             self._runner = BoundRunner(session, 'xseg')
 

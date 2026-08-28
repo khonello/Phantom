@@ -146,14 +146,24 @@ check('no CUDA graph unless asked for',
       'enable_cuda_graph' not in options_for(built, 'CUDAExecutionProvider'))
 
 config = cuda_config(cuda_graphs=True)
-built = onnx_session.build_providers(config, model, static_shapes=True)
-check('CUDA graph is enabled on a static-shape model',
+built = onnx_session.build_providers(config, model, static_shapes=True, bound=True)
+check('CUDA graph is enabled on a static-shape, bound model',
       options_for(built, 'CUDAExecutionProvider').get('enable_cuda_graph') == 1)
 
-built = onnx_session.build_providers(config, model, static_shapes=False)
+built = onnx_session.build_providers(config, model, static_shapes=False, bound=True)
 check('CUDA graph is refused on a dynamic-shape model',
       'enable_cuda_graph' not in options_for(built, 'CUDAExecutionProvider'),
       'a captured graph records fixed buffer addresses')
+
+# The case that actually broke a paid session: inswapper has static shapes but
+# runs inside InsightFace's INSwapper, which calls session.run itself. Capture
+# on a session driven without a binding returned nothing, and the caller
+# indexed an empty list — "Face swap failed: list index out of range", once per
+# frame.
+built = onnx_session.build_providers(config, model, static_shapes=True, bound=False)
+check('CUDA graph is refused when the caller does not use IOBinding',
+      'enable_cuda_graph' not in options_for(built, 'CUDAExecutionProvider'),
+      'static shapes are necessary but not sufficient — capture needs a binding')
 
 config = cuda_config(trt=True, trt_gpus='RTX 4090')
 built = onnx_session.build_providers(config, model, static_shapes=True)

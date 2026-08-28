@@ -113,6 +113,25 @@ def session_providers(holder: Any) -> Optional[List[str]]:
             if found:
                 return found
 
+    # Two levels down. Every service that matters keeps its session behind one
+    # more object than the checks above reach, and each returned None — which
+    # `verify` reads as "not loaded" rather than "on CPU", so three of the four
+    # models were never actually checked. The one that passed, the occluder,
+    # happens to hold its session directly.
+    #
+    #   Enhancer     -> _backend   -> _session
+    #   FaceSwapper  -> _swapper   -> .session   (INSwapper)
+    #   FaceDetector -> _analyser  -> .models    (FaceAnalysis)
+    #
+    # A silent CPU fallback is the exact failure this module exists to catch,
+    # and it could not see most of the pipeline.
+    for attribute in ('_backend', '_swapper', '_analyser', '_enhancer'):
+        nested = getattr(holder, attribute, None)
+        if nested is not None and nested is not holder:
+            found = session_providers(nested)
+            if found:
+                return found
+
     return None
 
 
