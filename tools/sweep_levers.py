@@ -208,6 +208,19 @@ async def _run(args: argparse.Namespace) -> int:
             await send('set_source', path=args.source)
             await collect(3.0)
 
+        # Warm-up run, discarded. The first configuration otherwise pays model
+        # load and first-inference cost inside its own measurement window, and
+        # since baseline runs first that is exactly the number everything else
+        # is compared against. It showed up as baseline reporting 490ms against
+        # 147ms for the next configuration — a difference that was almost
+        # entirely warm-up, and would have been read as a 3x win.
+        print('
+warm-up (discarded)')
+        await send('start_stream')
+        await collect(args.warmup)
+        await send('stop')
+        await collect(2.0)
+
         for label, levers in _SWEEP:
             settings = {name: False for name in _ALL_LEVERS}
             settings.update(levers)
@@ -304,6 +317,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help='how long to stream per configuration')
     parser.add_argument('--settle', type=float, default=8.0,
                         help='pause after a lever change, for session rebuild')
+    parser.add_argument('--warmup', type=float, default=20.0,
+                        help='discarded first run, so model load does not land '
+                             'inside the baseline measurement')
     parser.add_argument('--out', default='sweep.json', help='write results here')
     parser.add_argument('--verbose', action='store_true',
                         help='print every message the pipeline sends')
