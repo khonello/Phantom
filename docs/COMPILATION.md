@@ -9,19 +9,43 @@ very different amounts, and they are not independent of each other. This
 document records what was accepted, what was rejected, why, and what evidence
 would overturn either.
 
-**Status: the inference levers are built; Nuitka and Numba are not.**
+**Status: measured on a pod. The predictions below were mostly wrong about
+size and right about shape.**
 
-`pipeline/services/onnx_session.py` now owns session construction, and fp16,
-CUDA graphs and TensorRT are opt-in flags on top of it. All three default off,
-so the out-of-the-box path is bit-identical to what it was before they existed.
-`LatencyBudget` records a per-stage breakdown, which is what makes any of it
-falsifiable.
+Measured 2026-08-28 on an **NVIDIA L4** (not the RTX 4090 auto-discovery
+normally picks — a resumed pod stays pinned to the host it was created on),
+`optimal` preset, 640x360 at 20fps, 50ms deadline, 263 frames.
 
-**None of it has run on a GPU yet.** This machine has no onnxruntime; the gates
-here are mypy, flake8 and a stubbed test suite, which check the decision-making
-— which weights, which providers, in what order, keyed how — and cannot check
-that inference got faster. That number comes from a pod session, and until one
-has been run every figure below is a prediction.
+| Stage | p95 | Share |
+|---|---|---|
+| detect | 16.1ms | 11% |
+| **restore** | **110ms** | **75%** |
+| compositor + paste + encode | ~20ms | 14% |
+| **total** | **146ms** | **MISSES** — ~3x the deadline |
+
+**Every model confirmed on `CUDAExecutionProvider`.** The CPU-fallback
+hypothesis is dead; this is what CodeFormer at 512x512 fp32 costs on an L4.
+
+**No lever moved anything.** `cuda_graphs` 144.4ms, `cuda_streams` 146.1ms —
+both inside noise. That is itself a finding: a 110ms model is not waiting on
+kernel launch overhead, so neither lever addresses this workload and both can
+be dropped. `fp16` and `trt` did not run at all — no converted weights existed,
+and `trt_gpus` correctly declined to spend an engine build on an L4.
+
+**What this settles:**
+
+- The premise held, and harder than predicted: restoration is 75%, not 60%.
+- **Numba is dead.** The entire compositor is ~20ms of a 146ms frame. Making it
+  *free* leaves 126ms. It was never worth the risk and now there is a number
+  saying so.
+- fp16 is the only untested lever aimed at the dominant cost, and remains the
+  only one with a plausible route to the deadline.
+- Restoration decimation, declined earlier, deserves revisiting: it is the one
+  remaining lever that attacks 75% of the frame directly.
+
+**Everything below this line that predicts a magnitude is superseded by the
+table above.** The reasoning about *where* the time goes was sound; the
+estimates of how much each lever would buy were not tested until now.
 
 ---
 

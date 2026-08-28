@@ -583,6 +583,50 @@ before optimising. See 2b.5 for the one hardware move that remains.
 
 All levers default off, so a baseline run needs no flags.
 
+### 2b.0 Where this got to (2026-08-28)
+
+**Measured. See docs/COMPILATION.md for the table.** Restoration is 75% of a
+146ms frame against a 50ms deadline, on an L4. Every model is on CUDA.
+`cuda_graphs` and `cuda_streams` measured flat and can be dropped. `fp16` and
+`trt` never ran.
+
+**Continue from here, in this order:**
+
+1. **Convert fp16 weights on the pod.** This is the only untested lever aimed
+   at the 110ms, and nothing else is close.
+
+   ```
+   python runpod/orchestrator.py run "python -m pip install onnx onnxconverter-common"
+   python runpod/orchestrator.py run "python tools/convert_fp16.py /workspace/models/codeformer.onnx"
+   ```
+
+   Then re-run the sweep. `-fp16.onnx` sits beside the original on the network
+   volume, so it survives the pod and this is paid once.
+
+2. **Judge fp16 on footage, not just latency.** `--debug-frames` either side
+   and `tools/compare_frames.py --against`. Restoration is what decides whether
+   the output reads as a call or as AI.
+
+3. **Get onto a 4090 for a second measurement.** An L4 ranks 34 against the
+   4090's 100 in `_GPU_PERF`. `resume` cannot move a pinned pod — this needs
+   `terminate` then `start`, which reschedules.
+
+4. **Reconsider restoration decimation.** Declined earlier as too risky to what
+   the operator sees. That was decided before knowing restoration is
+   three-quarters of the frame. The existing aligned-pixel EMA is the mechanism
+   that would hide it.
+
+5. **Only then** revisit the XSeg overlap and pipelining. Both are three-file
+   refactors whose payoff is bounded by the ~20ms that is *not* restoration.
+
+**Known-good invocation** (host and port change on every stop/resume — take
+them from what `push` prints):
+
+```
+python runpod/orchestrator.py push clip_h264.mp4
+python tools/sweep_levers.py --host <ip> --port <port> --input-url <path> --source /workspace/Phantom/.github/examples/source.jpg --seconds 60 --out sweep.json
+```
+
 ### 2b.1 Baseline — no flags
 
 ```bash
