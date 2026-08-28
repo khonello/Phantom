@@ -111,6 +111,62 @@ So a 4090 roughly doubles the frame rate and still misses 20fps on its own.
 **4090 + fp16 is the first combination that plausibly holds the `optimal`
 preset**, and it lands right on the deadline rather than comfortably inside it.
 
+### Why 110ms: restoration ignores how big the face is
+
+**The dominant cost is spent on interpolated data.** In the measured session the
+face was **101x129 px** in a 640x360 frame. The chain it went through:
+
+    face in frame          101 x 129   <- the only real information
+    swap native            128 x 128   <- inswapper_128 output, the ceiling
+    aligned space          256 x 256   <- follows face size, has a floor
+    FFHQ restore crop      512 x 512   <- ALWAYS 512, regardless
+
+`CROP_SIZE = 512` is hard-coded through `_ffhq_geometry` and `_build_ffhq_crop`
+(`compositor.py:496`, `:524`), because CodeFormer is trained on FFHQ 512 crops.
+So a 101px face is upsampled about 20x in pixel count, the heaviest model in
+the pipeline runs on the result, and the output is squeezed back into a 101px
+hole. Conv cost scales with pixel count, so this is roughly **4x the compute of
+restoring at 256, and 16x of 128** — spent reconstructing detail that was never
+in the source.
+
+**The codebase already holds the correct principle and does not apply it here.**
+`_aligned_size` (`compositor.py:373`) says the working resolution "follows how
+many frame pixels the face actually covers ... and, more importantly, is not
+upsampled to a detail level their webcam never captured." That reasoning is
+right, and it governs a stage costing a few milliseconds while the 110ms stage
+ignores it entirely.
+
+**This is the largest single lever available, and larger than fp16, TensorRT and
+a 4090 combined.** Options, cheapest first:
+
+1. **Skip restoration below a face-size threshold.** Config-level, no new
+   model. The question it rests on is a footage question, not a latency one:
+   does 512-space restoration visibly improve a 101px face whose swap was
+   generated at 128? Test with `--debug-frames` before assuming either answer.
+2. **Restore every Nth frame**, letting `temporal_alpha`'s aligned-pixel EMA
+   carry the gap. Previously declined as too risky to what the operator sees;
+   that was decided before knowing restoration is 75% of the frame.
+3. **A restoration model that accepts a smaller input**, or a re-export of
+   CodeFormer at 256. Changes what the output looks like, so it is an A/B, not
+   a swap.
+
+Note what is *not* the problem, so it does not get optimised by mistake:
+transfers are trivial (a 512x512x3 fp32 tensor is 3MB, ~0.1ms over PCIe 4.0,
+even six round trips are under 2ms), and the Python layer does not appear in
+the measurement at all.
+
+### GPU compositing, revisited with numbers
+
+Worth doing, but second-order. The whole compositor is ~20ms — 14% of the frame
+on an L4, but ~28% on a 4090, since it is the one stage that does not scale with
+the card. The route is **torch, not `cv2.cuda`**: torch is already a GPU
+dependency, `affine_grid`/`grid_sample` cover the warps and elementwise ops
+cover colour, detail and grain, whereas PyPI OpenCV has no CUDA build. Expect
+~20ms to become single digits.
+
+Do it *after* the restoration resolution question, not before: 20ms is worth
+having, 110ms is worth having first.
+
 ### Proposed: refuse mediocre GPUs, wait instead
 
 **Not implemented.** Recorded because this session was measured on an L4 by
