@@ -77,6 +77,18 @@ it was created on, so this is not the GPU a fresh `start` would pick.
 - `fp16` and `trt` **never ran** — no converted weights existed, and `trt_gpus`
   correctly declined an engine build on an L4.
 
+**hyperswap has never been run.** Every measurement used the default
+`inswapper_128`; the weights are on the pod but unused. It matters for speed,
+not just looks: hyperswap is 256px native against inswapper's 128, and its
+profile asks for *less* restoration (`enhance_strength` 0.5 vs 0.7) because the
+swap needs less. A bigger swap that buys a cheaper restore may be a net win, or
+may just be a bigger swap — the sweep now covers both.
+
+**The first run of the next session should be `no_restore`.** It bounds
+everything: whatever remains with restoration off is what no amount of work on
+restoration can remove. `tools/sweep_levers.py` now leads with it, plus
+`aligned_128`, `hyperswap` and `hyperswap+no_restore`.
+
 **Continue from [docs/PENDING_WORK.md](docs/PENDING_WORK.md) §2b.0**, in order:
 
 1. **Convert fp16 on the pod** — the only untested lever aimed at the 110ms:

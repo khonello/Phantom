@@ -691,6 +691,13 @@ _REALISM_FIELDS: Dict[str, Any] = {
     'color_strength': lambda v: min(1.0, max(0.0, float(v))),
     'grain': lambda v: bool(v),
     'occluder': lambda v: bool(v),
+    # Restoration on/off. It has its own `set_enhance` command and is
+    # deliberately absent from PRESETS — a preset must not silently undo
+    # something the operator clicked. Neither reason applies to `set_realism`,
+    # which is the live A/B mechanism, and restoration is 75% of the frame:
+    # being unable to sweep the largest cost in the pipeline made the one
+    # measurement that bounds every optimisation impossible to take.
+    'enhance': lambda v: bool(v),
     # Inference speed levers. Live-switchable for the same reason the swapper
     # is: the only way to know what a lever is worth is to compare it against
     # the same clip, and a pod session is paid for by the hour. Restarting the

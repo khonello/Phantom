@@ -49,15 +49,44 @@ from typing import Any, Dict, List, Optional
 # to compare it against is not a measurement.
 _SWEEP: List[Any] = [
     ('baseline', {}),
-    ('async_encode', {'async_encode': True}),
-    ('cuda_graphs', {'cuda_graphs': True}),
-    ('cuda_streams', {'cuda_streams': True}),
+
+    # The measurement that bounds every other one. Restoration was 75% of the
+    # frame, so this is the floor: whatever is left is what no amount of work
+    # on restoration can remove. Take it before optimising anything.
+    ('no_restore', {'enhance': False}),
+
+    # Restoration is fixed at a 512x512 FFHQ crop while the face was 101px, so
+    # the working resolution below it is worth varying too — it is the one
+    # knob that already follows face size.
+    ('aligned_128', {'aligned_size': 128}),
+
+    # hyperswap is 256px native against inswapper's 128, and its profile asks
+    # for *less* restoration (enhance_strength 0.5 vs 0.7) because the swap it
+    # produces needs less. A bigger swap that buys a cheaper restore may be a
+    # net win; it may also just be a bigger swap. Untested either way.
+    ('hyperswap', {'swapper_model': 'hyperswap_1a_256'}),
+    ('hyperswap+no_restore', {'swapper_model': 'hyperswap_1a_256', 'enhance': False}),
+
+    # The levers. fp16 is the only one aimed at restoration; the two that were
+    # measured flat are kept only so a change in that finding is visible.
     ('fp16', {'fp16': True}),
-    ('fp16+cuda_graphs', {'fp16': True, 'cuda_graphs': True}),
+    ('cuda_graphs', {'cuda_graphs': True}),
+    ('async_encode', {'async_encode': True}),
     ('trt+fp16', {'trt': True, 'fp16': True}),
 ]
 
-_ALL_LEVERS = ('fp16', 'cuda_graphs', 'cuda_streams', 'trt', 'async_encode')
+# Reset between configurations, so one run cannot inherit another's state.
+# Every key any entry sets must appear here with its default.
+_BASE: Dict[str, Any] = {
+    'fp16': False,
+    'cuda_graphs': False,
+    'cuda_streams': False,
+    'trt': False,
+    'async_encode': False,
+    'enhance': True,
+    'aligned_size': 256,
+    'swapper_model': 'inswapper_128',
+}
 
 # The pipeline prints the latency budget as a STATUS_CHANGED with this scope
 # when a stream stops.
@@ -257,12 +286,14 @@ async def _run(args: argparse.Namespace) -> int:
         await wait_stopped()
 
         for label, levers in _SWEEP:
-            settings = {name: False for name in _ALL_LEVERS}
+            settings = dict(_BASE)
             settings.update(levers)
 
             print('\n=== {} ==='.format(label))
+            changed = {k: v for k, v in settings.items() if _BASE.get(k) != v}
             print('  {}'.format(
-                ', '.join(k for k, v in settings.items() if v) or 'everything off'))
+                ', '.join('{}={}'.format(k, v) for k, v in sorted(changed.items()))
+                or 'defaults, everything off'))
 
             await send('set_realism', values=settings)
             # Sessions rebuild lazily on the next frame, so give the rebuild
