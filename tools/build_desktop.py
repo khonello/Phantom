@@ -19,6 +19,14 @@ model load, and compiling it would add twenty minutes to every image build while
 making tracebacks worse on the layer under active development. See
 docs/COMPILATION.md.
 
+**Known gap, surfaced by the first real build.** Nuitka warns that
+`msvcp140.dll` — part of the Microsoft Visual C++ Redistributable — is not
+bundled, because bundling it requires Visual Studio on the build machine and
+this builds with MinGW. The distribution therefore assumes the target already
+has the VC++ 2015-2022 redistributable, which most Windows machines do but not
+all. Closing it means either building with MSVC or shipping the redistributable
+alongside the app. Decide before the first customer, not after.
+
 Usage:
     python tools/build_desktop.py --print-only    # show the command, build nothing
     python tools/build_desktop.py                 # build, console kept
@@ -35,7 +43,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from desktop.resources import bundled_data_arguments  # noqa: E402
+from desktop.resources import APP_VERSION_FULL, bundled_data_arguments  # noqa: E402
 
 _ENTRY = 'desktop.py'
 _OUTPUT_DIR = 'build'
@@ -97,8 +105,13 @@ def build_command(release: bool = False) -> List[str]:
         '--output-dir={}'.format(_OUTPUT_DIR),
         '--output-filename={}'.format(_BINARY_NAME),
 
+        # Nuitka refuses a company or product name without a version, and it
+        # is right to: an unversioned binary in a customer's hands cannot be
+        # matched back to a build when they report something.
         '--company-name=Phantom',
         '--product-name=Phantom',
+        '--product-version={}'.format(APP_VERSION_FULL),
+        '--file-version={}'.format(APP_VERSION_FULL),
     ]
 
     command.extend(bundled_data_arguments())

@@ -22,6 +22,16 @@ import sys
 from pathlib import Path
 from typing import List
 
+# Version of the desktop app, and currently the only version string in the
+# project. It exists because a Windows binary carries a version resource and
+# Nuitka refuses to build one from a company and product name alone — which is
+# the right refusal: an unversioned binary in a customer's hands cannot be
+# matched to a build when they report something.
+#
+# Nothing has shipped, so this starts at 0.1.0. Nuitka wants four components.
+APP_VERSION = '0.1.0'
+APP_VERSION_FULL = APP_VERSION + '.0'
+
 # Every non-Python file the desktop needs at runtime, relative to the `desktop`
 # package. The build script reads this to know what to bundle, so a new asset
 # is added in one place and cannot be forgotten on the other side.

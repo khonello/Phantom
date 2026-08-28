@@ -122,6 +122,23 @@ for module in build_desktop._LAZY_MODULES:
           '--include-module={}'.format(module) in command,
           'imported inside a function, so easy for analysis to miss')
 
+# Nuitka refuses outright: "company name and file or product version need to be
+# given when any version information is given". It fails in the first seconds
+# rather than after twenty minutes, but only if someone runs the build — and the
+# whole point of these checks is that the build is expensive to run.
+named = any(c.startswith('--company-name') or c.startswith('--product-name')
+            for c in command)
+versioned = any(c.startswith('--product-version') or c.startswith('--file-version')
+                for c in command)
+check('naming the product also gives it a version',
+      versioned if named else True,
+      'Nuitka rejects one without the other, and an unversioned binary in a '
+      "customer's hands cannot be matched back to a build")
+
+check('the version has the four components Nuitka wants',
+      re.fullmatch(r'\d+\.\d+\.\d+\.\d+', resources.APP_VERSION_FULL) is not None,
+      resources.APP_VERSION_FULL)
+
 check('the console is kept by default',
       not any('console' in c for c in command),
       'a GUI app that fails silently at startup is the hard kind to diagnose')

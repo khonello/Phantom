@@ -22,3 +22,9 @@ Python_3_12_0venv
 venv/
 firebase/functions/venv/
 .firebase/
+
+# Nuitka standalone build output. `desktop.dist` is ~600 MB — Qt plugins are
+# bundled with --include-qt-plugins=all until there is a build known to work
+# and trimming can be verified. `desktop.build` is the C intermediate.
+build/
+nuitka-crash-report.xml
