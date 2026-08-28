@@ -51,6 +51,52 @@ before a paying customer. Read it before assuming a gap is unnoticed.
   against the *pipeline's* filesystem, so a desktop-chosen file only resolves
   when the pipeline runs locally. A 2 GB video still needs a real transfer path
 
+### Where performance work stands (measured 2026-08-28)
+
+First real measurement on a pod. **`optimal` preset misses its deadline by
+~3x**, and one stage is the reason.
+
+| Stage | p95 | Share |
+|---|---|---|
+| detect | 16.1ms | 11% |
+| **restore (CodeFormer)** | **110ms** | **75%** |
+| compositor + paste + encode | ~20ms | 14% |
+| **total** | **146ms** | vs a **50ms** deadline |
+
+NVIDIA **L4**, 640x360 @20fps, 263 frames. Note the card: auto-discovery ranks
+L4 at 34 against the RTX 4090's 100, and a resumed pod stays pinned to the host
+it was created on, so this is not the GPU a fresh `start` would pick.
+
+**Settled by this:**
+
+- Every model is confirmed on `CUDAExecutionProvider`. No silent CPU fallback.
+- **`cuda_graphs` and `cuda_streams` measured flat** (144.4 / 146.1ms — noise).
+  A 110ms model is not waiting on kernel launch overhead. Both can be dropped.
+- **Numba is closed.** The whole compositor is ~20ms; making it free still
+  leaves 126ms. Argued against on reasoning before, now on a number.
+- `fp16` and `trt` **never ran** — no converted weights existed, and `trt_gpus`
+  correctly declined an engine build on an L4.
+
+**Continue from [docs/PENDING_WORK.md](docs/PENDING_WORK.md) §2b.0**, in order:
+
+1. **Convert fp16 on the pod** — the only untested lever aimed at the 110ms:
+   `orchestrator.py run "python tools/convert_fp16.py /workspace/models/codeformer.onnx"`
+   (needs `pip install onnx onnxconverter-common` there first). Then re-sweep.
+2. **Judge it on footage**, not latency alone — restoration is what decides
+   whether output reads as a call or as AI.
+3. **Measure again on a 4090.** Estimated ~72ms total, so a real 2x but still
+   short of 50ms alone; **4090 + fp16** is the combination that plausibly
+   holds. Needs `terminate` then `start` — `resume` cannot move a pinned pod.
+4. **Reconsider restoration decimation.** Declined earlier as too risky to what
+   the operator sees; that was decided before knowing restoration is
+   three-quarters of the frame.
+5. Only then the XSeg overlap and pipelining — both are bounded by the ~20ms
+   that is *not* restoration.
+
+Estimates above are labelled as such. This session's lesson was that the
+reasoning about *where* time goes held, and the predictions of *how much* each
+lever would buy did not survive contact with a measurement.
+
 ## Quick Commands
 
 ### Running
@@ -72,6 +118,14 @@ before a paying customer. Read it before assuming a gap is unnoticed.
 - **End-to-end**: `python pipeline.py -s=.github/examples/source.jpg -t=.github/examples/target.mp4 -o=/tmp/output.mp4`
 
 ### Measurement
+- **Lever sweep**: `python tools/sweep_levers.py --host <ip> --port <port>
+  --input-url <clip> --source <face> --seconds 60 --out sweep.json` — measures
+  every speed lever against one clip in a single pod session. Take the host and
+  port from what `orchestrator.py push` prints; they change on every
+  stop/resume
+- **On-pod work**: `python runpod/orchestrator.py run "<command>"`, and
+  `logs [n]` for the pipeline log. Only port 9000 is exposed and the SSH proxy
+  drops `exec_command`, so both drive the interactive shell the deploy opens
 - **Cold start**: `python runpod/orchestrator.py start` prints a phase breakdown
   (provision / setup / pip / model load), labelled warm or empty volume
 - **Latency budget**: reported per preset when a stream stops — p50/p95/p99 per
