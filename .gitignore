@@ -28,3 +28,6 @@ firebase/functions/venv/
 # and trimming can be verified. `desktop.build` is the C intermediate.
 build/
 nuitka-crash-report.xml
+
+# Sweep output — a measurement artefact, not source.
+sweep.json

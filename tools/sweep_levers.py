@@ -224,7 +224,16 @@ async def _run(args: argparse.Namespace) -> int:
 
             await send('start_stream')
             await collect(args.seconds)
-            await send('stop_stream')
+            # 'stop', not 'stop_stream'. CMD_STOP_STREAM is a dead constant
+            # in the schema — never in COMMANDS, never dispatched — so the
+            # wiring test does not catch it and the server answers "Unknown
+            # command". The desktop's PipelineClient.stop_stream() is an alias
+            # that sends 'stop' for the same reason.
+            #
+            # This mattered more than a wrong name usually does: the report is
+            # only emitted when a stream stops, so a refused stop meant every
+            # configuration measured nothing.
+            await send('stop')
 
             report = await collect(args.settle)
             parsed = _parse_report(report)
