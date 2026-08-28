@@ -15,10 +15,18 @@ on the network volume and every run sees identical input:
 
     python pipeline.py --stream --input-url /workspace/clip.mp4
 
-Then, from anywhere that can reach the pod:
+The pipeline does not need restarting for that. `input_url` is read when a
+stream starts rather than when the process does, so `--input-url` sends
+`set_input_url` and a pipeline already running under nohup picks it up.
 
-    python tools/sweep_levers.py --host <pod>-9000.proxy.runpod.net --tls \\
+    python tools/sweep_levers.py --host <ip> --port <port> \
+        --input-url /tmp/phantom_uploads/<id>/clip.mp4 \
+        --source /workspace/Phantom/.github/examples/source.jpg \
         --seconds 60 --out sweep.json
+
+Use the host and port `orchestrator.py push` prints. Port 9000 is exposed
+as tcp, so the pod has a public IP and a mapped port rather than a
+`proxy.runpod.net` hostname, and `--tls` does not apply to it.
 
 Each configuration starts the stream, runs for `--seconds`, stops it, and
 captures the latency report the pipeline prints on stop. Order matters and is
@@ -134,9 +142,17 @@ async def _run(args: argparse.Namespace) -> int:
                     report += str(message.get('message', '')) + '\n'
             return report
 
+        # Point the pipeline at the clip before anything else. This is what
+        # makes a restart unnecessary: `input_url` is read when a stream
+        # starts, not when the process does, so a pipeline already running
+        # under nohup on a pod can be redirected at a file without a shell.
+        if args.input_url:
+            await send('set_input_url', url=args.input_url)
+            await collect(1.0)
+
         if args.source:
             await send('set_source', path=args.source)
-            await collect(2.0)
+            await collect(3.0)
 
         for label, levers in _SWEEP:
             settings = {name: False for name in _ALL_LEVERS}
@@ -215,6 +231,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument('--port', type=int, default=9000, help='pipeline port')
     parser.add_argument('--tls', action='store_true', help='use wss (RunPod proxy)')
     parser.add_argument('--source', help='source face path on the pipeline filesystem')
+    parser.add_argument('--input-url', dest='input_url',
+                        help='clip path on the pipeline filesystem, as printed by '
+                             'orchestrator.py push. Sent as set_input_url, so a '
+                             'running pipeline does not need restarting.')
     parser.add_argument('--seconds', type=float, default=60.0,
                         help='how long to stream per configuration')
     parser.add_argument('--settle', type=float, default=8.0,
