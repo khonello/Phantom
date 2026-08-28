@@ -31,3 +31,12 @@ nuitka-crash-report.xml
 
 # Sweep output — a measurement artefact, not source.
 sweep.json
+
+# Measurement clips recorded by tools/record_clip.py. They are written to the
+# repo root because that is where they are wanted, which makes it easy to
+# commit one by accident — a 78 MB clip reached origin exactly that way. The
+# examples in .github/examples are the deliberate exception and stay tracked.
+/clip*.mp4
+/*.mkv
+/*.mov
+/*.avi
