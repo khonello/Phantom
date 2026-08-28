@@ -228,6 +228,51 @@ local `VideoCapture` path.
 the deep version, a large change to the live path, and it should wait on the
 stage breakdown showing where the time actually goes.
 
+### The one overlap that is actually available
+
+Within a frame the round trips are data-dependent and cannot be batched: the
+swapper needs the arcface crop built from the detector's landmarks, and
+CodeFormer needs the swapper's output warped into FFHQ space. B cannot start
+until A has come home and been warped.
+
+**One pair is the exception.** After detection the graph forks:
+
+    detection (landmarks -> affine)
+       |-> warpAffine(frame) -> real  --> XSeg --> mask
+       \-> warpAffine(frame) -> crop  --> swapper --> FFHQ crop --> CodeFormer
+
+`FaceMasker` runs XSeg on `real` — the warped *original* crop — so it depends
+only on the frame and the affine, never on the swapper's output. Today they run
+strictly in sequence: the swapper in `_swap_face`, then XSeg inside
+`composite`. They could overlap, at zero latency cost, with identical maths.
+
+**What makes it a refactor rather than a reorder:** the affine the compositor
+uses is *returned by* `swap_aligned`, so XSeg cannot start until that call
+returns. The affine is pure CPU geometry (`estimate_similarity` over the
+keypoints) and could be computed before the inference, but separating the two
+means touching `face_swapping.py`, `compositor.py` and `masking.py` — all
+quality-critical.
+
+Payoff is roughly the smaller model's inference time. Worth doing if the
+breakdown shows XSeg is a meaningful share; not worth restructuring three files
+blind.
+
+### What full pipelining is waiting on
+
+Two inputs, both from the stage breakdown, not caution for its own sake:
+
+- **It trades latency for throughput, and on a live call latency is the
+  product.** Staging means frame N+1 starts before N finishes, adding about one
+  stage-period to what reaches the call. That can cost more than it gains.
+- **It only pays if stages are balanced.** Pipelining yields `max(stages)`
+  rather than `sum(stages)`. If detection is 70% of frame time, splitting buys
+  almost nothing.
+
+Worth recording what is *not* a blocker, since it is the usual objection:
+temporal state works out. `LandmarkStabilizer` belongs to the detect stage and
+the compositor's pixel EMA to the composite stage, so with one thread per stage
+each piece of state has exactly one owner and nothing is shared across them.
+
 ### Batching
 
 Live is inherently batch-1: one operator, one face, one frame, bound by latency
