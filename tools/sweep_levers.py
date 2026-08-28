@@ -114,6 +114,9 @@ async def _run(args: argparse.Namespace) -> int:
         url = 'wss://{}/ws'.format(args.host)
 
     results: Dict[str, Any] = {'url': url, 'seconds': args.seconds, 'runs': {}}
+    # The latency report is emitted around PIPELINE_STOPPED, so it can arrive
+    # while waiting for that event rather than in the collect() after it.
+    nonlocal_report: List[str] = []
 
     print('Connecting to {}'.format(url))
     async with websockets.connect(url, max_size=None) as socket:
@@ -170,6 +173,38 @@ async def _run(args: argparse.Namespace) -> int:
             print('    no acknowledgement for {} within 15s'.format(action))
             return {}
 
+        async def wait_stopped(timeout: float = 20.0) -> None:
+            """
+            Wait for PIPELINE_STOPPED after a stop.
+
+            `stop` acknowledges immediately — the reply means "stop requested",
+            not "stopped". Starting the next configuration before the previous
+            one has finished stopping made `start_stream` answer
+            `{'rejoined': True}`, joining a pipeline already on its way down,
+            which then stopped and produced no frames at all. Baseline and
+            async_encode both reported "no data" for exactly that reason.
+            """
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                try:
+                    raw = await asyncio.wait_for(
+                        socket.recv(), timeout=max(0.1, deadline - time.time()),
+                    )
+                except asyncio.TimeoutError:
+                    return
+                if isinstance(raw, bytes):
+                    continue
+                try:
+                    message = json.loads(raw)
+                except ValueError:
+                    continue
+                if args.verbose:
+                    print('    < {}'.format(str(message)[:200]))
+                if message.get('scope') == _PERF_SCOPE:
+                    nonlocal_report.append(str(message.get('message', '')))
+                if message.get('event') == 'PIPELINE_STOPPED':
+                    return
+
         async def collect(seconds: float) -> str:
             """Read messages for `seconds`, returning any PERF status text."""
             report = ''
@@ -219,7 +254,7 @@ async def _run(args: argparse.Namespace) -> int:
         await send('start_stream')
         await collect(args.warmup)
         await send('stop')
-        await collect(2.0)
+        await wait_stopped()
 
         for label, levers in _SWEEP:
             settings = {name: False for name in _ALL_LEVERS}
@@ -247,8 +282,11 @@ async def _run(args: argparse.Namespace) -> int:
             # only emitted when a stream stops, so a refused stop meant every
             # configuration measured nothing.
             await send('stop')
+            nonlocal_report.clear()
+            await wait_stopped()
 
-            report = await collect(args.settle)
+            joined = chr(10).join(nonlocal_report)
+            report = joined + await collect(2.0)
             parsed = _parse_report(report)
             results['runs'][label] = {'levers': settings, **parsed, 'raw': report}
 

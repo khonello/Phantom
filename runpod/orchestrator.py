@@ -1682,6 +1682,54 @@ def cmd_logs(pod_id: str, lines: int = 120) -> bool:
         client.close()
 
 
+def cmd_run(pod_id: str, command: str) -> bool:
+    """
+    Run one command on the pod and print its output.
+
+    The measurement showed restoration is 75% of frame time, and the one lever
+    aimed at it — fp16 — could not be tested because the converted weights have
+    to be produced *on the pod*, where the models live, and nothing could run a
+    command there. Only port 9000 is exposed and the SSH proxy drops
+    exec_command, so the interactive shell the deploy already uses is the way.
+
+    Args:
+        pod_id: Pod to run on
+        command: Shell command, run from the repo with the venv on PATH
+
+    Returns:
+        True if it ran
+    """
+    ssh_address = _get_ssh_command(pod_id)
+    key_path = os.getenv("RUNPOD_SSH_KEY_PATH", "")
+    if not ssh_address or not key_path:
+        print("ERROR: need a running pod and RUNPOD_SSH_KEY_PATH.")
+        return False
+
+    paramiko = _require_paramiko()
+    username, host = ssh_address.rsplit("@", 1)
+
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        client.connect(
+            hostname=host, port=22, username=username,
+            pkey=_load_ssh_key(key_path), timeout=30,
+        )
+        shell = _open_shell(client)
+        _shell_run(
+            shell,
+            "cd {} && PATH={}:$PATH {}".format(
+                _REMOTE_PHANTOM_DIR, os.path.dirname(_REMOTE_VENV_PYTHON), command),
+            "run",
+        )
+        return True
+    except Exception as exc:
+        print("ERROR: {}: {}".format(type(exc).__name__, exc))
+        return False
+    finally:
+        client.close()
+
+
 def cmd_push(pod_id: str, local_path: str, remote_path: Optional[str] = None) -> bool:
     """
     Copy a video onto the pod over the pipeline's WebSocket.
@@ -1833,7 +1881,7 @@ commands:
 Set RUNPOD_DEPLOY_MODE=ssh (development) or docker (production) in .env.
         """,
     )
-    parser.add_argument("command", choices=["start", "resume", "stop", "terminate", "status", "gpus", "datacenters", "push", "logs"])
+    parser.add_argument("command", choices=["start", "resume", "stop", "terminate", "status", "gpus", "datacenters", "push", "logs", "run"])
     parser.add_argument("paths", nargs="*", help="push: <local> [remote]")
     args = parser.parse_args()
 
@@ -1853,6 +1901,15 @@ Set RUNPOD_DEPLOY_MODE=ssh (development) or docker (production) in .env.
         cmd_datacenters()
     elif args.command == "gpus":
         cmd_gpus()
+    elif args.command == "run":
+        if not pod_id:
+            print("ERROR: RUNPOD_POD_ID not set in .env")
+            sys.exit(1)
+        if not args.paths:
+            print("ERROR: run needs a command")
+            print('  python runpod/orchestrator.py run "nvidia-smi"')
+            sys.exit(1)
+        sys.exit(0 if cmd_run(pod_id, " ".join(args.paths)) else 1)
     elif args.command == "logs":
         if not pod_id:
             print("ERROR: RUNPOD_POD_ID not set in .env")
