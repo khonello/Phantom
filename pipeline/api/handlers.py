@@ -20,9 +20,6 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-# Temp directory where uploaded source images are saved server-side
-_UPLOAD_DIR = '/tmp/phantom_uploads'
-
 from pipeline.config import FaceSwapConfig
 from pipeline.api.schema import (
     MAX_PHOTO_BYTES,
@@ -41,6 +38,26 @@ from pipeline.logging import emit_status, emit_error, emit_warning
 from pipeline.io.ffmpeg import (
     is_image, is_video, is_video_name, normalize_output_path, probe_duration,
 )
+
+
+def _upload_dir() -> str:
+    """
+    Where uploaded media is written.
+
+    Was hardcoded to `/tmp/phantom_uploads`, which on a pod is container disk:
+    it does not survive a stop, so every restart cost a re-upload of a file
+    that had already crossed the network once. `get_temp_root` already knew
+    better — it prefers PHANTOM_TEMP_DIR, then the network volume, and the
+    batch scratch has used it all along. This just stops the two disagreeing.
+
+    Returns:
+        Directory for uploads, created if missing
+    """
+    from pipeline.io.ffmpeg import get_temp_root
+
+    path = os.path.join(get_temp_root(), 'uploads')
+    os.makedirs(path, exist_ok=True)
+    return path
 
 
 @dataclass
@@ -238,7 +255,7 @@ def handle_set_output(config: FaceSwapConfig, path: str) -> ResponseMessage:
         fallback_dir = (
             os.path.dirname(config.target_path)
             if config.target_path and os.path.isdir(os.path.dirname(config.target_path))
-            else _UPLOAD_DIR
+            else _upload_dir()
         )
         os.makedirs(fallback_dir, exist_ok=True)
         relocated = os.path.join(fallback_dir, os.path.basename(path))
@@ -805,7 +822,6 @@ def handle_upload_source(
             error='No images provided',
         )
 
-    os.makedirs(_UPLOAD_DIR, exist_ok=True)
     saved: List[str] = []
 
     for img in images:
@@ -829,7 +845,7 @@ def handle_upload_source(
                 error=f'Invalid base64 data for: {name}',
             )
 
-        path = os.path.join(_UPLOAD_DIR, name)
+        path = os.path.join(_upload_dir(), name)
         with open(path, 'wb') as fh:
             fh.write(image_bytes)
         saved.append(path)
@@ -979,8 +995,7 @@ def handle_set_template(config: FaceSwapConfig, template_id: str) -> ResponseMes
     config.set('target_face_point', template.face_point)
     config.set('target_foreground', template.foreground)
 
-    os.makedirs(_UPLOAD_DIR, exist_ok=True)
-    config.set('output_dir', tempfile.mkdtemp(prefix='template_', dir=_UPLOAD_DIR))
+    config.set('output_dir', tempfile.mkdtemp(prefix='template_', dir=_upload_dir()))
 
     emit_status(f'Template set: {template.name}', scope='API')
     return ResponseMessage(
@@ -1237,8 +1252,7 @@ def handle_upload_video_begin(
             ),
         )
 
-    os.makedirs(_UPLOAD_DIR, exist_ok=True)
-    job_dir = tempfile.mkdtemp(prefix="video_", dir=_UPLOAD_DIR)
+    job_dir = tempfile.mkdtemp(prefix="video_", dir=_upload_dir())
     path = os.path.join(job_dir, name)
 
     upload_id = os.path.basename(job_dir)
@@ -1493,8 +1507,7 @@ def handle_upload_target(
     # uploaded file would silently overwrite it — and two photos picked from
     # different folders with the same camera filename would overwrite each
     # other.
-    os.makedirs(_UPLOAD_DIR, exist_ok=True)
-    job_dir = tempfile.mkdtemp(prefix='targets_', dir=_UPLOAD_DIR)
+    job_dir = tempfile.mkdtemp(prefix='targets_', dir=_upload_dir())
 
     saved: List[str] = []
     rejected: List[Dict[str, str]] = []
@@ -1820,8 +1833,8 @@ def handle_cleanup_session(config: FaceSwapConfig) -> ResponseMessage:
 
     # Remove any uploaded temp files
     import shutil
-    if os.path.isdir(_UPLOAD_DIR):
-        shutil.rmtree(_UPLOAD_DIR, ignore_errors=True)
+    if os.path.isdir(_upload_dir()):
+        shutil.rmtree(_upload_dir(), ignore_errors=True)
 
     emit_status('Session cleaned up', scope='API')
 
