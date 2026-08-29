@@ -30,7 +30,7 @@ import numpy as np
 
 from pipeline.config import FaceSwapConfig
 from pipeline.types import Frame, Face, Mask, Matrix, Points
-from pipeline.services.enhancement import Enhancer, CROP_SIZE
+from pipeline.services.enhancement import Enhancer
 from pipeline.services.masking import FaceMasker
 from pipeline.services import guards
 from pipeline.logging import emit_warning
@@ -46,6 +46,13 @@ _FFHQ_TEMPLATE = np.array([
     [0.39308822, 0.72541100],
     [0.61150205, 0.72490465],
 ], dtype=np.float64)
+
+# Seam feathering for the FFHQ crop, as fractions of its edge length rather
+# than absolute pixels — the crop size is now a variable, and a blur measured
+# in pixels would mean a different seam at each one. These reproduce the
+# previous 5px erode and 6.0 sigma exactly at 512.
+_FFHQ_ERODE = 5.0 / 512.0
+_FFHQ_FEATHER = 6.0 / 512.0
 
 
 def estimate_similarity(source: Points, target: Points) -> Optional[Matrix]:
@@ -344,7 +351,7 @@ class FaceCompositor:
 
         fake = cv2.resize(swapped, (size, size), interpolation=cv2.INTER_CUBIC)
 
-        if self.config.enhance:
+        if self.config.enhance and self._restore_worthwhile(face):
             fake = self._enhance(fake, frame, face, aligned_matrix)
             elapsed('restore')
 
@@ -416,6 +423,42 @@ class FaceCompositor:
         self._working_size = chosen
         return chosen
 
+    def _restore_worthwhile(self, face: Face) -> bool:
+        """
+        Whether this face is big enough to be worth restoring.
+
+        Restoration is the most expensive stage in the pipeline and the only
+        one whose cost does *not* follow the face's size in frame — it runs on
+        a fixed FFHQ crop either way. Below `restore_min_face` the swap being
+        restored came out of a generator smaller than the crop it is being
+        upsampled into, so the model is reconstructing detail that was never
+        in the source.
+
+        Measured on the shorter side of the bounding box, the same as
+        `guard_min_frame_px`, so the two thresholds are set in one unit.
+
+        Args:
+            face: Detection the swap was generated for
+
+        Returns:
+            True to restore. A missing or unreadable bbox restores, since the
+            threshold cannot be evaluated and silently skipping would change
+            what the operator sees for a reason nobody could see.
+        """
+        threshold = int(getattr(self.config, 'restore_min_face', 0) or 0)
+        if threshold <= 0:
+            return True
+
+        bbox = getattr(face, 'bbox', None)
+        if bbox is None or len(bbox) < 4:
+            return True
+        try:
+            x1, y1, x2, y2 = (float(v) for v in bbox[:4])
+        except (TypeError, ValueError):
+            return True
+
+        return min(abs(x2 - x1), abs(y2 - y1)) >= threshold
+
     def _enhance(
         self,
         fake: Frame,
@@ -447,18 +490,24 @@ class FaceCompositor:
             return fake
 
         size = fake.shape[0]
-        geometry = self._ffhq_geometry(face, aligned_matrix)
+        # The enhancer owns this, not the compositor: the request is
+        # `config.restore_size`, but a model with fixed spatial dims overrides
+        # it, and only the loaded backend knows which it is.
+        ffhq_size = self.enhancer.crop_size
+        geometry = self._ffhq_geometry(face, aligned_matrix, ffhq_size)
         if geometry is None:
             return fake
         aligned_to_ffhq, ffhq_from_frame = geometry
 
-        crop = self._build_ffhq_crop(fake, frame, aligned_to_ffhq, ffhq_from_frame, size)
+        crop = self._build_ffhq_crop(
+            fake, frame, aligned_to_ffhq, ffhq_from_frame, size, ffhq_size,
+        )
 
         restored = self.enhancer.restore(crop)
         if restored is None:
             return fake
-        if restored.shape[0] != CROP_SIZE:
-            restored = cv2.resize(restored, (CROP_SIZE, CROP_SIZE))
+        if restored.shape[0] != ffhq_size:
+            restored = cv2.resize(restored, (ffhq_size, ffhq_size))
 
         back = cv2.warpAffine(
             restored,
@@ -479,9 +528,17 @@ class FaceCompositor:
     def _ffhq_geometry(
         face: Face,
         aligned_matrix: Matrix,
+        ffhq_size: int,
     ) -> Optional[Tuple[Matrix, Matrix]]:
         """
         Affines linking aligned space, frame space and FFHQ space.
+
+        Args:
+            face: Detection the swap was generated for
+            aligned_matrix: 2x3 affine mapping frame space -> aligned space
+            ffhq_size: Edge length of the FFHQ crop. The template is
+                normalised, so scaling it is all a smaller crop needs — the
+                framing is identical, only the sampling rate changes.
 
         Returns:
             (aligned -> ffhq, frame -> ffhq), or None if the landmarks are
@@ -493,7 +550,7 @@ class FaceCompositor:
 
         ffhq_from_frame = estimate_similarity(
             np.asarray(kps, dtype=np.float64),
-            _FFHQ_TEMPLATE * CROP_SIZE,
+            _FFHQ_TEMPLATE * ffhq_size,
         )
         if ffhq_from_frame is None:
             return None
@@ -512,34 +569,41 @@ class FaceCompositor:
         aligned_to_ffhq: Matrix,
         ffhq_from_frame: Matrix,
         size: int,
+        ffhq_size: int,
     ) -> Frame:
         """
         FFHQ-framed crop: the real frame with the swapped face laid over it.
 
         The seam between the two is feathered so the restorer does not see a
-        hard rectangular edge and try to reconstruct it as a feature.
+        hard rectangular edge and try to reconstruct it as a feature. The
+        feather is expressed as a fraction of the crop rather than in absolute
+        pixels, so it stays the same *seam* at any `ffhq_size` — a fixed 6px
+        blur on a 512 crop is a 3px blur's worth of softness on a 256 one.
         """
         base = cv2.warpAffine(
             frame,
             ffhq_from_frame,
-            (CROP_SIZE, CROP_SIZE),
+            (ffhq_size, ffhq_size),
             borderMode=cv2.BORDER_REPLICATE,
         )
         overlay = cv2.warpAffine(
             fake,
             aligned_to_ffhq,
-            (CROP_SIZE, CROP_SIZE),
+            (ffhq_size, ffhq_size),
             borderMode=cv2.BORDER_REPLICATE,
         )
 
+        erode_px = max(3, int(round(ffhq_size * _FFHQ_ERODE))) | 1
         coverage = cv2.warpAffine(
             np.full((size, size), 255, dtype=np.uint8),
             aligned_to_ffhq,
-            (CROP_SIZE, CROP_SIZE),
+            (ffhq_size, ffhq_size),
             flags=cv2.INTER_NEAREST,
         )
-        coverage = cv2.erode(coverage, np.ones((5, 5), np.uint8), iterations=1)
-        alpha = cv2.GaussianBlur(coverage.astype(np.float32) / 255.0, (0, 0), 6.0)
+        coverage = cv2.erode(coverage, np.ones((erode_px, erode_px), np.uint8), iterations=1)
+        alpha = cv2.GaussianBlur(
+            coverage.astype(np.float32) / 255.0, (0, 0), ffhq_size * _FFHQ_FEATHER,
+        )
         alpha = np.clip(alpha, 0.0, 1.0)[:, :, None]
 
         merged: Frame = (

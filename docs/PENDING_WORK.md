@@ -590,7 +590,25 @@ All levers default off, so a baseline run needs no flags.
 `cuda_graphs` and `cuda_streams` measured flat and can be dropped. `fp16` and
 `trt` never ran.
 
+**Since then, locally and for free:** the restoration crop size became a
+variable. `restore_size` and `restore_min_face` are config fields, reachable
+from `set_realism`, the CLI, the env and the sweep, and both default to current
+behaviour. This closed a gap that would have wasted the next session — the
+largest identified lever (restoration runs at a fixed 512 crop for a 101px
+face) had no knob at all, so the sweep could *bound* the problem with
+`no_restore` but could not test the fix. `Enhancer.crop_size` reads the ONNX
+input shape and honours a fixed export over the config, warning once, so a
+model that cannot restore at 256 reports that instead of throwing per frame.
+
 **Continue from here, in this order:**
+
+0. **Read the restore-size runs first.** `restore_256` and `restore_128` say
+   whether facefusion's `codeformer.onnx` has dynamic spatial dims — the one
+   fact that decides whether the largest lever is a config change or a model
+   re-export. `restore_skip_small` is the same question asked the way a product
+   would ship it, and it should land on `no_restore`. Check the startup log for
+   `input is dynamic` or `input fixed at 512px`; a `restore_256` run whose
+   `restore` equals the baseline exactly means fixed.
 
 1. **Convert fp16 weights on the pod.** This is the only untested lever aimed
    at the 110ms, and nothing else is close.

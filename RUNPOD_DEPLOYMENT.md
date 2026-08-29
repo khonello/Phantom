@@ -775,6 +775,9 @@ Read by the orchestrator. `.env.example` carries the same list with commentary.
 | `RUNPOD_GPU_TYPES` | *unset* | Exact display names, in order. **Setting this disables auto-discovery** |
 | `RUNPOD_MIN_VRAM` | `16` | Auto-discovery floor, GB |
 | `RUNPOD_MAX_PRICE` | `1.00` | Auto-discovery ceiling, $/hr |
+| `RUNPOD_MIN_GPU_PERF` | `85` | Speed floor, ranked by `_GPU_PERF`. The tier is 4090 / H200 / H100 / RTX 6000 Ada / L40S. Ignored in manual mode |
+| `RUNPOD_GPU_WAIT` | `300` | Seconds to wait for the tier, retrying the whole list each minute. Free — billing starts when a pod runs |
+| `RUNPOD_GPU_FALLBACK` | *unset* | What happens when that wait expires: unset fails, `true` accepts a slower card |
 | `RUNPOD_IMAGE` | — | **Required.** Must stay in step with the `Dockerfile` |
 | `RUNPOD_CONTAINER_DISK` | `20` | GB, ephemeral, lost on stop |
 | `RUNPOD_VOLUME_DISK` | `20` | GB, only used when no network volume is attached |

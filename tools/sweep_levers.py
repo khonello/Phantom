@@ -60,6 +60,21 @@ _SWEEP: List[Any] = [
     # knob that already follows face size.
     ('aligned_128', {'aligned_size': 128}),
 
+    # The restoration crop itself, which is where the 110ms goes. It is fixed
+    # at 512 while the face was 101px, so conv cost is roughly 4x what 256
+    # would be and 16x what 128 would be — spent on interpolated data. These
+    # only move if the loaded model accepts the shape; a fixed-input export
+    # makes `Enhancer.crop_size` warn once and hold at 512, and a run whose
+    # `restore` matches the baseline exactly is what that looks like here.
+    ('restore_256', {'restore_size': 256}),
+    ('restore_128', {'restore_size': 128}),
+
+    # The config-only version of the same question, needing no model change:
+    # skip restoration for a face below this size. Set past the face in the
+    # clip, so it skips throughout — this is `no_restore` reached by the lever
+    # a product would actually ship, and the two should agree.
+    ('restore_skip_small', {'restore_min_face': 200}),
+
     # hyperswap is 256px native against inswapper's 128, and its profile asks
     # for *less* restoration (enhance_strength 0.5 vs 0.7) because the swap it
     # produces needs less. A bigger swap that buys a cheaper restore may be a
@@ -85,6 +100,8 @@ _BASE: Dict[str, Any] = {
     'async_encode': False,
     'enhance': True,
     'aligned_size': 256,
+    'restore_size': 512,
+    'restore_min_face': 0,
     'swapper_model': 'inswapper_128',
 }
 

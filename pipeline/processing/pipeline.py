@@ -346,6 +346,17 @@ class ProcessingPipeline:
         elif field in ('fp16', 'cuda_graphs', 'cuda_streams', 'trt', 'trt_gpus'):
             self._rebuild_sessions()
 
+        # Restoration crop size changed -> the enhancer's session was built
+        # declaring static shapes, and CUDA graph capture records fixed device
+        # buffer addresses for the shape it saw. Replaying that against a
+        # different crop would restore garbage, so drop the session and let it
+        # reload. Temporal state goes too: the aligned buffer holds pixels
+        # restored at the previous resolution.
+        elif field == 'restore_size':
+            if self._enhancer:
+                self._enhancer.clear()
+            self._reset_temporal_state()
+
     def _rebuild_sessions(self) -> None:
         """
         Drop every ONNX session so it reloads with the current speed levers.

@@ -33,8 +33,12 @@ Networking:
 GPU selection:
   - Auto-discovery (default): filters RunPod GPUs by RUNPOD_MIN_VRAM, RUNPOD_MAX_PRICE, and
     architecture compatibility (must be <= _MAX_SUPPORTED_COMPUTE_CAP), fastest first
+  - Speed tier: RUNPOD_MIN_GPU_PERF (default 85) refuses cards below it. When none is free,
+    the whole list is retried every minute for RUNPOD_GPU_WAIT seconds — waiting is free,
+    since billing starts when a pod runs. At the timeout, RUNPOD_GPU_FALLBACK decides:
+    unset fails (a measurement wants one architecture), true accepts a slower card
   - AMD cards are excluded outright: the pipeline runs CUDAExecutionProvider
-  - Manual override: set RUNPOD_GPU_TYPES to try specific GPUs in order
+  - Manual override: set RUNPOD_GPU_TYPES to try specific GPUs in order (no tier applied)
   - Architecture filter: GPUs with compute capability exceeding the image's PyTorch/ONNX
     support (e.g. Blackwell sm_120 on an sm_90 image) are automatically excluded
 
@@ -111,7 +115,8 @@ _GRAPHQL_URL = "https://api.runpod.io/graphql"
 _FORWARDED_ENV = (
     # Model selection and realism
     "SWAPPER_MODEL", "ENHANCER_MODEL", "ENHANCER_WEIGHT", "ENHANCE_STRENGTH",
-    "ALIGNED_SIZE", "TEMPORAL_ALPHA", "COLOR_STRENGTH",
+    "ALIGNED_SIZE", "RESTORE_SIZE", "RESTORE_MIN_FACE",
+    "TEMPORAL_ALPHA", "COLOR_STRENGTH",
     "ENHANCE", "GRAIN", "OCCLUDER",
     # Guards and their calibration
     "GUARDS", "GUARD_OBSERVE", "GUARD_REPORT",
@@ -588,6 +593,32 @@ _GPU_PERF = {
     "V100": 25,
 }
 
+# Floor on _gpu_perf for a card `start` will accept. At 85 the tier is the
+# RTX 4090, H200, H100, RTX 6000 Ada and L40S — five names, and in practice
+# three, since the H-series usually breaches RUNPOD_MAX_PRICE and never
+# reaches here.
+#
+# This deliberately reverses the reasoning in 45ba27c, which argued that
+# pinning trades "sometimes a slower card" for "sometimes no pod at all" and
+# that no pod is the worse failure on a paid session. That argument assumed
+# pinning meant *failing*. A bounded wait is not a pin: **billing starts when
+# a pod runs, not while you are waiting for one**, so the wait is free and the
+# thing it avoids is not. Auto-discovery accepting an L4 at 34 because the
+# 4090 was busy cost a whole measurement session — every number in it is
+# against an architecture nothing else was measured on, which is not a
+# comparison.
+#
+# A narrow tier is also what makes the TensorRT engine cache pay. Engines are
+# keyed per architecture and each pays its build once; across a dozen eligible
+# cards the cache rarely hits, across three or four it is warm almost always.
+_DEFAULT_MIN_GPU_PERF = 85
+
+# How long to wait for the tier before giving up, and how often to look. Both
+# in seconds. A minute between attempts because GPU capacity turns over on the
+# order of minutes, not seconds, and each attempt is an API round trip.
+_DEFAULT_GPU_WAIT = 300
+_GPU_RETRY_INTERVAL = 60
+
 # Vendor prefixes that cannot run CUDAExecutionProvider at all. AMD's MI300X
 # lists at $0.50/hr with 192GB and passed every filter here, so a cheapest-first
 # search would reach for it — and every ONNX model in this pipeline would then
@@ -648,13 +679,38 @@ def _get_cheapest_price(gpu: dict) -> Optional[float]:
     return min(valid) if valid else None
 
 
-def _discover_gpus(api_key: str, min_vram: int, max_price: float) -> List[Tuple[str, str, int, float]]:
+def _env_flag(name: str) -> bool:
     """
-    Auto-discover GPUs matching VRAM, price, and architecture criteria.
+    Read a boolean setting from the environment.
+
+    Same spellings the pipeline accepts (`pipeline/core.py::_env_bool`), so a
+    `.env` shared between the two does not mean two different things. Unset or
+    unrecognised is False: every flag read through here turns something off
+    that is on by default, and a typo must not be the thing that disables it.
+    """
+    raw = (os.getenv(name) or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _discover_gpus(
+    api_key: str,
+    min_vram: int,
+    max_price: float,
+    min_perf: int = 0,
+) -> List[Tuple[str, str, int, float]]:
+    """
+    Auto-discover GPUs matching VRAM, price, architecture and speed criteria.
 
     Queries all RunPod GPU types, filters by minimum VRAM, maximum
     per-hour price, and compute capability (must be <= _MAX_SUPPORTED_COMPUTE_CAP),
     then sorts fastest first.
+
+    Args:
+        api_key: RunPod API key
+        min_vram: Minimum VRAM in GB
+        max_price: Maximum price per hour
+        min_perf: Floor on _gpu_perf. 0 accepts every eligible card, which is
+            the old behaviour and what a fallback pass asks for.
 
     Returns:
         List of (display_name, gpu_id, vram_gb, price) tuples, fastest first.
@@ -664,6 +720,7 @@ def _discover_gpus(api_key: str, min_vram: int, max_price: float) -> List[Tuple[
     candidates = []
     skipped_arch = []
     skipped_vendor = []
+    skipped_slow = []
     for gpu in all_gpus:
         gpu_id = gpu.get("id")
         name = gpu.get("displayName")
@@ -692,6 +749,14 @@ def _discover_gpus(api_key: str, min_vram: int, max_price: float) -> List[Tuple[
             skipped_vendor.append(name)
             continue
 
+        # Speed floor. Listed rather than dropped silently: a session that
+        # waited five minutes and failed should be able to see what it turned
+        # down, and the answer to "why is there no pod" is usually here.
+        perf = _gpu_perf(gpu_id)
+        if perf < min_perf:
+            skipped_slow.append((name, perf))
+            continue
+
         candidates.append((name, gpu_id, vram, price))
 
     if skipped_arch:
@@ -700,6 +765,10 @@ def _discover_gpus(api_key: str, min_vram: int, max_price: float) -> List[Tuple[
             _MAX_SUPPORTED_COMPUTE_CAP[0], _MAX_SUPPORTED_COMPUTE_CAP[1], names))
     if skipped_vendor:
         print("  Skipped (no CUDA): {}".format(", ".join(skipped_vendor)))
+    if skipped_slow:
+        skipped_slow.sort(key=lambda s: -s[1])
+        print("  Skipped (below tier {}): {}".format(
+            min_perf, ", ".join("{} ({})".format(n, p) for n, p in skipped_slow)))
 
     # Fastest first, price only as a tiebreak. The price ceiling has already
     # been applied above, so everything still here is affordable by definition
@@ -744,13 +813,27 @@ def _parse_datacenters() -> List[Tuple[str, Optional[str]]]:
     return [(datacenter_id, network_volume_id)]
 
 
-def _resolve_gpu_candidates(api_key: str) -> List[Tuple[str, str, int, float]]:
+def _resolve_gpu_candidates(
+    api_key: str,
+    min_perf: Optional[int] = None,
+) -> List[Tuple[str, str, int, float]]:
     """
     Build the GPU candidate list — either from manual override or auto-discovery.
 
     If RUNPOD_GPU_TYPES is set, resolves those display names to API IDs (manual mode).
     Otherwise, auto-discovers GPUs by querying the RunPod API and filtering by
-    RUNPOD_MIN_VRAM (default 16 GB) and RUNPOD_MAX_PRICE (default $1.00/hr).
+    RUNPOD_MIN_VRAM (default 16 GB), RUNPOD_MAX_PRICE (default $1.00/hr) and
+    RUNPOD_MIN_GPU_PERF (default _DEFAULT_MIN_GPU_PERF).
+
+    The speed floor does **not** apply in manual mode. Naming cards explicitly
+    is already a statement about which ones are acceptable, and a floor that
+    silently removed one of them would make RUNPOD_GPU_TYPES mean something
+    other than what it says.
+
+    Args:
+        api_key: RunPod API key
+        min_perf: Override the configured floor. 0 drops it, which is what the
+            fallback pass asks for after the wait expires.
 
     Returns:
         List of (display_name, gpu_id, vram_gb, price) tuples.
@@ -790,17 +873,22 @@ def _resolve_gpu_candidates(api_key: str) -> List[Tuple[str, str, int, float]]:
 
         return candidates
 
-    # Auto-discovery — filter by VRAM and price
+    # Auto-discovery — filter by VRAM, price and speed
     min_vram = int(os.getenv("RUNPOD_MIN_VRAM", str(_DEFAULT_MIN_VRAM)))
     max_price = float(os.getenv("RUNPOD_MAX_PRICE", str(_DEFAULT_MAX_PRICE)))
-    print("  GPU selection: auto (>= {}GB VRAM, <= ${:.2f}/hr)".format(min_vram, max_price))
+    if min_perf is None:
+        min_perf = int(os.getenv("RUNPOD_MIN_GPU_PERF", str(_DEFAULT_MIN_GPU_PERF)))
+    print("  GPU selection: auto (>= {}GB VRAM, <= ${:.2f}/hr, tier >= {})".format(
+        min_vram, max_price, min_perf))
 
-    candidates = _discover_gpus(api_key, min_vram, max_price)
+    candidates = _discover_gpus(api_key, min_vram, max_price, min_perf)
 
     if not candidates:
-        print("ERROR: no GPUs found matching criteria (>= {}GB VRAM, <= ${:.2f}/hr).".format(
-            min_vram, max_price))
-        print("  Try increasing RUNPOD_MAX_PRICE or decreasing RUNPOD_MIN_VRAM in .env")
+        print("ERROR: no GPUs found matching criteria "
+              "(>= {}GB VRAM, <= ${:.2f}/hr, tier >= {}).".format(
+                  min_vram, max_price, min_perf))
+        print("  Try increasing RUNPOD_MAX_PRICE, decreasing RUNPOD_MIN_VRAM,")
+        print("  or lowering RUNPOD_MIN_GPU_PERF in .env")
         sys.exit(1)
 
     return candidates
@@ -844,6 +932,98 @@ def _deploy_new_pod(mode: str) -> str:
     print("  Candidates:  {}".format(
         ", ".join("{} ({}GB, ${:.2f}/hr)".format(n, v, p) for n, _, v, p in candidates)
     ))
+
+    # Try the whole candidate list; only if every one of them is unavailable
+    # is there anything to wait for.
+    wait_budget = int(os.getenv("RUNPOD_GPU_WAIT", str(_DEFAULT_GPU_WAIT)))
+    allow_slower = _env_flag("RUNPOD_GPU_FALLBACK")
+    deadline = time.time() + wait_budget
+
+    while True:
+        new_pod_id, capacity_only = _try_deploy_pass(
+            candidates, datacenters, mode, image, container_disk, volume_disk,
+            api_key, exposed_ports,
+        )
+        if new_pod_id:
+            return new_pod_id
+
+        # Only capacity is worth waiting out. A bad volume id, a dead image or
+        # a rejected key fails identically every sixty seconds, and spending
+        # five minutes proving that is worse than saying so now.
+        if not capacity_only:
+            print("")
+            print("  A failure above was not a capacity problem, so waiting "
+                  "cannot fix it.")
+            break
+
+        remaining = deadline - time.time()
+        if remaining < _GPU_RETRY_INTERVAL:
+            break
+
+        print("")
+        print("  Every card in the tier is taken. Waiting {}s, then trying the "
+              "whole list again".format(_GPU_RETRY_INTERVAL))
+        print("  ({:.0f}s of budget left). This is free — billing starts when a "
+              "pod runs, not".format(remaining))
+        print("  while you wait for one.")
+        time.sleep(_GPU_RETRY_INTERVAL)
+
+    # The tier never came free. What happens now differs by purpose, which is
+    # why it is a setting and not a constant: a measurement session should fail
+    # rather than accept a slower card, because a comparison across two
+    # architectures is not a comparison — while a customer session should fall
+    # back, because some service beats none.
+    if allow_slower:
+        print("")
+        print("  RUNPOD_GPU_FALLBACK is set — retrying without the speed floor.")
+        print("  Note the card in the result: numbers taken on it are not")
+        print("  comparable with numbers taken on any other.")
+        fallback = _resolve_gpu_candidates(api_key, min_perf=0)
+        new_pod_id, _ = _try_deploy_pass(
+            fallback, datacenters, mode, image, container_disk, volume_disk,
+            api_key, exposed_ports,
+        )
+        if new_pod_id:
+            return new_pod_id
+
+    tried_dcs = ", ".join(dc for dc, _ in datacenters)
+    print("ERROR: no GPUs available across datacenters: {}".format(tried_dcs))
+    if not allow_slower:
+        print("  Nothing in the tier (>= {}) came free within {}s.".format(
+            os.getenv("RUNPOD_MIN_GPU_PERF", str(_DEFAULT_MIN_GPU_PERF)),
+            wait_budget))
+        print("  Set RUNPOD_GPU_FALLBACK=true to accept a slower card instead,")
+        print("  or raise RUNPOD_GPU_WAIT to wait longer. Waiting costs nothing.")
+    sys.exit(1)
+
+
+def _try_deploy_pass(
+    candidates: List[Tuple[str, str, int, float]],
+    datacenters: List[Tuple[str, str]],
+    mode: str,
+    image: str,
+    container_disk: int,
+    volume_disk: int,
+    api_key: str,
+    exposed_ports: str,
+) -> Tuple[Optional[str], bool]:
+    """
+    One pass over every datacenter and candidate, in priority order.
+
+    Split out of `_deploy_new_pod` so the pass can be repeated while waiting
+    for capacity, without redoing the setup around it — resolving candidates,
+    reading the image, printing the plan — once a minute.
+
+    Every candidate is retried on every pass. A card that was taken a minute
+    ago is the most likely one to have come free, so a pass that skipped what
+    it had already tried would be skipping the answer.
+
+    Returns:
+        (pod_id, capacity_only). `capacity_only` is True when every failure in
+        the pass was RunPod saying it had no GPU free — the only kind of
+        failure that waiting can resolve.
+    """
+    capacity_only = True
 
     # Try each datacenter in priority order, all GPUs per datacenter
     for datacenter_id, network_volume_id in datacenters:
@@ -894,13 +1074,16 @@ def _deploy_new_pod(mode: str) -> str:
                 print("  Created pod: {} ({} {}GB in {}, ${:.2f}/hr)".format(
                     new_pod_id, gpu_name, vram, datacenter_id, price))
                 _update_env_key("RUNPOD_POD_ID", new_pod_id)
-                return new_pod_id
+                return new_pod_id, True
             except Exception as exc:
                 print("unavailable ({})".format(exc))
+                # Distinguishes "come back in a minute" from "this will never
+                # work". Reuses the marker list the resume path already needs,
+                # since it is the same API saying the same thing.
+                if not _is_capacity_error(str(exc)):
+                    capacity_only = False
 
-    tried_dcs = ", ".join(dc for dc, _ in datacenters)
-    print("ERROR: no GPUs available across datacenters: {}".format(tried_dcs))
-    sys.exit(1)
+    return None, capacity_only
 
 
 def _wait_for_pipeline(ws_address: str) -> None:
@@ -1454,6 +1637,7 @@ def cmd_gpus() -> None:
     api_key = os.getenv("RUNPOD_API_KEY", "")
     min_vram = int(os.getenv("RUNPOD_MIN_VRAM", str(_DEFAULT_MIN_VRAM)))
     max_price = float(os.getenv("RUNPOD_MAX_PRICE", str(_DEFAULT_MAX_PRICE)))
+    min_perf = int(os.getenv("RUNPOD_MIN_GPU_PERF", str(_DEFAULT_MIN_GPU_PERF)))
     gpu_types_raw = os.getenv("RUNPOD_GPU_TYPES", "").strip()
 
     print("Querying RunPod GPUs...\n")
@@ -1474,10 +1658,22 @@ def cmd_gpus() -> None:
     if auto_candidates:
         print("Eligible GPUs (>= {}GB VRAM, <= ${:.2f}/hr, <= sm_{}{}) — fastest first:".format(
             min_vram, max_price, _MAX_SUPPORTED_COMPUTE_CAP[0], _MAX_SUPPORTED_COMPUTE_CAP[1]))
+        print("  T marks the tier `start` will accept (RUNPOD_MIN_GPU_PERF >= {});".format(
+            min_perf))
+        print("  the rest are listed but refused, unless RUNPOD_GPU_FALLBACK is set.")
+        in_tier = 0
         for name, gpu_id, vram, price in auto_candidates:
-            marker = " *" if name in manual_names else "  "
-            print("{}  {:.<30s} {:>3}GB  ${:.2f}/hr  [{}]".format(
-                marker, name + " ", vram, price, gpu_id))
+            perf = _gpu_perf(gpu_id)
+            tier = "T" if perf >= min_perf else " "
+            in_tier += 1 if perf >= min_perf else 0
+            marker = "*" if name in manual_names else " "
+            print("{}{}  {:.<30s} {:>3}GB  ${:.2f}/hr  perf {:>3}  [{}]".format(
+                marker, tier, name + " ", vram, price, perf, gpu_id))
+        if not in_tier:
+            print("\n  WARNING: nothing here is in the tier, so `start` will wait")
+            print("  {}s and then fail. Lower RUNPOD_MIN_GPU_PERF, raise".format(
+                os.getenv("RUNPOD_GPU_WAIT", str(_DEFAULT_GPU_WAIT))))
+            print("  RUNPOD_MAX_PRICE, or set RUNPOD_GPU_FALLBACK=true.")
     else:
         print("No GPUs match criteria (>= {}GB VRAM, <= ${:.2f}/hr)".format(min_vram, max_price))
 
@@ -1519,8 +1715,10 @@ def cmd_gpus() -> None:
             print("    {:.<30s} {:>3}GB  {:>10s}  [{}]".format(
                 name + " ", vram, price_str, gpu.get("id", "?")))
 
-    print("\nTotal: {} GPUs ({} eligible, {} incompatible)".format(
-        len(all_gpus), len(auto_candidates), len(incompatible)))
+    print("\nTotal: {} GPUs ({} eligible, {} in tier, {} incompatible)".format(
+        len(all_gpus), len(auto_candidates),
+        sum(1 for _, gid, _, _ in auto_candidates if _gpu_perf(gid) >= min_perf),
+        len(incompatible)))
     if manual_names:
         print("Manual override active: {}".format(", ".join(sorted(manual_names))))
 

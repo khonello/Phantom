@@ -687,6 +687,13 @@ _REALISM_FIELDS: Dict[str, Any] = {
     'enhancer_weight': lambda v: min(1.0, max(0.0, float(v))),
     'enhance_strength': lambda v: min(1.0, max(0.0, float(v))),
     'aligned_size': lambda v: min(512, max(128, int(v))),
+    # The two levers aimed at restoration itself, which is 75% of the frame.
+    # `restore_size` is a request: a model with fixed spatial dims wins, and
+    # `Enhancer.crop_size` says so. `restore_min_face` is unbounded above on
+    # purpose — setting it past any face is how you measure the floor without
+    # also turning off the stage's temporal effects.
+    'restore_size': lambda v: min(512, max(128, int(v))),
+    'restore_min_face': lambda v: max(0, int(v)),
     'temporal_alpha': lambda v: min(1.0, max(0.0, float(v))),
     'color_strength': lambda v: min(1.0, max(0.0, float(v))),
     'grain': lambda v: bool(v),

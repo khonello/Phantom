@@ -131,6 +131,12 @@ def parse_args() -> None:
                         dest='enhance_strength', type=float, default=_env_float('ENHANCE_STRENGTH'))
     program.add_argument('--aligned-size', help='ceiling on compositing resolution (128-512); actual size follows face size',
                         dest='aligned_size', type=int, default=_env_int('ALIGNED_SIZE'))
+    program.add_argument('--restore-size', help='FFHQ crop edge fed to the restorer (128-512); '
+                                                'ignored if the model has fixed inputs',
+                        dest='restore_size', type=int, default=_env_int('RESTORE_SIZE'))
+    program.add_argument('--restore-min-face', help='skip restoration below this face size in px '
+                                                    '(shorter side); 0 never skips',
+                        dest='restore_min_face', type=int, default=_env_int('RESTORE_MIN_FACE'))
     program.add_argument('--temporal-alpha', help='EMA on composited pixels (1.0=off)',
                         dest='temporal_alpha', type=float, default=_env_float('TEMPORAL_ALPHA'))
     program.add_argument('--color-strength', help='scales the LAB colour transfer (0.0-1.0)',
@@ -218,6 +224,8 @@ def parse_args() -> None:
         ('enhancer_weight', args.enhancer_weight),
         ('enhance_strength', args.enhance_strength),
         ('aligned_size', args.aligned_size),
+        ('restore_size', args.restore_size),
+        ('restore_min_face', args.restore_min_face),
         ('temporal_alpha', args.temporal_alpha),
         ('color_strength', args.color_strength),
         ('enhance', args.enhance),

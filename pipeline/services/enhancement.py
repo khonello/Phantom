@@ -31,8 +31,15 @@ from pipeline.config import FaceSwapConfig
 from pipeline.types import Frame
 from pipeline.logging import emit_status, emit_warning
 
-# Both backends are trained on FFHQ-aligned 512x512 crops.
+# Both backends are trained on FFHQ-aligned 512x512 crops. This is the default
+# and the size the FFHQ template is defined against; `config.restore_size` can
+# ask for less, and `Enhancer.crop_size` decides what the loaded model will
+# actually accept.
 CROP_SIZE = 512
+
+# Floor on the FFHQ crop. Below this the model has less to work with than the
+# 128px swap it is restoring, so there is nothing left for it to do.
+MIN_CROP_SIZE = 128
 
 _CODEFORMER_MODEL_NAME = 'codeformer.onnx'
 _CODEFORMER_MODEL_URL = (
@@ -40,6 +47,28 @@ _CODEFORMER_MODEL_URL = (
     'models-3.0.0/codeformer.onnx'
 )
 _GFPGAN_MODEL_NAME = 'GFPGANv1.4.pth'
+
+
+def _spatial_size(shape: Optional[Any]) -> Optional[int]:
+    """
+    The square input size an ONNX graph insists on, or None if it is dynamic.
+
+    ONNX declares a symbolic dimension as a string (`'height'`) or None, and a
+    fixed one as an int. Only a graph whose last two dims are equal ints is
+    pinned to a size; anything else can be fed whatever the caller builds.
+
+    Args:
+        shape: The input's declared shape, e.g. `[1, 3, 512, 512]`
+
+    Returns:
+        Edge length if the graph is fixed and square, else None.
+    """
+    if not shape or len(shape) < 2:
+        return CROP_SIZE
+    height, width = shape[-2], shape[-1]
+    if isinstance(height, int) and isinstance(width, int) and height == width:
+        return height
+    return None
 
 
 def _resolve_model_path(model_name: str) -> str:
@@ -74,6 +103,11 @@ class _CodeFormerBackend:
         self._runner: Optional[Any] = None
         self._image_input = 'input'
         self._weight_input: Optional[str] = None
+        # Edge length the graph insists on, or None if it accepts any. Read
+        # from the model rather than assumed: `restore_size` is worth nothing
+        # against an export with fixed 512 spatial dims, and finding that out
+        # by throwing once per frame on a paid pod is the wrong way to learn it.
+        self.native_size: Optional[int] = CROP_SIZE
 
     def load(self) -> bool:
         """Load the session, downloading the model if needed."""
@@ -103,10 +137,16 @@ class _CodeFormerBackend:
                     self._weight_input = model_input.name
                 else:
                     self._image_input = model_input.name
+                    self.native_size = _spatial_size(getattr(model_input, 'shape', None))
 
             emit_status(
                 'CodeFormer restoration available'
-                + ('' if self._weight_input else ' (fixed fidelity — no weight input)'),
+                + ('' if self._weight_input else ' (fixed fidelity — no weight input)')
+                + (
+                    ' — input is dynamic, restore_size applies'
+                    if self.native_size is None
+                    else f' — input fixed at {self.native_size}px'
+                ),
                 scope='ENHANCER',
             )
             return True
@@ -188,6 +228,9 @@ class _GFPGANBackend:
     def __init__(self, config: FaceSwapConfig) -> None:
         self.config = config
         self._enhancer: Optional[Any] = None
+        # `has_aligned=True` hands the crop straight to a network built for
+        # FFHQ 512. There is no smaller path through it.
+        self.native_size: Optional[int] = CROP_SIZE
 
     def load(self) -> bool:
         """Load GFPGAN. Returns False if the model or package is missing."""
@@ -285,6 +328,47 @@ class Enhancer:
         self._backend: Optional[Any] = None
         self._loaded = False
         self._lock = threading.Lock()
+        self._size_warned: Optional[int] = None
+
+    @property
+    def crop_size(self) -> int:
+        """
+        Edge length the caller should build its FFHQ crop at.
+
+        This is the largest single cost in the pipeline. Restoration runs on a
+        512x512 crop regardless of how many frame pixels the face covers, so a
+        101px face is upsampled ~20x in pixel count before the heaviest model
+        in the chain sees it — roughly 4x the compute of restoring at 256 and
+        16x of 128, spent reconstructing detail the source never held.
+
+        `config.restore_size` asks for less. The **model decides**: an export
+        with fixed spatial dims is honoured over the request, because feeding
+        it another shape throws once per frame rather than running faster. The
+        disagreement is said once, not per frame — this sits on the live path.
+
+        Returns:
+            Even edge length in [MIN_CROP_SIZE, CROP_SIZE].
+        """
+        requested = int(getattr(self.config, 'restore_size', CROP_SIZE) or CROP_SIZE)
+        requested = max(MIN_CROP_SIZE, min(CROP_SIZE, requested))
+        # Conv stacks halve the spatial dims repeatedly; an odd edge rounds
+        # somewhere inside and comes back a different size than it went in.
+        requested -= requested % 8
+
+        self._ensure_loaded()
+        native = getattr(self._backend, 'native_size', CROP_SIZE)
+        if native is None or native == requested:
+            return requested
+
+        if self._size_warned != requested:
+            self._size_warned = requested
+            emit_warning(
+                f'restore_size={requested} ignored — the loaded restoration model '
+                f'has fixed {native}px inputs. Restoring at a smaller size needs a '
+                f'model exported for it, not a config change.',
+                scope='ENHANCER',
+            )
+        return int(native)
 
     @property
     def available(self) -> bool:
@@ -348,7 +432,7 @@ class Enhancer:
         Restore an FFHQ-aligned crop.
 
         Args:
-            crop: FFHQ-framed BGR crop, CROP_SIZE square
+            crop: FFHQ-framed BGR crop, square, built at `crop_size`
 
         Returns:
             Restored crop, or None if restoration is unavailable or failed.
@@ -375,3 +459,5 @@ class Enhancer:
         with self._lock:
             self._backend = None
             self._loaded = False
+            # The next backend may accept a size this one refused.
+            self._size_warned = None

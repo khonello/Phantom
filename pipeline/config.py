@@ -146,6 +146,26 @@ class FaceSwapConfig:
     # should never composite a distant face at 128 the way a 128 model can.
     aligned_min: int = 128
     temporal_alpha: float = 0.6     # EMA on aligned pixels (1.0 = off)
+
+    # Restoration resolution, and when to spend it at all.
+    #
+    # Both restorers are trained on FFHQ 512x512 crops, so 512 is the default
+    # and the out-of-the-box path is unchanged. It is also the single largest
+    # cost in the pipeline and the one stage that ignores how big the face
+    # actually is: a 101px face in a 640x360 frame is upsampled ~20x in pixel
+    # count for it, and conv cost scales with pixel count. `_aligned_size`
+    # already applies the opposite principle one stage earlier.
+    #
+    # `restore_size` only takes effect if the loaded model accepts the shape.
+    # A graph exported with fixed 512 spatial dims is honoured over this, and
+    # `Enhancer.crop_size` says so once rather than throwing per frame.
+    restore_size: int = 512
+    # Skip restoration entirely below this face size (px, shorter side of the
+    # bounding box — the same measure as `guard_min_frame_px`). 0 never skips.
+    # A small face's swap came out of a 128px generator; whether 512-space
+    # restoration visibly improves it is a footage question, and this is what
+    # makes it askable without a new model.
+    restore_min_face: int = 0
     color_strength: float = 1.0     # scales the LAB colour transfer
     grain: bool = True              # match sensor noise on the composited face
     occluder: bool = True           # XSeg mask so hands/mics are not overpainted
@@ -336,6 +356,8 @@ class FaceSwapConfig:
             'enhancer_weight': self.enhancer_weight,
             'enhance_strength': self.enhance_strength,
             'aligned_size': self.aligned_size,
+            'restore_size': self.restore_size,
+            'restore_min_face': self.restore_min_face,
             'temporal_alpha': self.temporal_alpha,
             'color_correction': self.color_correction,
             'color_strength': self.color_strength,

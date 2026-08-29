@@ -162,6 +162,28 @@ a 4090 combined.** Options, cheapest first:
    CodeFormer at 256. Changes what the output looks like, so it is an A/B, not
    a swap.
 
+**Options 1 and 3 are now measurable rather than hypothetical.** `restore_size`
+and `restore_min_face` are config fields, on `set_realism`, the CLI, the env and
+the sweep. Two properties matter:
+
+- **`restore_size` is a request, and the model answers it.**
+  `_spatial_size` reads the ONNX input's declared shape at load;
+  `Enhancer.crop_size` honours a fixed export over the config and warns **once**
+  rather than throwing per frame on the live path. So option 3's real question —
+  *is facefusion's `codeformer.onnx` exported with dynamic spatial dims?* — is
+  answered by one line of the pod's startup log, and a `restore_256` run whose
+  `restore` equals the baseline exactly is what "no, it is fixed" looks like in
+  the sweep. It is not a lever that quietly does nothing.
+- **The seam is a fraction of the crop, not a pixel count.** `_FFHQ_ERODE` and
+  `_FFHQ_FEATHER` reproduce the old 5px erode and 6.0 sigma exactly at 512, so
+  nothing changes at the default, and a 256 crop gets the same *seam* rather
+  than twice as hard an edge. Otherwise a resolution A/B would also be a
+  feathering A/B and neither would be readable.
+
+`_ffhq_geometry` at 256 is exactly half the matrix it is at 512 — the framing is
+identical, only the sampling rate changes — so this is a resolution comparison
+and nothing else. Both default to current behaviour: 512, never skip.
+
 Note what is *not* the problem, so it does not get optimised by mistake:
 transfers are trivial (a 512x512x3 fp32 tensor is 3MB, ~0.1ms over PCIe 4.0,
 even six round trips are under 2ms), and the Python layer does not appear in
@@ -179,38 +201,64 @@ cover colour, detail and grain, whereas PyPI OpenCV has no CUDA build. Expect
 Do it *after* the restoration resolution question, not before: 20ms is worth
 having, 110ms is worth having first.
 
-### Proposed: refuse mediocre GPUs, wait instead
+### Refusing mediocre GPUs, and waiting instead
 
-**Not implemented.** Recorded because this session was measured on an L4 by
-accident, and the card turned out to matter more than every lever combined.
+Auto-discovery sorted by `_GPU_PERF` and took the fastest *available* card,
+which silently accepts a 34-ranked L4 when a 100-ranked 4090 is busy. That is
+not a hypothetical: a whole measurement session was spent on an L4 by accident,
+and the card turned out to matter more than every software lever combined.
 
-Auto-discovery sorts by `_GPU_PERF` and takes the fastest *available*, which
-means it silently accepts a 34-ranked card when a 100-ranked one is busy. The
-proposal is to restrict `start` to a **top tier** — 4090 and its equals — and,
-when none is free, **wait a minute and retry, up to about five minutes**,
-rather than dropping down the list.
+`start` now restricts itself to a **top tier**, and when none of it is free it
+**waits and retries the whole list every minute** rather than dropping down.
+
+| Setting | Default | Effect |
+|---|---|---|
+| `RUNPOD_MIN_GPU_PERF` | `85` | Floor in `_GPU_PERF`. The tier is 4090, H200, H100, RTX 6000 Ada, L40S |
+| `RUNPOD_GPU_WAIT` | `300` | Seconds to keep retrying before giving up |
+| `RUNPOD_GPU_FALLBACK` | *unset* | What the timeout does: unset fails, `true` accepts a slower card |
+
+Five names, and in practice three — the H-series usually breaches
+`RUNPOD_MAX_PRICE` and never reaches the floor at all.
 
 This deliberately reverses the reasoning in commit 45ba27c and in
 docs/COMPILATION.md, which argued that pinning trades "sometimes a slower card"
 for "sometimes no pod at all", and that no pod is the worse failure on a paid
-session. That argument assumed pinning meant *failing*. A bounded wait is not a
-pin: it costs nothing, because **billing starts when a pod runs, not while you
-are waiting for one**. Landing on an L4 costs a whole session of data that
-cannot be compared against anything else — which is exactly what happened.
+session. That argument assumed pinning meant *failing*. **A bounded wait is not
+a pin: billing starts when a pod runs, not while you are waiting for one**, so
+the wait costs nothing and the thing it avoids costs a session.
 
-Two properties worth keeping in the design:
+Four properties worth keeping:
 
-- **What happens at the timeout differs by purpose.** A measurement session
-  should fail rather than accept a slower card, since a comparison across two
-  architectures is not a comparison. A customer session should fall back, since
-  some service beats none. That makes it a flag, not a constant.
-- **A narrow tier is what makes the TensorRT engine cache pay.** Engines are
-  keyed per architecture and each pays its build once; across a dozen eligible
-  cards the cache rarely hits, across three or four it is warm almost always.
-  The same holds for any future per-GPU tuning — a small, known set is what
-  makes "optimise for this card" a sentence that means something.
+- **The whole list is retried each pass, not just what was untried.** A card
+  taken a minute ago is the most likely one to have come free, so a pass that
+  skipped it would skip the answer. `_try_deploy_pass` is split out of
+  `_deploy_new_pod` for exactly this: the pass repeats, the setup around it
+  does not.
+- **Only capacity is waited out.** A bad volume id, a dead image or a rejected
+  key fails identically every sixty seconds, and spending five minutes proving
+  that is worse than saying so immediately. `_is_capacity_error` — already
+  needed by the resume path, since it is the same API saying the same thing —
+  decides, and a single non-capacity failure ends the wait.
+- **What happens at the timeout differs by purpose**, which is why it is a
+  setting and not a constant. A measurement session should fail rather than
+  accept a slower card, since a comparison across two architectures is not a
+  comparison. A customer session should fall back, since some service beats
+  none. The default is *fail*, because that is the failure this was built for.
+- **Manual mode is exempt.** `RUNPOD_GPU_TYPES` naming cards is already a
+  statement about which are acceptable; a floor that silently removed one would
+  make the setting mean something other than what it says.
 
-Lives in `_discover_gpus` and `cmd_start` in `runpod/orchestrator.py`.
+A narrow tier is also what makes the TensorRT engine cache pay. Engines are
+keyed per architecture and each pays its build once; across a dozen eligible
+cards the cache rarely hits, across three or four it is warm almost always. The
+same holds for any future per-GPU tuning — a small, known set is what makes
+"optimise for this card" a sentence that means something.
+
+`gpus` lists the whole eligible field and marks the tier with `T` rather than
+hiding what `start` refuses, since "why is there no pod" has to be answerable
+from that command. Lives in `_discover_gpus`, `_resolve_gpu_candidates`,
+`_try_deploy_pass` and `_deploy_new_pod` in `runpod/orchestrator.py`;
+`tests/test_gpu_tier.py` pins the tier membership against the prose above.
 
 ## Quick Commands
 
@@ -520,6 +568,8 @@ that varies frame to frame feeds straight back into shimmer.
 | `enhancer_model` | `codeformer` | Restoration backend (`codeformer` or `gfpgan`) |
 | `enhancer_weight` | `0.7` | CodeFormer fidelity: `0`=most restoration, `1`=closest to input |
 | `enhance_strength` | `0.7` | How much of the restored face to keep. Full strength reads as AI; partial keeps believable imperfection |
+| `restore_size` | `512` | Edge of the FFHQ crop fed to the restorer. A model with fixed spatial dims overrides it and says so once — see below |
+| `restore_min_face` | `0` | Skip restoration below this face size (px, shorter side). `0` never skips |
 | `aligned_size` | `256` | **Ceiling** on compositing resolution (clamped 128–512). The size actually used follows the face's own size in frame, in steps, with hysteresis — a distant face is not upsampled to detail its webcam never captured, and costs proportionally less |
 | `temporal_alpha` | `0.6` | EMA on aligned pixels, kills shimmer (`1.0` disables) |
 | `color_correction` | `True` | LAB transfer, sampled inside the mask, ramped by colour distance |
@@ -1069,7 +1119,7 @@ alternating detections would zero a consecutive counter every other frame. See
 Three ways to set them:
 - **Quality preset** — the desktop dropdown; see the table above.
 - **CLI / env** — `--enhancer-model`, `--enhancer-weight`, `--enhance-strength`,
-  `--aligned-size`, `--temporal-alpha`, `--color-strength`, `--no-enhance`,
+  `--aligned-size`, `--restore-size`, `--restore-min-face`, `--temporal-alpha`, `--color-strength`, `--no-enhance`,
   `--no-grain`, `--no-occluder`. Each also reads an env var
   (`ENHANCER_MODEL`, `ENHANCER_WEIGHT`, …) since the pod is configured via `.env`.
   Precedence: preset first, then CLI/env overrides.
