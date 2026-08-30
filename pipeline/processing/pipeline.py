@@ -475,6 +475,10 @@ class ProcessingPipeline:
 
     def _run_stream_impl(self) -> None:
         """Implementation of stream mode."""
+        # A report has to describe the stream it is printed for. The budget
+        # lives on the pipeline, which outlives any one stream, so without
+        # this every measurement is diluted by every measurement before it.
+        self._latency.reset()
         self._build_processors()
         self._warm_up_models()
         emit_status('Stream pipeline started', scope='PIPELINE')

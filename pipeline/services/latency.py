@@ -94,6 +94,22 @@ class LatencyBudget:
         fps = float(getattr(config, 'capture_fps', 0) or 0)
         return (1000.0 / fps) if fps > 0 else 0.0
 
+    def reset(self) -> None:
+        """
+        Drop every recorded frame.
+
+        Called when a stream starts, so a report describes *that* stream and
+        not every frame since the process booted. Without this a sweep of six
+        configurations reported frame counts of 1018, 4399, 7740, 8781, 9746
+        and 12775 — each run carrying all its predecessors — so a lever that
+        halved frame time still showed the previous configuration's p95, and
+        the stage breakdown of a run with restoration *off* still reported a
+        `restore` percentile. The measurement said "no change" for a change
+        of 3x.
+        """
+        self.stages.clear()
+        self.frames = 0
+
     def report(self, config: FaceSwapConfig) -> Dict[str, Any]:
         """
         Summarise the session against this preset's deadline.

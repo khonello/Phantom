@@ -51,21 +51,141 @@ before a paying customer. Read it before assuming a gap is unnoticed.
   against the *pipeline's* filesystem, so a desktop-chosen file only resolves
   when the pipeline runs locally. A 2 GB video still needs a real transfer path
 
-### Where performance work stands (measured 2026-08-28)
+### Where performance work stands (measured 2026-08-29, RTX 4090)
 
-First real measurement on a pod. **`optimal` preset misses its deadline by
-~3x**, and one stage is the reason.
+**The `optimal` preset misses its deadline by 8.3ms.** Not by 96ms, which is
+what the L4 said. The card was worth more than every software lever combined.
 
 | Stage | p95 | Share |
 |---|---|---|
-| detect | 16.1ms | 11% |
-| **restore (CodeFormer)** | **110ms** | **75%** |
-| compositor + paste + encode | ~20ms | 14% |
-| **total** | **146ms** | vs a **50ms** deadline |
+| detect | 8.5ms | 15% |
+| **restore (CodeFormer)** | **39.5ms** | **68%** |
+| compositor + paste + encode | ~10.3ms | 18% |
+| **total** | **58.3ms** | vs a **50ms** deadline |
 
-NVIDIA **L4**, 640x360 @20fps, 263 frames. Note the card: auto-discovery ranks
-L4 at 34 against the RTX 4090's 100, and a resumed pod stays pinned to the host
-it was created on, so this is not the GPU a fresh `start` would pick.
+RTX 4090, 640x360 @20fps, 1026 frames. Unusually well-supported for a single
+run: eleven sweep configurations were recorded before anyone noticed the pod
+was refusing every lever, so this is eleven independent samples of the same
+stock configuration, spanning 58.1–58.8ms.
+
+For comparison, the same clip on an **L4** (2026-08-28): detect 16.1ms, restore
+110ms, CPU ~20ms, total 146ms. So the 4090 is ~2.5x, and — worth correcting —
+the non-GPU portion **did** scale with the card, 20ms to 10.3ms. The earlier
+claim that ~20ms was a fixed CPU floor was wrong, which weakens the case for
+the GPU-compositing work: it is now 18% of the frame and cannot close an 8.3ms
+gap by itself.
+
+Restoration is still the dominant term, so the premise holds. And the
+arithmetic is now friendly rather than hopeless: **restoration is 39.5ms of a
+58.3ms frame against a 50ms deadline**, so removing even part of it holds the
+preset.
+
+### What the levers are actually worth (same session, same clip)
+
+Read the **frames processed per run**, not the p95 column. `LatencyBudget` was
+never reset between streams, so each report covered every frame since the
+process started (1018, 4399, 7740, 8781, 9746, 12775) and every p95 was
+diluted by its predecessors — a run with restoration *off* still reported a
+`restore` percentile, because those were the baseline's frames. Fixed now
+(`LatencyBudget.reset()`, called from `_run_stream_impl`), but every sweep
+taken before that fix has to be read this way.
+
+| config | frames in its 60s | ms/frame |
+|---|---|---|
+| baseline | 1018 | 58.9 |
+| **no restoration** | 3381 | **17.7** |
+| **`restore_min_face=200`** | 3341 | **18.0** |
+| `aligned_size=128` | 1041 | 57.6 |
+| hyperswap_1a_256 | 965 | 62.2 |
+| hyperswap + no restoration | 3029 | 19.8 |
+
+**Restoration off is 3.3x, and it HOLDS the deadline** — the first `[HOLDS]`
+verdict this project has produced. `restore_min_face` lands on the same number,
+which is the cross-check it was built for: the shippable, config-level lever
+reaches the same floor as switching the stage off wholesale.
+
+Two questions closed, both negative. **`aligned_size` is not the cost** — 128
+against 256 changes nothing. **hyperswap is slightly worse, not better**: 62.2
+against 58.9, and 19.8 against 17.7 with restoration off. The 256px swap costs
+2-3ms and buys back *nothing* in restoration time, so on speed grounds it is
+just a bigger swap. Its appearance remains unjudged.
+
+### Does restoration actually help a 101px face?
+
+Measured on the recorded webcam clip, 24 frame pairs at identical indices,
+restoration off against CodeFormer at 512:
+
+| `tools/compare_frames.py` (ideal = 1.00) | off | CodeFormer 512 | change |
+|---|---|---|---|
+| high-frequency detail, face / frame | 0.584 | 0.614 | **+0.030** |
+| sensor noise, face / frame | 1.500 | 1.500 | **+0.000** |
+| gradient at mask edge | 1.028 | 1.038 | +0.010 |
+
+**29.4ms buys +0.03 on the one metric it moves at all.** The face sits 0.42
+short of matching the frame's detail; restoration closes 7% of that gap and
+leaves noise and seam unchanged to three decimals. Both configurations produce
+the same verdict lines — "softer than the frame", "no seam detected", "motion
+blur consistent".
+
+That is what the geometry predicts. 86% of what CodeFormer produces is
+discarded at `compositor.py:515`, one warp after it is created, so the stage
+cannot move the metric much and does not.
+
+**What this does not cover, and should not be read as covering.** These are
+per-frame image statistics over 24 frames. They say nothing about **temporal**
+behaviour, and shimmer between frames is a large part of what reads as AI. They
+are also not a person looking at a face. Strong evidence, not proof.
+
+The noise row reads 1.50x in **both** configurations, so it is not caused by
+restoration. It is also not necessarily a defect: this clip was recorded in
+poor light, and the source face is fair-complexioned and well lit against a
+dark-complexioned, under-lit, visibly noisy target. That is the hardest case
+for colour matching and a plausible cause on its own. Re-measure on
+better-matched footage before treating grain matching as overshooting.
+
+### Restoration models, benchmarked in isolation (RTX 4090)
+
+Raw inference only — 100 runs, random input, no compositing:
+
+| model | crop | inference | file |
+|---|---|---|---|
+| codeformer | 512 | 29.4ms | 377 MB |
+| gpen_bfr_512 | 512 | 37.5ms | 284 MB |
+| **gpen_bfr_256** | **256** | **5.4ms** | **76 MB** |
+
+Note which way `gpen_bfr_512` falls: **slower** than CodeFormer at the same
+resolution. The saving is entirely **resolution**, not architecture. GPEN is
+not a lighter model; 256 is simply a quarter of the pixels.
+
+**`gpen_bfr_256` has never run in the pipeline.** It has not been composited,
+not judged on footage, and the ~27ms frame estimate for it is arithmetic on the
+numbers above rather than a measurement. Both GPEN files are on the volume at
+`/workspace/models/`.
+
+Why 256 is the interesting number rather than "off": restoring at 512 and
+warping down to a 128-192 aligned space is *supersampling*, and some of that
+cost buys antialiasing and stability rather than nothing. At 256 into a 192
+aligned space the supersampling margin survives, along with all the
+low-frequency work — tone, structure, artifact cleanup — that the downsample
+does not destroy. What is given up is the 512-to-256 octave, which is the one
+the final resize deletes anyway. It also has **no fidelity weight**: GPEN takes
+one input, so `enhancer_weight` would stop meaning anything and only
+`enhance_strength` would remain.
+
+### Session gotchas worth not rediscovering
+
+- **The first stream after a pipeline start pays model warm-up**, tens of
+  seconds, inside its own window. A 40s capture produced zero frames for this
+  reason and looked like a broken config. The sweep hides this with a discarded
+  warm-up pass; anything else driving the stream needs its own.
+- **Nothing can be copied off the pod.** `orchestrator.py push` is local->pod
+  only, port 9000 is the only opening, and the SSH proxy carries no SFTP — so a
+  45 KB montage of the comparison frames could not be brought home. An
+  `orchestrator.py pull` over the same WebSocket path `push` already uses is
+  what makes visual review routine instead of impossible.
+- **`orchestrator.py run` used `PATH=... <cmd>`**, which binds only to the
+  first word of a line, so the second half of any `&&` chain ran under
+  `/usr/bin/python`. Now `export PATH=... && <cmd>`.
 
 **Settled by this:**
 
@@ -162,9 +282,25 @@ a 4090 combined.** Options, cheapest first:
    CodeFormer at 256. Changes what the output looks like, so it is an A/B, not
    a swap.
 
-**Options 1 and 3 are now measurable rather than hypothetical.** `restore_size`
-and `restore_min_face` are config fields, on `set_realism`, the CLI, the env and
-the sweep. Two properties matter:
+**Option 3 is closed, and option 1 is the live one.** `codeformer.onnx`
+declares:
+
+    INPUT  input   [1, 3, 512, 512]   tensor(float)
+    INPUT  weight  []                 tensor(double)
+    OUTPUT output  [1, 3, 512, 512]
+
+Static and square. So `restore_size` cannot make this model restore at 256 —
+`Enhancer.crop_size` warns once and holds at 512, which is the declining path
+working as designed rather than a bug. **Restoring smaller needs a re-export,
+not a config change.** `restore_min_face` is therefore the only config-level
+lever against the 39.5ms, and it needs no new model because skipping is free.
+
+The general lesson is cheaper than the sweep that would have found it: **read a
+model's declared input shape before sweeping a shape lever.** Five seconds of
+`InferenceSession(...).get_inputs()` replaced a paid measurement run.
+
+`restore_size` and `restore_min_face` are config fields, on `set_realism`, the
+CLI, the env and the sweep. Two properties matter:
 
 - **`restore_size` is a request, and the model answers it.**
   `_spatial_size` reads the ONNX input's declared shape at load;
@@ -1024,7 +1160,7 @@ was before they existed; each is opted into and measured rather than assumed.
 |---|---|---|---|
 | Pre-allocated IOBinding | always on | No | `BoundRunner`; falls back silently |
 | CUDA graphs | `--cuda-graphs` / `CUDA_GRAPHS` | No | Static shapes only |
-| fp16 weights | `--fp16` / `FP16` | **Yes** | A/B on footage before shipping |
+| fp16 weights | `--fp16` / `FP16` | **Yes** | **No valid weights — see below.** A/B on footage before shipping |
 | TensorRT | `--trt` / `TRT` | Via fp16 | Per-architecture engine cache |
 
 `static_shapes` is the caller's declaration, not a guess. CUDA graph capture
@@ -1041,6 +1177,20 @@ pageable-memory penalty are, at four to six inferences a frame. It degrades
 silently to a plain `run` on a symbolic output shape or a build without the
 binding API: this is a performance path, and a warning per frame would cost more
 than it reports.
+
+**fp16 does not currently convert.** Attempted on the pod against
+`codeformer.onnx`: it runs, halves the file (359 MB -> 180 MB), and then fails
+its own `--check` load with
+
+    Type (tensor(float16)) of output arg (/fuse_convs_dict.32/Cast_output_0)
+    of node (/fuse_convs_dict.32/Cast) does not match expected type (tensor(float))
+
+A Cast the block list leaves in fp32 is being fed an output the conversion
+moved to fp16. The tool refused to ship it, which is the behaviour that matters
+— but it means **`FP16=true` has never actually run**, on either card. Both
+sessions where the `fp16` row read flat were reading a silent fallback to the
+fp32 weights, not a measurement of fp16. Fixing the block list is the work; do
+not read the existing `fp16` numbers as evidence either way.
 
 **fp16 is a copy, never a replacement.** `tools/convert_fp16.py` writes
 `<name>-fp16.onnx` beside the original with `keep_io_types=True`, so callers

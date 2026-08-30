@@ -30,7 +30,10 @@ build/
 nuitka-crash-report.xml
 
 # Sweep output — a measurement artefact, not source.
-sweep.json
+# Lever sweep output. A measurement of one pod session on one card, not a
+fact about the code — and the readings that matter get written into
+CLAUDE.md rather than left in a JSON nobody opens.
+sweep*.json
 
 # Measurement clips recorded by tools/record_clip.py. They are written to the
 # repo root because that is where they are wanted, which makes it easy to

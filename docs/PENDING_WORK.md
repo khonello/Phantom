@@ -583,62 +583,65 @@ before optimising. See 2b.5 for the one hardware move that remains.
 
 All levers default off, so a baseline run needs no flags.
 
-### 2b.0 Where this got to (2026-08-28)
+### 2b.0 Where this got to (2026-08-30, RTX 4090)
 
-**Measured. See docs/COMPILATION.md for the table.** Restoration is 75% of a
-146ms frame against a 50ms deadline, on an L4. Every model is on CUDA.
-`cuda_graphs` and `cuda_streams` measured flat and can be dropped. `fp16` and
-`trt` never ran.
+**The speed question is answered. The remaining questions are about looks.**
+See CLAUDE.md for the tables; the short version:
 
-**Since then, locally and for free:** the restoration crop size became a
-variable. `restore_size` and `restore_min_face` are config fields, reachable
-from `set_realism`, the CLI, the env and the sweep, and both default to current
-behaviour. This closed a gap that would have wasted the next session — the
-largest identified lever (restoration runs at a fixed 512 crop for a 101px
-face) had no knob at all, so the sweep could *bound* the problem with
-`no_restore` but could not test the fix. `Enhancer.crop_size` reads the ONNX
-input shape and honours a fixed export over the config, warning once, so a
-model that cannot restore at 256 reports that instead of throwing per frame.
+- Baseline **58.9ms/frame** against a 50ms deadline. Restoration is 39.5ms of
+  it, ~68%.
+- **Restoration off is 17.7ms and HOLDS** — the first `[HOLDS]` this project
+  has produced. `restore_min_face=200` reaches the same floor (18.0ms), which
+  is the shippable version of the same saving.
+- `aligned_size` does nothing. **hyperswap is slightly worse**, not better.
+- CodeFormer is **fixed at 512x512** in the graph, so `restore_size` cannot
+  shrink it — that needs a different model, not a config change.
+- **fp16 has never actually run.** The conversion fails its own load check on a
+  Cast node. Do not read any past `fp16` row as evidence; it was a silent
+  fallback to fp32 both times.
+- On footage, 29.4ms of CodeFormer moves the detail metric **+0.03** and leaves
+  noise and seam unchanged.
 
-**Continue from here, in this order:**
+**Do these next, in order:**
 
-0. **Read the restore-size runs first.** `restore_256` and `restore_128` say
-   whether facefusion's `codeformer.onnx` has dynamic spatial dims — the one
-   fact that decides whether the largest lever is a config change or a model
-   re-export. `restore_skip_small` is the same question asked the way a product
-   would ship it, and it should land on `no_restore`. Check the startup log for
-   `input is dynamic` or `input fixed at 512px`; a `restore_256` run whose
-   `restore` equals the baseline exactly means fixed.
+1. **Look at the frames.** 24 pairs each are on the volume at
+   `/workspace/dbg/on` and `/workspace/dbg/off`, plus `/workspace/montage.jpg`.
+   The statistics say restoration is near-invisible here; a person has not
+   checked, and temporal shimmer is not in those numbers at all. **This needs
+   an `orchestrator.py pull` first — nothing can currently be copied off the
+   pod.** That is the smallest unblocking task in this list.
 
-1. **Convert fp16 weights on the pod.** This is the only untested lever aimed
-   at the 110ms, and nothing else is close.
+2. **Wire `gpen_bfr_256` as a third enhancer backend.** 5.4ms against
+   CodeFormer's 29.4ms in isolation, already on the volume, already ONNX. The
+   `Enhancer.crop_size` machinery exists and would finally do something:
+   `_spatial_size` reads 256 from the graph and the compositor builds a 256
+   FFHQ crop with no change of its own. `_CodeFormerBackend` already handles a
+   model with no `weight` input, so the work is a model registry rather than a
+   new backend — mirror `swapper_models.py`, which already pairs a spec with a
+   look profile.
 
-   ```
-   python runpod/orchestrator.py run "python -m pip install onnx onnxconverter-common"
-   python runpod/orchestrator.py run "python tools/convert_fp16.py /workspace/models/codeformer.onnx"
-   ```
+3. **Then judge all three on footage**: off, gpen_bfr_256, codeformer_512.
+   Restoration is what decides whether output reads as a call or as AI, and
+   only one of those three has been looked at.
 
-   Then re-run the sweep. `-fp16.onnx` sits beside the original on the network
-   volume, so it survives the pod and this is paid once.
+4. **Re-measure noise on better-matched footage.** The 1.50x face/frame noise
+   reading appears with restoration on *and* off, and the clip pairs a fair,
+   well-lit source against a dark, under-lit, noisy target — the hardest case
+   for colour matching and a sufficient explanation on its own. Decide whether
+   grain matching is overshooting only after a fairer pairing.
 
-2. **Judge fp16 on footage, not just latency.** `--debug-frames` either side
-   and `tools/compare_frames.py --against`. Restoration is what decides whether
-   the output reads as a call or as AI.
+5. **Only then** the fp16 block list, the XSeg overlap and GPU compositing.
+   Compositing is ~10.3ms of the frame now, not 20ms, and it scaled with the
+   card — the earlier claim that it was a fixed CPU floor was wrong.
 
-3. **Get onto a 4090 for a second measurement.** An L4 ranks 34 against the
-   4090's 100 in `_GPU_PERF`. `resume` cannot move a pinned pod — this needs
-   `terminate` then `start`, which reschedules.
-
-4. **Reconsider restoration decimation.** Declined earlier as too risky to what
-   the operator sees. That was decided before knowing restoration is
-   three-quarters of the frame. The existing aligned-pixel EMA is the mechanism
-   that would hide it.
-
-5. **Only then** revisit the XSeg overlap and pipelining. Both are three-file
-   refactors whose payoff is bounded by the ~20ms that is *not* restoration.
+**Not worth re-running:** `restore_256`, `restore_128` (model is static 512),
+`cuda_graphs`, `cuda_streams`, `async_encode` (all measured flat), and `trt`
+(registering it dropped the models to CPU and correctly halted the stream).
+`tools/sweep_levers.py` records each exclusion with its reason.
 
 **Known-good invocation** (host and port change on every stop/resume — take
-them from what `push` prints):
+them from what `push` prints; on Git Bash set `MSYS_NO_PATHCONV=1` or every
+`/workspace/...` argument is rewritten into a Windows path):
 
 ```
 python runpod/orchestrator.py push clip_h264.mp4

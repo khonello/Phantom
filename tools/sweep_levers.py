@@ -50,30 +50,23 @@ from typing import Any, Dict, List, Optional
 _SWEEP: List[Any] = [
     ('baseline', {}),
 
-    # The measurement that bounds every other one. Restoration was 75% of the
-    # frame, so this is the floor: whatever is left is what no amount of work
-    # on restoration can remove. Take it before optimising anything.
+    # The measurement that bounds every other one. Restoration is ~68% of the
+    # frame on a 4090, so this is the floor: whatever is left is what no amount
+    # of work on restoration can remove. Take it before optimising anything.
+    # It has still never been taken — the two sessions that tried both ran
+    # against a pod whose `set_realism` did not yet accept `enhance`.
     ('no_restore', {'enhance': False}),
 
-    # Restoration is fixed at a 512x512 FFHQ crop while the face was 101px, so
-    # the working resolution below it is worth varying too — it is the one
-    # knob that already follows face size.
-    ('aligned_128', {'aligned_size': 128}),
-
-    # The restoration crop itself, which is where the 110ms goes. It is fixed
-    # at 512 while the face was 101px, so conv cost is roughly 4x what 256
-    # would be and 16x what 128 would be — spent on interpolated data. These
-    # only move if the loaded model accepts the shape; a fixed-input export
-    # makes `Enhancer.crop_size` warn once and hold at 512, and a run whose
-    # `restore` matches the baseline exactly is what that looks like here.
-    ('restore_256', {'restore_size': 256}),
-    ('restore_128', {'restore_size': 128}),
-
-    # The config-only version of the same question, needing no model change:
-    # skip restoration for a face below this size. Set past the face in the
-    # clip, so it skips throughout — this is `no_restore` reached by the lever
-    # a product would actually ship, and the two should agree.
+    # The config-only route to the same saving, and the one a product would
+    # actually ship: skip restoration for a face below this size, needing no
+    # model change. Set past the face in the clip so it skips throughout, which
+    # makes this `no_restore` reached by the shippable lever — the two should
+    # agree, and a gap between them is a bug in the threshold.
     ('restore_skip_small', {'restore_min_face': 200}),
+
+    # The working resolution below restoration — the one knob that already
+    # follows face size.
+    ('aligned_128', {'aligned_size': 128}),
 
     # hyperswap is 256px native against inswapper's 128, and its profile asks
     # for *less* restoration (enhance_strength 0.5 vs 0.7) because the swap it
@@ -81,14 +74,39 @@ _SWEEP: List[Any] = [
     # net win; it may also just be a bigger swap. Untested either way.
     ('hyperswap', {'swapper_model': 'hyperswap_1a_256'}),
     ('hyperswap+no_restore', {'swapper_model': 'hyperswap_1a_256', 'enhance': False}),
-
-    # The levers. fp16 is the only one aimed at restoration; the two that were
-    # measured flat are kept only so a change in that finding is visible.
-    ('fp16', {'fp16': True}),
-    ('cuda_graphs', {'cuda_graphs': True}),
-    ('async_encode', {'async_encode': True}),
-    ('trt+fp16', {'trt': True, 'fp16': True}),
 ]
+
+# Deliberately not swept, each for a reason established by measurement rather
+# than by argument. Kept here because a lever that was tried and abandoned is
+# worth more written down than silently missing — the next session should not
+# have to rediscover any of it.
+#
+#   restore_256 / restore_128   `codeformer.onnx` declares input
+#       {'restore_size': 256}   [1, 3, 512, 512] — static and square. The size
+#                               is fixed in the graph, so `Enhancer.crop_size`
+#                               warns once and holds at 512 and these rows read
+#                               identical to baseline. Restoring smaller needs a
+#                               re-export, not a config change. Check a model's
+#                               declared shape before sweeping a shape lever.
+#
+#   fp16                        No valid fp16 weights exist. The conversion
+#       {'fp16': True}          runs and halves the file (359 -> 180 MB), then
+#                               fails its own load check on a Cast node whose
+#                               output stayed float16 against a float input.
+#                               Without weights the flag falls back silently,
+#                               which is what made this row read flat twice.
+#
+#   trt+fp16                    Registering TensorRT broke cuDNN loading and
+#       {'trt': True, ...}      dropped the swapper and restorer to CPU; the
+#                               execution-provider check correctly halted the
+#                               stream. It is last in any list for that reason.
+#
+#   cuda_graphs / cuda_streams  Measured flat on an L4 (144.4 / 146.1ms against
+#                               a 146ms baseline). A model that spends its time
+#                               inside one large graph is not waiting on kernel
+#                               launch overhead.
+#
+#   async_encode                Measured flat. The encode is not the cost.
 
 # Reset between configurations, so one run cannot inherit another's state.
 # Every key any entry sets must appear here with its default.
@@ -286,8 +304,25 @@ async def _run(args: argparse.Namespace) -> int:
             await collect(1.0)
 
         if args.source:
-            await send('set_source', path=args.source)
+            reply = await send('set_source', path=args.source)
             await collect(3.0)
+            # Every configuration needs this one thing, so a refusal here is
+            # not a bad run, it is a bad sweep. Without this the whole list
+            # still executes — each stream refused for "Source path not set",
+            # each producing "no data" — and the minutes come off a paid pod
+            # before anyone reads the first line of output.
+            if reply and not reply.get('success', True):
+                print('')
+                print('ABORTED: the pipeline refused the source, so no '
+                      'configuration can run.')
+                print('  {}'.format(reply.get('error', 'no reason given')))
+                print('  The path is resolved on the *pipeline\'s* filesystem, '
+                      'not this machine\'s.')
+                print('  On Git Bash for Windows, note that an argument '
+                      'beginning with / is')
+                print('  rewritten into a Windows path unless '
+                      'MSYS_NO_PATHCONV=1 is set.')
+                return 2
 
         # Warm-up run, discarded. The first configuration otherwise pays model
         # load and first-inference cost inside its own measurement window, and
@@ -358,6 +393,19 @@ async def _run(args: argparse.Namespace) -> int:
         print('\nWrote {}'.format(args.out))
 
     _summarise(results)
+
+    # A sweep where nothing reported is a failed sweep, not an empty one.
+    # Returning 0 here meant a run that measured nothing at all looked exactly
+    # like a run that measured everything, which is how a wasted pod session
+    # gets noticed by reading rather than by exit code.
+    measured = sum(1 for run in results['runs'].values() if run.get('stages'))
+    if not measured:
+        print('\nFAILED: no configuration produced a report.')
+        return 1
+    if measured < len(results['runs']):
+        print('\nPARTIAL: {} of {} configurations reported.'.format(
+            measured, len(results['runs'])))
+        return 1
     return 0
 
 

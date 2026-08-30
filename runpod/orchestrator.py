@@ -1890,6 +1890,10 @@ def cmd_run(pod_id: str, command: str) -> bool:
     command there. Only port 9000 is exposed and the SSH proxy drops
     exec_command, so the interactive shell the deploy already uses is the way.
 
+    The venv goes on PATH with `export`, so it holds for every command in the
+    line rather than only the first — see the comment at the call below, which
+    records what the other form cost.
+
     Args:
         pod_id: Pod to run on
         command: Shell command, run from the repo with the venv on PATH
@@ -1914,9 +1918,19 @@ def cmd_run(pod_id: str, command: str) -> bool:
             pkey=_load_ssh_key(key_path), timeout=30,
         )
         shell = _open_shell(client)
+        # `export PATH=...;` rather than `PATH=... <command>`. The prefix form
+        # is a per-command environment assignment, so it binds only to the
+        # first word of the line: in `pip install onnx && python -c "import
+        # onnx"` the install went to the venv and the check ran under
+        # /usr/bin/python, which reported the package missing. Chasing that
+        # produced a second install that did land on the system interpreter and
+        # took its numpy to 2.x, which the venv inherits — breaking torch's
+        # numpy bridge on a pod that was mid-session. `export` applies to every
+        # command in the line, including both sides of a && and anything in a
+        # pipe.
         _shell_run(
             shell,
-            "cd {} && PATH={}:$PATH {}".format(
+            "cd {} && export PATH={}:$PATH && {}".format(
                 _REMOTE_PHANTOM_DIR, os.path.dirname(_REMOTE_VENV_PYTHON), command),
             "run",
         )
