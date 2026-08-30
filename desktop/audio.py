@@ -339,17 +339,41 @@ class RTTTracker:
         target_delay = median(rtt) + 1 * stddev(rtt)
 
     Uses median instead of mean for robustness against outlier spikes.
-    Clamped to [FLOOR_NS, CEILING_NS] and updated via exponential smoothing
-    every UPDATE_INTERVAL frames to prevent oscillation.
+    Clamped to [FLOOR_NS, CEILING_NS].
+
+    **This is the largest piece of latency the application itself controls**,
+    so the constants matter and each is a trade rather than a tuning knob:
+
+    - `INITIAL_DELAY_NS` is what every session pays before a single RTT sample
+      exists. It was 400ms, which meant even a nearby pod felt heavily delayed
+      for the first seconds and then improved — read by an operator as "it is
+      sluggish", since first impressions are formed exactly then. It now starts
+      low and adapts *up*, which costs some jitter in the first half-second
+      instead of costing latency in every session.
+
+    - Smoothing is **asymmetric**, which is standard for a playout buffer and
+      was not what this did. Growing late causes visible glitches, so the
+      target rises quickly; shrinking early causes underruns, so it falls
+      slowly. One symmetric alpha has to choose which failure to accept, and
+      0.2 chose to be slow in both directions.
+
+    - `FLOOR_NS` is added even on a perfect link. One frame interval is the
+      defensible floor — below that the buffer cannot absorb ordinary
+      frame-interval quantisation — and 20fps makes that 50ms.
+
+    None of this touches the network's own delay, which on a remote pod
+    dominates everything here. It only stops the client adding more than it
+    needs to.
     """
 
     WINDOW_SIZE: int = 60         # ~2 seconds at 30 fps (larger window for stability)
-    UPDATE_INTERVAL: int = 10     # recalculate every N samples
-    SMOOTHING_ALPHA: float = 0.2  # exponential smoothing factor (faster convergence)
-    FLOOR_NS: int = 80_000_000            # 80 ms
+    UPDATE_INTERVAL: int = 5      # recalculate every N samples
+    SMOOTHING_ALPHA_UP: float = 0.5    # rise fast: a late buffer glitches
+    SMOOTHING_ALPHA_DOWN: float = 0.1  # fall slow: an early buffer underruns
+    FLOOR_NS: int = 50_000_000            # 50 ms — one frame interval at 20fps
     CEILING_NS: int = 2_000_000_000      # 2 s  (accommodates RunPod RTT)
-    INITIAL_DELAY_NS: int = 400_000_000  # 400 ms (session warmup for remote GPU)
-    WARMUP_SAMPLES: int = 10            # min samples before adapting
+    INITIAL_DELAY_NS: int = 120_000_000  # 120 ms, then adapt from measurement
+    WARMUP_SAMPLES: int = 5             # min samples before adapting
 
     def __init__(self) -> None:
         self._samples: 'collections.deque[Any]' = collections.deque(maxlen=self.WINDOW_SIZE)
@@ -380,10 +404,14 @@ class RTTTracker:
         arr = np.array(self._samples, dtype=np.float64)
         raw = int(float(np.median(arr)) + 1.0 * float(np.std(arr)))
         clamped = max(self.FLOOR_NS, min(self.CEILING_NS, raw))
-        # Exponential smoothing prevents sudden jumps
+        # Asymmetric: rise fast, fall slow. Under-buffering shows as a visible
+        # glitch the moment the link hiccups, while over-buffering only costs
+        # latency — so the direction that risks a glitch is the one to take
+        # quickly, and the direction that only costs delay can be cautious.
+        alpha = (self.SMOOTHING_ALPHA_UP if clamped > self._target_delay_ns
+                 else self.SMOOTHING_ALPHA_DOWN)
         self._target_delay_ns = int(
-            self.SMOOTHING_ALPHA * clamped
-            + (1.0 - self.SMOOTHING_ALPHA) * self._target_delay_ns
+            alpha * clamped + (1.0 - alpha) * self._target_delay_ns
         )
 
     @property
@@ -494,30 +522,38 @@ class JitterBuffer:
     def sync_stats(self) -> Dict[str, Any]:
         """Return diagnostic statistics for debugging A/V sync.
 
+        `rtt_*` is **glass to glass** — capture on this machine to the
+        processed frame arriving back — so it already contains the uplink, the
+        pipeline and the downlink. Read it against the pipeline's own latency
+        report: whatever the two differ by is network and encode, and on a
+        remote pod that difference is usually most of the total.
+
         Returns a dict with:
-            target_delay_ms: current adaptive playout delay
+            target_delay_ms: current adaptive playout delay this client adds
             buffer_depth: number of frames waiting in the jitter buffer
             rtt_samples: number of RTT samples in the current window
-            rtt_mean_ms: mean RTT over the sliding window (0 if empty)
+            rtt_p50_ms: median RTT over the sliding window (0 if empty)
+            rtt_p95_ms: 95th-percentile RTT (0 if empty)
             rtt_stddev_ms: stddev of RTT over the sliding window (0 if empty)
         """
         samples = self._rtt._samples
         if len(samples) >= 2:
             arr = np.array(samples, dtype=np.float64)
-            mean_ms = float(np.mean(arr)) / 1_000_000
+            p50_ms = float(np.median(arr)) / 1_000_000
+            p95_ms = float(np.percentile(arr, 95)) / 1_000_000
             std_ms = float(np.std(arr)) / 1_000_000
         elif len(samples) == 1:
-            mean_ms = samples[0] / 1_000_000
+            p50_ms = p95_ms = samples[0] / 1_000_000
             std_ms = 0.0
         else:
-            mean_ms = 0.0
-            std_ms = 0.0
+            p50_ms = p95_ms = std_ms = 0.0
 
         return {
             'target_delay_ms': round(self._rtt.target_delay_ns / 1_000_000, 1),
             'buffer_depth': len(self._buf),
             'rtt_samples': len(samples),
-            'rtt_mean_ms': round(mean_ms, 1),
+            'rtt_p50_ms': round(p50_ms, 1),
+            'rtt_p95_ms': round(p95_ms, 1),
             'rtt_stddev_ms': round(std_ms, 1),
         }
 

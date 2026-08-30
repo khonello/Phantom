@@ -249,6 +249,7 @@ class Bridge(QObject):
     photoResultsChanged = Signal()
     faceChoiceChanged = Signal()
     guardReasonChanged = Signal(str)
+    latencyTextChanged = Signal(str)
     faceNoticeOpenChanged = Signal(bool)
     autoStopWarning = Signal(int)  # minutes remaining
     # Internal: carries a licence-server reply from a worker thread back to the
@@ -358,6 +359,16 @@ class Bridge(QObject):
         self._webcam_index = 0
         self._last_frame_time = 0.0
         self._last_capture_ts: int = 0  # perf_counter_ns from last received frame
+
+        # Uplink accounting. The desktop sends a JPEG per captured frame to the
+        # pod, and on an asymmetric home connection that direction is the one
+        # likely to saturate — which shows up as latency rather than as stutter,
+        # because frames queue in the OS send buffer while throughput still
+        # looks healthy. Counted here so the guess can be checked.
+        self._uplink_bytes: int = 0
+        self._uplink_frames: int = 0
+        self._uplink_mark: Tuple[float, int, int] = (time.perf_counter(), 0, 0)
+        self._latency_text: str = ''
         self._health_tick: int = 0  # counter for periodic health checks
 
         # Single webcam thread — always running
@@ -500,6 +511,23 @@ class Bridge(QObject):
         call, and a badge burnt into it would announce the failure to them.
         """
         return self._guard_reason
+
+    @Property(str, notify=latencyTextChanged)
+    def latencyText(self) -> str:
+        """Glass-to-glass latency and uplink rate, or empty before any sample.
+
+        Shown because "it feels sluggish" is not actionable and the numbers
+        that make it actionable already existed — the capture timestamp rides
+        with every frame and `RTTTracker` has computed the round trip all
+        along, without anything ever displaying it.
+
+        Read it against the pipeline's own per-stage report: the pipeline
+        measures only its own work, so the gap between the two is the network
+        plus encode. On a remote pod that gap is usually most of the total, and
+        seeing it is what stops the next hour going into GPU work that cannot
+        move it.
+        """
+        return self._latency_text
 
     @Property(bool, notify=faceNoticeOpenChanged)
     def faceNoticeOpen(self) -> bool:
@@ -2440,15 +2468,52 @@ class Bridge(QObject):
             except Exception:
                 pass
 
-        # 3. Log sync stats
+        # 3. Log sync stats, and publish them where someone can see them
         stats = self._jitter_buffer.sync_stats()
+        uplink_mbps, uplink_fps = self._uplink_rate()
+
         if stats['rtt_samples'] > 0:
             print(
                 f'[SYNC] delay={stats["target_delay_ms"]}ms '
-                f'rtt={stats["rtt_mean_ms"]}±{stats["rtt_stddev_ms"]}ms '
-                f'buf={stats["buffer_depth"]}',
+                f'rtt={stats["rtt_p50_ms"]}/{stats["rtt_p95_ms"]}ms '
+                f'buf={stats["buffer_depth"]} '
+                f'up={uplink_mbps:.1f}Mbps/{uplink_fps:.0f}fps',
                 file=sys.stderr,
             )
+            text = (
+                f'{stats["rtt_p50_ms"]:.0f}ms'
+                f' · p95 {stats["rtt_p95_ms"]:.0f}'
+                f' · buf {stats["buffer_depth"]}'
+                f' · up {uplink_mbps:.1f}Mbps'
+            )
+        else:
+            text = ''
+
+        if text != self._latency_text:
+            self._latency_text = text
+            self.latencyTextChanged.emit(text)
+
+    def _uplink_rate(self) -> Tuple[float, float]:
+        """Uplink megabits/sec and frames/sec since the previous call.
+
+        Measured as a delta between ticks rather than an average since start,
+        so a link that degrades mid-session shows it rather than being hidden
+        under the minutes that went well.
+
+        Returns:
+            (megabits per second, frames per second) — both 0.0 on the first
+            call or if no time has passed.
+        """
+        now = time.perf_counter()
+        then, bytes_then, frames_then = self._uplink_mark
+        self._uplink_mark = (now, self._uplink_bytes, self._uplink_frames)
+
+        elapsed = now - then
+        if elapsed <= 0:
+            return (0.0, 0.0)
+        mbps = ((self._uplink_bytes - bytes_then) * 8.0) / elapsed / 1_000_000
+        fps = (self._uplink_frames - frames_then) / elapsed
+        return (mbps, fps)
 
     # ── WebSocket push callbacks (called from background thread) ──────────────
 
@@ -2657,7 +2722,10 @@ class Bridge(QObject):
             if self._ws_push_active.is_set():
                 _, jpeg = cv2.imencode('.jpg', frame, encode_params)
                 header = struct.pack('<q', capture_ts)
-                self._client.send_frame(header + jpeg.tobytes())
+                payload = header + jpeg.tobytes()
+                self._uplink_bytes += len(payload)
+                self._uplink_frames += 1
+                self._client.send_frame(payload)
 
             # The local preview does get it, so a look can be auditioned before
             # any pipeline is running — which is when someone would be choosing

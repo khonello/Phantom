@@ -78,7 +78,13 @@ class WebSocketAPIServer:
         # Built locally then assigned: an annotation on another object's
         # attribute is not valid Python, and `frame_queue` is already typed on
         # ProcessingPipeline, so this needs no annotation of its own.
-        frame_queue: 'queue.Queue[Any]' = queue.Queue(maxsize=10)
+        # Two frames, not ten. This queue is pure latency: anything waiting in
+        # it is a frame the operator has already moved past. Ten deep is half a
+        # second at 20fps, which is felt as lag rather than seen as stutter.
+        # Two is enough to absorb ordinary arrival jitter without becoming a
+        # buffer, and the handler above now evicts the oldest rather than
+        # refusing the newest, so depth costs freshness and nothing else.
+        frame_queue: 'queue.Queue[Any]' = queue.Queue(maxsize=2)
         self.pipeline.frame_queue = frame_queue
 
         self._running = False
@@ -381,11 +387,26 @@ class WebSocketAPIServer:
             jpeg_bytes = data
 
         fq = getattr(self.pipeline, 'frame_queue', None)
-        if fq is not None:
+        if fq is None:
+            return
+
+        try:
+            fq.put_nowait((capture_ts, jpeg_bytes))
+        except queue.Full:
+            # Drop the **oldest** frame and take this one. The previous version
+            # dropped the arriving frame instead, which is backwards for a live
+            # call: under pressure it kept a backlog of stale frames and threw
+            # away the only current one, so the operator's face lagged by the
+            # whole depth of the queue and stayed there. What reaches the call
+            # should always be the most recent frame that could be processed.
+            try:
+                fq.get_nowait()
+            except queue.Empty:
+                pass
             try:
                 fq.put_nowait((capture_ts, jpeg_bytes))
             except queue.Full:
-                pass  # drop — pipeline is behind, keep latency low
+                pass
 
     # ── Push helpers ──────────────────────────────────────────────────────────
 

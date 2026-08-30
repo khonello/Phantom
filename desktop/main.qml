@@ -1315,6 +1315,40 @@ Window {
                         }
                     }
 
+                    // ── Latency readout (top-right) ───────────────────────
+                    //
+                    // Glass to glass: capture on this machine to the processed
+                    // frame arriving back, so it already includes the uplink,
+                    // the pod and the downlink. The pipeline's own report
+                    // measures only its own work — the gap between the two is
+                    // network and encode, and on a remote pod that gap is
+                    // usually most of it.
+                    //
+                    // Here rather than on the frame, for the same reason as
+                    // every other badge: the frame reaches everyone on the
+                    // call.
+                    Rectangle {
+                        anchors {
+                            top: parent.top; right: parent.right
+                            topMargin: 12; rightMargin: 12
+                        }
+                        visible: bridge.pipelineRunning && bridge.latencyText !== ""
+                        color: "#cc0b1220"
+                        radius: 6
+                        width: latencyLabel.implicitWidth + 18
+                        height: 22
+
+                        Text {
+                            id: latencyLabel
+                            anchors.centerIn: parent
+                            text: bridge.latencyText
+                            color: "#93c5fd"
+                            font.pixelSize: 10
+                            font.letterSpacing: 1.2
+                            font.weight: Font.Medium
+                        }
+                    }
+
                     // ── Detection status badge (bottom-center) ────────────
                     Rectangle {
                         anchors {

@@ -172,6 +172,74 @@ the final resize deletes anyway. It also has **no fidelity weight**: GPEN takes
 one input, so `enhancer_weight` would stop meaning anything and only
 `enhance_strength` would remain.
 
+### The bottleneck has moved to the transport
+
+With restoration at 256 the frame is ~27ms against a 50ms deadline, and the
+reported symptom changed shape with it: **the stutter went away and the lag did
+not**. That is the diagnosis. Stutter is throughput — frames arriving faster
+than they can be processed. Lag is latency — and halving the compute did not
+move it, so compute was not what was holding it.
+
+The chain, end to end, with what each part costs:
+
+    webcam capture
+      -> JPEG encode (desktop)
+      -> UPLINK          ~30 KB/frame, ~4.8 Mbps at 640x360 q70 @20fps
+      -> inbound queue   was 10 deep = 500ms of pure latency
+      -> process         ~27ms                    <- no longer the problem
+      -> JPEG encode (pod)
+      -> DOWNLINK
+      -> jitter buffer   started at 400ms, adapted slowly
+      -> decode -> display
+
+**None of this was visible.** `RTTTracker` computed true glass-to-glass latency
+from a capture timestamp that rides with every frame, and had done all along —
+nothing displayed it, logged it to the UI, or reported it. "It feels sluggish"
+could not become "RTT is 210ms, the buffer adds 60, the pipeline uses 27".
+
+Fixed, in order of how much they were costing:
+
+- **The readout exists.** `Bridge.latencyText` publishes RTT p50/p95, buffer
+  depth and uplink Mbps every two seconds, shown top-right in the viewport
+  beside the other badges — never drawn on the frame, for the usual reason.
+  Read it against the pipeline's own per-stage report: **the difference between
+  the two is network and encode**, and on a remote pod that is most of it.
+- **The inbound queue dropped the wrong frame.** On a full queue the handler
+  refused the *arriving* frame and kept the backlog, so under pressure the
+  pipeline chewed through stale frames while discarding the only current one —
+  the face lagged by the whole queue depth and stayed there. It now evicts the
+  oldest. Depth went 10 -> 2: anything waiting there is a frame the operator
+  has already moved past.
+- **The playout buffer started at 400ms** and converged slowly with one
+  symmetric alpha, so even a nearby pod felt heavily delayed for the first
+  seconds — exactly when an impression forms. Now 120ms initial, a 50ms floor
+  (one frame interval at 20fps rather than 80ms), and **asymmetric** smoothing:
+  rise fast because a late buffer glitches visibly, fall slow because an early
+  one underruns. One alpha has to be slow in a direction; 0.2 was slow in both.
+
+**What is still only a hypothesis: the uplink.** The desktop sends a JPEG per
+captured frame, ~4.8 Mbps at the `optimal` preset, and receives about the same
+back. Home connections are usually asymmetric with far less upstream. A
+saturated uplink queues frames in the OS send buffer, which reads as **latency
+while throughput still looks healthy** — the exact reported symptom. The
+readout now carries the number; the cheap test is to switch to `fast`
+(480x270 q60, ~1.4 Mbps) and see whether latency falls by far more than the
+~10ms of compute that saves. If it does, the answer is encoding, not the GPU.
+
+**And the term nothing in this repo can fix: distance.** `RUNPOD_DATACENTERS`
+is `EU-RO-1` — Romania — against an operator in West Africa. That is a physical
+floor of roughly 80-120ms round trip at best and typically worse; someone had
+already met it, since the RTT ceiling's comment reads "accommodates RunPod
+RTT". Moving to a western-European datacenter is the only lever, and network
+volumes are datacenter-local, so it costs a second volume and a re-seed of the
+models. Worth measuring the readout first — if RTT is 200ms and the buffer adds
+60, a datacenter move is the largest remaining item by a wide margin.
+
+**The standing conclusion: stop optimising the pipeline for latency.** There is
+~23ms of headroom under the deadline and the felt delay is dominated by terms
+the GPU does not touch. Further compute work should be justified by the readout
+showing compute as the largest term, which it currently is not.
+
 ### Session gotchas worth not rediscovering
 
 - **The first stream after a pipeline start pays model warm-up**, tens of
