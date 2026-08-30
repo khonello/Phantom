@@ -32,6 +32,7 @@ from pipeline.api.schema import (
 from pipeline.processing.pipeline import ProcessingPipeline
 from pipeline.services import guards
 from pipeline.services import swapper_models
+from pipeline.services import enhancer_models
 from pipeline.services.database import SourceReview
 from pipeline.services.templates import TemplateLibrary
 from pipeline.logging import emit_status, emit_error, emit_warning
@@ -683,7 +684,7 @@ _REALISM_FIELDS: Dict[str, Any] = {
     # clip is the only way to know which is actually better. Changing it also
     # applies that model's realism profile, via the pipeline's config listener.
     'swapper_model': lambda v: str(v) if str(v) in swapper_models.names() else None,
-    'enhancer_model': lambda v: str(v) if str(v) in ('codeformer', 'gfpgan') else None,
+    'enhancer_model': lambda v: str(v) if str(v) in enhancer_models.names() else None,
     'enhancer_weight': lambda v: min(1.0, max(0.0, float(v))),
     'enhance_strength': lambda v: min(1.0, max(0.0, float(v))),
     'aligned_size': lambda v: min(512, max(128, int(v))),

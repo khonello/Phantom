@@ -1,13 +1,23 @@
 """
 Face restoration service for the Phantom pipeline.
 
-Two backends, selected by `config.enhancer_model`:
+Models come from `enhancer_models.py`; `config.enhancer_model` names one.
+Two *backends* run them:
 
-- **codeformer** (default) — ONNX, runs on the existing onnxruntime CUDA
-  session. Exposes a fidelity weight, which is the knob that matters here:
-  it trades restoration strength against staying faithful to the input.
+- **codeformer** — the ONNX path, on the onnxruntime session the swapper
+  already requires. Despite the name it runs **any** single-input ONNX
+  restorer, GPEN included, because it introspects the graph rather than
+  assuming it: the fidelity weight is wired only if the model declares one,
+  and the crop size is read from the declared input shape.
 - **gfpgan** — the previous backend, kept so the two can be compared on real
   footage. Requires torch + the gfpgan package; degrades gracefully if absent.
+
+The default is **gpen_bfr_256**, and the reason is measured. On an RTX 4090
+CodeFormer costs 29.4ms against GPEN-256's 5.4ms, and on a 101px webcam face
+that 29.4ms buys **+0.03** on the face/frame detail ratio — because restoration
+runs on a fixed 512 crop that is warped straight back down into a 128-192
+aligned space, discarding ~86% of what it produced. Note that `gpen_bfr_512` is
+*slower* than CodeFormer, so the win is the crop size and not the architecture.
 
 Both expect an **FFHQ-framed 512x512 crop**, not an arcface crop. They were
 trained on FFHQ alignment and have strong priors about where the eyes and
@@ -30,6 +40,7 @@ import numpy as np
 from pipeline.config import FaceSwapConfig
 from pipeline.types import Frame
 from pipeline.logging import emit_status, emit_warning
+from pipeline.services import enhancer_models
 
 # Both backends are trained on FFHQ-aligned 512x512 crops. This is the default
 # and the size the FFHQ template is defined against; `config.restore_size` can
@@ -40,13 +51,6 @@ CROP_SIZE = 512
 # Floor on the FFHQ crop. Below this the model has less to work with than the
 # 128px swap it is restoring, so there is nothing left for it to do.
 MIN_CROP_SIZE = 128
-
-_CODEFORMER_MODEL_NAME = 'codeformer.onnx'
-_CODEFORMER_MODEL_URL = (
-    'https://github.com/facefusion/facefusion-assets/releases/download/'
-    'models-3.0.0/codeformer.onnx'
-)
-_GFPGAN_MODEL_NAME = 'GFPGANv1.4.pth'
 
 
 def _spatial_size(shape: Optional[Any]) -> Optional[int]:
@@ -97,8 +101,13 @@ class _CodeFormerBackend:
     The model takes an FFHQ-aligned 512x512 crop plus a fidelity weight.
     """
 
-    def __init__(self, config: FaceSwapConfig) -> None:
+    def __init__(self, config: FaceSwapConfig, spec: Any = None) -> None:
         self.config = config
+        # Which weights to load. Defaulted rather than required so the existing
+        # construction sites keep working and a caller that does not care about
+        # the registry still gets the configured model.
+        self.spec = spec if spec is not None else enhancer_models.resolve(
+            config.enhancer_model or enhancer_models.DEFAULT_ENHANCER_MODEL)
         self._session: Optional[Any] = None
         self._runner: Optional[Any] = None
         self._image_input = 'input'
@@ -111,10 +120,10 @@ class _CodeFormerBackend:
 
     def load(self) -> bool:
         """Load the session, downloading the model if needed."""
-        model_path = _resolve_model_path(_CODEFORMER_MODEL_NAME)
+        model_path = _resolve_model_path(self.spec.filename)
 
         if not os.path.isfile(model_path):
-            if not self._download(model_path):
+            if not self._download(model_path, self.spec.url):
                 return False
 
         try:
@@ -125,10 +134,10 @@ class _CodeFormerBackend:
             # has not seen before. That is what makes CUDA graph capture legal
             # here and not on the detector.
             self._session = create_session(
-                self.config, model_path, 'codeformer',
+                self.config, model_path, self.spec.name,
                 static_shapes=True, bound=True,
             )
-            self._runner = BoundRunner(self._session, 'codeformer')
+            self._runner = BoundRunner(self._session, self.spec.name)
 
             # Introspect rather than assume. The image input is whichever one
             # is not the scalar fidelity weight.
@@ -140,7 +149,7 @@ class _CodeFormerBackend:
                     self.native_size = _spatial_size(getattr(model_input, 'shape', None))
 
             emit_status(
-                'CodeFormer restoration available'
+                '{} restoration available'.format(self.spec.name)
                 + ('' if self._weight_input else ' (fixed fidelity — no weight input)')
                 + (
                     ' — input is dynamic, restore_size applies'
@@ -161,21 +170,22 @@ class _CodeFormerBackend:
             return False
 
     @staticmethod
-    def _download(model_path: str) -> bool:
-        """Download the CodeFormer model. Returns True if it is now present."""
-        emit_status(f'Downloading {_CODEFORMER_MODEL_NAME}...', scope='ENHANCER')
+    def _download(model_path: str, url: str) -> bool:
+        """Download a restoration model. Returns True if it is now present."""
+        name = os.path.basename(model_path)
+        emit_status(f'Downloading {name}...', scope='ENHANCER')
         try:
             from pipeline.io.ffmpeg import conditional_download
 
-            conditional_download(os.path.dirname(model_path), [_CODEFORMER_MODEL_URL])
+            conditional_download(os.path.dirname(model_path), [url])
             if os.path.isfile(model_path):
-                emit_status('CodeFormer model downloaded', scope='ENHANCER')
+                emit_status(f'{name} downloaded', scope='ENHANCER')
                 return True
         except Exception as e:
-            emit_warning(f'CodeFormer download failed: {type(e).__name__}: {e}', scope='ENHANCER')
+            emit_warning(f'{name} download failed: {type(e).__name__}: {e}', scope='ENHANCER')
 
         emit_warning(
-            f'Restoration disabled. To enable it, download {_CODEFORMER_MODEL_URL} '
+            f'Restoration disabled. To enable it, download {url} '
             f'and place it at: {model_path}',
             scope='ENHANCER',
         )
@@ -225,8 +235,9 @@ class _GFPGANBackend:
     usable strength control of its own — `Enhancer` blends the result instead.
     """
 
-    def __init__(self, config: FaceSwapConfig) -> None:
+    def __init__(self, config: FaceSwapConfig, spec: Any = None) -> None:
         self.config = config
+        self.spec = spec if spec is not None else enhancer_models.resolve('gfpgan')
         self._enhancer: Optional[Any] = None
         # `has_aligned=True` hands the crop straight to a network built for
         # FFHQ 512. There is no smaller path through it.
@@ -234,7 +245,7 @@ class _GFPGANBackend:
 
     def load(self) -> bool:
         """Load GFPGAN. Returns False if the model or package is missing."""
-        model_path = _resolve_model_path(_GFPGAN_MODEL_NAME)
+        model_path = _resolve_model_path(self.spec.filename)
 
         if not os.path.exists(model_path):
             emit_warning(
@@ -399,21 +410,31 @@ class Enhancer:
         so a missing model file degrades to "restoration still works" rather
         than "restoration is off".
         """
-        requested = (self.config.enhancer_model or 'codeformer').lower()
-        order = ['codeformer', 'gfpgan']
-        if requested in order:
-            order.remove(requested)
-        order.insert(0, requested)
+        requested = (self.config.enhancer_model
+                     or enhancer_models.DEFAULT_ENHANCER_MODEL).lower()
+        if requested not in enhancer_models.ENHANCER_MODELS:
+            emit_warning(
+                f"Unknown enhancer_model '{requested}' — using "
+                f"'{enhancer_models.DEFAULT_ENHANCER_MODEL}'",
+                scope='ENHANCER',
+            )
+            requested = enhancer_models.DEFAULT_ENHANCER_MODEL
+
+        # Requested first, then the default, then anything else registered. A
+        # missing weight file degrades to "restoration still works" rather than
+        # "restoration is off", which is the same reason the two-backend
+        # version fell back — only now the ladder is the registry rather than a
+        # pair of names.
+        order = [requested, enhancer_models.DEFAULT_ENHANCER_MODEL]
+        order += [n for n in enhancer_models.names() if n not in order]
 
         for name in order:
+            spec = enhancer_models.ENHANCER_MODELS[name]
             backend: Any
-            if name == 'gfpgan':
-                backend = _GFPGANBackend(self.config)
-            elif name == 'codeformer':
-                backend = _CodeFormerBackend(self.config)
+            if spec.backend == 'gfpgan':
+                backend = _GFPGANBackend(self.config, spec)
             else:
-                emit_warning(f"Unknown enhancer_model '{name}'", scope='ENHANCER')
-                continue
+                backend = _CodeFormerBackend(self.config, spec)
 
             if backend.load():
                 if name != requested:

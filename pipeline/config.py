@@ -136,9 +136,18 @@ class FaceSwapConfig:
     swapper_model: str = 'inswapper_128'
 
     # Realism / compositing
-    enhancer_model: str = 'codeformer'  # 'codeformer' (ONNX) or 'gfpgan' (torch)
+    # Restoration model. See pipeline/services/enhancer_models.py — the
+    # registry owns the crop size, whether the model has a fidelity weight,
+    # and where to fetch it. Default is the 256-crop model: CodeFormer's extra
+    # 24ms buys +0.03 of face/frame detail on a 101px webcam face, because the
+    # 512 result is warped straight back down into a 128-192 aligned space.
+    enhancer_model: str = 'gpen_bfr_256'
     enhancer_weight: float = 0.7    # CodeFormer fidelity: 0 = heaviest restoration
-                                    # and most hallucination, 1 = closest to input
+                                    # and most hallucination, 1 = closest to input.
+                                    # Read only by models that declare a weight
+                                    # input — GPEN has none, so it does nothing
+                                    # there and `enhance_strength` is the only
+                                    # remaining control.
     enhance_strength: float = 0.7   # how much of the restored face to keep
     aligned_size: int = 256         # compositing ceiling (128-512), from the preset
     # Compositing floor, from the model profile. Compositing below a model's

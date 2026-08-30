@@ -30,6 +30,7 @@ from pipeline.events import BUS
 from pipeline.logging import emit_status
 from pipeline.api.schema import PRESETS
 from pipeline.services import swapper_models
+from pipeline.services import enhancer_models
 
 warnings.filterwarnings('ignore', category=FutureWarning, module='insightface')
 warnings.filterwarnings('ignore', category=UserWarning, module='torchvision')
@@ -123,7 +124,7 @@ def parse_args() -> None:
                         choices=list(swapper_models.names()),
                         default=os.environ.get('SWAPPER_MODEL'))
     program.add_argument('--enhancer-model', help='face restoration backend',
-                        dest='enhancer_model', choices=['codeformer', 'gfpgan'],
+                        dest='enhancer_model', choices=list(enhancer_models.names()),
                         default=os.environ.get('ENHANCER_MODEL'))
     program.add_argument('--enhancer-weight', help='CodeFormer fidelity (0=most restoration, 1=closest to input)',
                         dest='enhancer_weight', type=float, default=_env_float('ENHANCER_WEIGHT'))

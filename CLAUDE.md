@@ -672,37 +672,83 @@ release under motion and reset on face loss or source change. Both are bypassed
 when `many_faces` is set, since per-frame detection order is not stable.
 
 ### Face restoration
-Two backends, chosen by `config.enhancer_model`:
+`pipeline/services/enhancer_models.py` is a registry of restoration models, the
+sibling of `swapper_models.py` and for the same reason: the model owns facts
+about itself — crop size, whether it has a fidelity weight, where to fetch it —
+and hard-coding one model's answers is what made a second model impossible to
+add. Select with `--enhancer-model`, `ENHANCER_MODEL`, or `set_realism`.
 
-- **`codeformer`** (default) — ONNX, runs on the onnxruntime session already
-  required by the swapper, so it adds no dependency. Model downloads on first
-  use. Exposes a **fidelity weight** (`enhancer_weight`): `0.0` restores hardest
-  and hallucinates most, `1.0` stays closest to the input. This is the knob that
-  matters for believability — GFPGAN v1.4 restores toward a beautified, poreless
-  look with no way to dial it back, and that plastic skin is the strongest "this
-  is AI" signal on a call.
-- **`gfpgan`** — the previous backend, kept so the two can be compared on real
-  footage. Needs torch + the `gfpgan` package. If the configured backend cannot
-  load, the other is tried before restoration is disabled.
+| | crop | inference (4090) | file | fidelity weight |
+|---|---|---|---|---|
+| **`gpen_bfr_256`** (default) | **256** | **5.4ms** | 76 MB | no |
+| `codeformer` | 512 | 29.4ms | 377 MB | **yes** |
+| `gpen_bfr_512` | 512 | 37.5ms | 284 MB | no |
+| `gfpgan` | 512 | — | 340 MB | no |
 
-Both are trained on **FFHQ-framed 512x512 crops** and rely on features sitting
+**Why the default is the small one.** Restoration was 68% of a 58.9ms frame and
+is the one stage whose cost ignores how big the face is — it runs on a fixed
+crop either way. On a 101px webcam face, CodeFormer's 29.4ms buys **+0.03** on
+the face/frame detail ratio and leaves noise and seam unchanged to three
+decimals, because the 512 result is warped straight back down into a 128-192
+aligned space at `compositor.py:515`, discarding ~86% of it one operation after
+it was made.
+
+Note which way `gpen_bfr_512` falls: **slower than CodeFormer at the same
+resolution**. The saving is entirely the crop, not the architecture — GPEN is
+not a lighter model. And 256 rather than 128 or off because restoring above the
+aligned size is *supersampling*: at 256 into a 192 aligned space that margin
+survives, along with all the low-frequency work — tone, structure, artefact
+cleanup — that a downsample does not destroy. What is given up is the
+512-to-256 octave, which the final resize into a ~101px face deletes anyway.
+
+**This was adopted on speed evidence and has not been judged on footage.**
+`gpen_bfr_256` has never been composited or looked at. The measured comparison
+was restoration-off against CodeFormer-512 only.
+
+**What changes with a model without a fidelity weight.** `enhancer_weight` is
+CodeFormer's input and nothing else's, so under GPEN it means nothing and
+`enhance_strength` — the compositor-side blend — is the only remaining control.
+That is a real loss of an axis: CLAUDE.md called the fidelity weight the knob
+believability lives on, and it is why CodeFormer stays registered rather than
+being deleted.
+
+Two backends run these. The **`codeformer` backend** is the ONNX path and
+despite its name runs any single-input ONNX restorer, because it introspects
+the graph rather than assuming it — the weight input is wired only if declared,
+and the crop size is read from the declared input shape. The **`gfpgan`
+backend** needs torch plus the `gfpgan` package. If the selected model cannot
+load, the registry is walked — requested, then default, then the rest — so a
+missing weight file degrades to "restoration still works" rather than "off".
+
+All of them are trained on **FFHQ-framed crops** and rely on features sitting
 where FFHQ puts them, so `FaceCompositor` warps into FFHQ space around the
 restore call rather than handing them the swapper's tighter arcface crop. FFHQ
-framing is ~28% wider than arcface, so the crop given to the restorer is the real
-frame in FFHQ framing with the swapped face composited over it — otherwise the
-edges would be empty. Only what the swap covers survives the mask, so the real
-face at the edges never reaches the output.
+framing is ~28% wider than arcface, so the crop given to the restorer is the
+real frame in FFHQ framing with the swapped face composited over it — otherwise
+the edges would be empty. Only what the swap covers survives the mask, so the
+real face at the edges never reaches the output.
 
 Geometry uses a closed-form Umeyama similarity fit (`estimate_similarity`), not
 `cv2.estimateAffinePartial2D` — the OpenCV estimators are randomized and anything
 that varies frame to frame feeds straight back into shimmer.
 
+**Restoration is not tied to the swapper, deliberately.** It would be easy to
+put `enhance: False` in hyperswap's look profile and call the pairing settled —
+a 256-native swap needs less repair than a 128 one, which is the belief the
+profile's `enhance_strength` 0.5 already encodes. Two reasons not to. It is an
+axis, not a switch, which is the same argument that removed the ENHANCE toggle
+from the header; and it is unmeasured — hyperswap's output has never been
+looked at with restoration or without. Encoding an untested belief as a hard
+rule also removes the ability to test it, since three of the four cells in
+{inswapper, hyperswap} x {restore, don't} would become unreachable. The graded
+version already exists in `enhance_strength`; leave the binary to the footage.
+
 ### Realism knobs (`FaceSwapConfig`)
 | Field | Default | Effect |
 |-------|---------|--------|
 | `enhance` | `True` | Face restoration on/off |
-| `enhancer_model` | `codeformer` | Restoration backend (`codeformer` or `gfpgan`) |
-| `enhancer_weight` | `0.7` | CodeFormer fidelity: `0`=most restoration, `1`=closest to input |
+| `enhancer_model` | `gpen_bfr_256` | Restoration model — see `enhancer_models.py`. The registry owns crop size and fidelity support |
+| `enhancer_weight` | `0.7` | CodeFormer fidelity: `0`=most restoration, `1`=closest to input. **Inert on models without a weight input**, which is every model but `codeformer` |
 | `enhance_strength` | `0.7` | How much of the restored face to keep. Full strength reads as AI; partial keeps believable imperfection |
 | `restore_size` | `512` | Edge of the FFHQ crop fed to the restorer. A model with fixed spatial dims overrides it and says so once — see below |
 | `restore_min_face` | `0` | Skip restoration below this face size (px, shorter side). `0` never skips |
