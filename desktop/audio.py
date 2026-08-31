@@ -610,6 +610,71 @@ class AudioPlayback:
         self._running = False
         # Leftover samples from a partially consumed chunk
         self._leftover: Optional[npt.NDArray[Any]] = None
+        # Set when playback has no cursor yet — at start, and after a
+        # correction large enough that continuing would be meaningless.
+        self._needs_seek = True
+        # Diagnosis. Audio faults are audible but invisible: "it sounds broken"
+        # could be an underrun, a trim, or the device itself, and until these
+        # were counted there was no way to tell which.
+        self._underruns = 0
+        self._trims = 0
+        self._resyncs = 0
+
+    # How far the buffer may run ahead of the target delay before the oldest
+    # audio is dropped to catch up. Generous on purpose: a trim is audible, so
+    # it should answer real drift rather than ordinary scheduling jitter.
+    _TRIM_TOLERANCE_NS = 250_000_000
+
+    # Past this the cursor is meaningless — the stream was paused, the device
+    # stalled, or capture stopped — and continuing would play something very
+    # old. Start again from the correct point instead.
+    _RESYNC_NS = 1_500_000_000
+
+    def _buffered_ns(self) -> int:
+        """Duration of audio currently queued, including any leftover."""
+        total = 0
+        if self._leftover is not None:
+            total += self._leftover.shape[0]
+        for _ts, pcm in self._ring.snapshot():
+            total += pcm.shape[0]
+        return int(total / self.sample_rate * 1_000_000_000)
+
+    def _seek(self, playback_point: int) -> None:
+        """
+        Drop audio older than `playback_point`, seeking *into* the chunk that
+        straddles it.
+
+        The seek within the chunk is the part that was missing. Chunks are
+        ~23ms, and a straddling chunk used to be played from its first sample
+        regardless of where the playback point fell inside it — so the position
+        quantised to a chunk boundary and moved by a whole chunk whenever the
+        boundary drifted past. That is what a listener hears as a stutter with
+        pieces missing.
+        """
+        self._leftover = None
+
+        while True:
+            chunk = self._ring.peek_oldest()
+            if chunk is None:
+                return
+
+            chunk_ts, pcm = chunk
+            chunk_dur = int(pcm.shape[0] / self.sample_rate * 1_000_000_000)
+
+            if chunk_ts + chunk_dur <= playback_point:
+                self._ring.popleft()          # entirely in the past
+                continue
+
+            if chunk_ts >= playback_point:
+                return                        # future audio; start at its head
+
+            self._ring.popleft()
+            offset = int((playback_point - chunk_ts)
+                         / 1_000_000_000 * self.sample_rate)
+            offset = max(0, min(pcm.shape[0], offset))
+            if offset < pcm.shape[0]:
+                self._leftover = pcm[offset:]
+            return
 
     def _output_callback(
         self,
@@ -620,9 +685,18 @@ class AudioPlayback:
     ) -> None:
         """sounddevice OutputStream callback — runs on a dedicated audio thread.
 
-        Computes the current playback point, discards stale audio, and fills
-        *outdata* with the PCM samples that correspond to the video being
-        displayed right now. Any remaining space is zero-filled (silence).
+        Fills *outdata* from a **continuous cursor**: leftover first, then whole
+        chunks in order. It does not re-derive its read position from the clock
+        on every block, which is what it used to do — `now - target_delay`,
+        against a `target_delay` that the video RTT tracker moves continuously.
+        Every move of that estimate discarded a chunk or inserted a block of
+        silence, and audio has no tolerance for either: video can drop a frame
+        unnoticed, a 23ms hole in speech is a click.
+
+        Latency is corrected instead by *depth*, rarely and outside the fill:
+        if more audio is queued than the target delay wants, the oldest is
+        trimmed. Otherwise playback simply continues, which is what makes it
+        sound continuous.
         """
         if status:
             import sys
@@ -630,54 +704,67 @@ class AudioPlayback:
 
         now = time.perf_counter_ns()
         target = self._jitter.target_delay_ns
-        # Compensate for audio clock drift: if audio hardware runs fast,
-        # shift the playback point forward so we read newer chunks.
         drift_ns = 0
         if self._audio_capture is not None:
             drift_ns = self._audio_capture.drift_ns
         playback_point = now - target + drift_ns
 
+        # Establish or re-establish the cursor. After this the fill below is
+        # pure sequential reading.
+        if self._needs_seek:
+            self._seek(playback_point)
+            self._needs_seek = False
+        else:
+            oldest = self._ring.peek_oldest()
+            if (self._leftover is None and oldest is not None
+                    and playback_point - oldest[0] > self._RESYNC_NS):
+                self._resyncs += 1
+                self._seek(playback_point)
+            elif self._buffered_ns() > target + self._TRIM_TOLERANCE_NS:
+                # Drifted behind: capture has outrun playback. Trim rather than
+                # let the delay grow without bound.
+                self._trims += 1
+                self._seek(playback_point)
+
         written = 0
 
-        # 1. Drain leftover from a previous partially-consumed chunk
         if self._leftover is not None and self._leftover.shape[0] > 0:
             n = min(self._leftover.shape[0], frames - written)
             outdata[written:written + n] = self._leftover[:n]
             written += n
-            if n < self._leftover.shape[0]:
-                self._leftover = self._leftover[n:]
-            else:
-                self._leftover = None
+            self._leftover = (self._leftover[n:]
+                              if n < self._leftover.shape[0] else None)
 
-        # 2. Consume chunks from the ring buffer
         while written < frames:
-            chunk = self._ring.peek_oldest()
+            chunk = self._ring.popleft()
             if chunk is None:
                 break
-
-            chunk_ts, pcm = chunk
-            chunk_dur_ns = int(pcm.shape[0] / self.sample_rate * 1_000_000_000)
-
-            # Chunk ended before playback point — too old, discard
-            if chunk_ts + chunk_dur_ns < playback_point:
-                self._ring.popleft()
-                continue
-
-            # Chunk starts after playback point — too early, wait
-            if chunk_ts > playback_point:
-                break
-
-            # Chunk overlaps playback point — consume it
-            self._ring.popleft()
+            _chunk_ts, pcm = chunk
             n = min(pcm.shape[0], frames - written)
             outdata[written:written + n] = pcm[:n]
             written += n
             if n < pcm.shape[0]:
                 self._leftover = pcm[n:]
 
-        # 3. Fill remainder with silence
         if written < frames:
+            # Underrun: nothing captured yet for this block. Silence is the
+            # only option, but the next block continues from here rather than
+            # from a recomputed clock position, so one gap stays one gap.
+            self._underruns += 1
             outdata[written:] = 0.0
+
+    def stats(self) -> Dict[str, Any]:
+        """Playback health, for the periodic sync log.
+
+        Returns:
+            buffered_ms, and counts of underruns, trims and resyncs since start
+        """
+        return {
+            'buffered_ms': round(self._buffered_ns() / 1_000_000, 1),
+            'underruns': self._underruns,
+            'trims': self._trims,
+            'resyncs': self._resyncs,
+        }
 
     def start(self) -> None:
         """Open the audio output stream and begin playback."""
@@ -695,6 +782,7 @@ class AudioPlayback:
             return
 
         self._leftover = None
+        self._needs_seek = True
 
         try:
             self._stream = sd.OutputStream(

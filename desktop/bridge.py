@@ -2495,6 +2495,16 @@ class Bridge(QObject):
                 f'up={uplink_mbps:.1f}Mbps/{uplink_fps:.0f}fps',
                 file=sys.stderr,
             )
+            # Audio faults are audible but were invisible. An underrun, a trim
+            # and a dead output device all sound like "it is breaking up".
+            audio = self._audio_playback.stats()
+            if audio['underruns'] or audio['trims'] or audio['resyncs']:
+                print(
+                    f'[SYNC] audio buf={audio["buffered_ms"]}ms '
+                    f'underruns={audio["underruns"]} '
+                    f'trims={audio["trims"]} resyncs={audio["resyncs"]}',
+                    file=sys.stderr,
+                )
             text = (
                 f'{stats["rtt_p50_ms"]:.0f}ms'
                 f' · p95 {stats["rtt_p95_ms"]:.0f}'
