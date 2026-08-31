@@ -564,6 +564,75 @@ debug-frame settings, `LOG_LEVEL` and `PHANTOM_TEMP_DIR`. It is a list rather
 than "forward everything" on purpose: the pod is a different machine, and
 blanket forwarding would send local paths and secrets that mean nothing there.
 
+### Changing settings on a pod that already exists
+
+**`.env` is read at `create_pod` time and never again.** Those values are baked
+into the container's environment, so on a pod that is already running:
+
+- editing `.env` changes nothing;
+- `git pull` on the pod changes nothing, because **`.env` is gitignored** and
+  travels by a different route than the code;
+- restarting the pipeline changes nothing either — it inherits the same
+  environment.
+
+That is easy to miss, because code and configuration reach the pod by two
+separate paths that look like one:
+
+    code   ->  git push  ->  git pull on the pod
+    .env   ->  read locally by orchestrator.py  ->  pod env, at creation only
+
+Three ways to change a setting, in ascending cost:
+
+**1. Live, no restart** — `tools/realism.py` against the running pipeline. It
+covers the model selection, the realism knobs, the guard thresholds and the
+speed levers, and reports what the server applied and what it refused:
+
+```bash
+python tools/realism.py --host <ip> --port <port> swapper_model=hyperswap_1a_256
+python tools/realism.py --host <ip> --port <port> enhance=false
+python tools/realism.py --host <ip> --port <port> --show
+```
+
+Switching the swapper this way applies that model's realism profile and drops
+temporal state, exactly as a fresh start would. Changing a speed lever or the
+restoration model drops the ONNX sessions, which reload on the next frame — a
+visible hitch of a second or two, which is why these are not exposed to a
+consumer.
+
+**2. Restart the pipeline with different env**, for the settings `set_realism`
+does not carry — `DEBUG_FRAMES_DIR` is the one that matters, since debug
+capture is read at process start:
+
+```bash
+python runpod/orchestrator.py run "pkill -f pipeline.py; sleep 4; \
+  [ -f /etc/rp_environment ] && . /etc/rp_environment; \
+  [ -f /etc/profile.d/cudnn.sh ] && . /etc/profile.d/cudnn.sh; \
+  cd /workspace/Phantom && DEBUG_FRAMES_DIR=/workspace/dbg \
+  nohup /workspace/venv/bin/python /workspace/Phantom/pipeline.py \
+  --execution-provider cuda > /workspace/phantom-pipeline.log 2>&1 &"
+```
+
+**Budget for warm-up.** The first stream after a pipeline start pays model load
+inside its own window — tens of seconds. A 40s capture against a freshly
+started pipeline produced zero frames and looked like a broken config. Either
+run a discarded pass first, or make the window long enough to contain both.
+
+**3. `terminate` then `start`**, which is the only way a `.env` edit takes
+effect, and the only way onto a different GPU — a stopped pod stays pinned to
+the host it was created on, so `resume` cannot move it.
+
+### Before any measurement on a resumed pod
+
+```bash
+python runpod/orchestrator.py run "cd /workspace/Phantom && git pull"
+```
+
+A pod resumed after a break is running whatever code it last pulled. This has
+already cost a full sweep: every `set_realism` was refused because the pod
+predated the fields being asked for, and each of the twelve configurations
+reported the same numbers because none of them applied. The sweep exits
+non-zero on that now, but pulling first is what avoids it.
+
 ### Getting a measurement clip onto the pod
 
 A speed comparison needs **two files on the pod**, and they are different

@@ -602,6 +602,51 @@ See CLAUDE.md for the tables; the short version:
 - On footage, 29.4ms of CodeFormer moves the detail metric **+0.03** and leaves
   noise and seam unchanged.
 
+**The shortest path to a real answer, in full.** Everything below assumes a
+resumed pod; take `<ip>` and `<port>` from what `push` prints, as they change on
+every stop/resume.
+
+```bash
+# 1. The pod runs whatever it last pulled. This is not optional — a sweep has
+#    already been lost to a pod that predated the fields it was being asked to
+#    set, and every configuration reported identical numbers.
+python runpod/orchestrator.py run "cd /workspace/Phantom && git pull"
+
+# 2. Restart the pipeline so it loads the pulled code.
+python runpod/orchestrator.py run "pkill -f pipeline.py; sleep 4; \
+  [ -f /etc/rp_environment ] && . /etc/rp_environment; \
+  [ -f /etc/profile.d/cudnn.sh ] && . /etc/profile.d/cudnn.sh; \
+  cd /workspace/Phantom && nohup /workspace/venv/bin/python \
+  /workspace/Phantom/pipeline.py --execution-provider cuda \
+  > /workspace/phantom-pipeline.log 2>&1 &"
+
+# 3. Wait for it to bind 9000 — model load is ~60-90s, and a stream started
+#    before then reports nothing at all.
+python runpod/orchestrator.py run "for i in \$(seq 1 20); do \
+  ss -ltn | grep -q ':9000' && echo READY && break; sleep 10; done"
+
+# 4. Get the clip and the source face on, if this is a fresh volume.
+python runpod/orchestrator.py push clip_h264.mp4
+
+# 5. Then A/B live, with no restart between configurations.
+python tools/realism.py --host <ip> --port <port> enhance=false
+python tools/realism.py --host <ip> --port <port> enhance=true
+python tools/realism.py --host <ip> --port <port> swapper_model=inswapper_128
+```
+
+**`.env` does not reach a running pod.** It is read at `create_pod` time and
+baked into the container environment, and it is gitignored so `git pull` never
+carries it. On a pod that already exists, `tools/realism.py` is how a model
+changes; only `terminate` + `start` picks up an edited `.env`. See
+RUNPOD_DEPLOYMENT.md, "Changing settings on a pod that already exists".
+
+**Watch the latency badge, not just the frame time.** The desktop now shows RTT
+p50/p95, buffer depth and uplink Mbps top-right in the viewport. Read it against
+the pipeline's own per-stage report: the pipeline measures only its own work, so
+the gap between the two is network and encode. If RTT dominates, no further
+compute work will be felt, and the next lever is the datacenter rather than the
+GPU.
+
 **Do these next, in order:**
 
 1. **Look at the frames.** 24 pairs each are on the volume at

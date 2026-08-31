@@ -490,6 +490,12 @@ from that command. Lives in `_discover_gpus`, `_resolve_gpu_candidates`,
   every speed lever against one clip in a single pod session. Take the host and
   port from what `orchestrator.py push` prints; they change on every
   stop/resume
+- **Change settings live**: `python tools/realism.py --host <ip> --port <port>
+  key=value ...` — the only way to reach `set_realism` without writing a
+  WebSocket client. Covers model selection, realism knobs, guard thresholds and
+  speed levers; prints what was applied and what was refused. `--show` reads
+  the pipeline's status instead. **`.env` reaches a pod only at creation**, so
+  on a running pod this is the way to change a model rather than editing `.env`
 - **On-pod work**: `python runpod/orchestrator.py run "<command>"`, and
   `logs [n]` for the pipeline log. Only port 9000 is exposed and the SSH proxy
   drops `exec_command`, so both drive the interactive shell the deploy opens
