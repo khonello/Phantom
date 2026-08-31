@@ -6,8 +6,6 @@ not a degraded frame — it is the wrong person, on every frame, looking like it
 worked. These cover the three ways that happened.
 """
 
-import os
-
 import numpy as np
 import pytest
 
@@ -77,8 +75,9 @@ def test_same_path_new_contents_is_a_new_face(db, tmp_path):
     _write(path, 7)
     first = database._extract_from_image(path)
 
-    # Same name, different photo — exactly what a second upload does.
-    os.utime(path, ns=(0, 0))
+    # Same name, different photo — exactly what a second upload does. No
+    # timestamp fiddling: the key must not depend on the clock, because two
+    # uploads a moment apart can share a filesystem timestamp.
     _write(path, 9)
 
     second = database._extract_from_image(path)
@@ -104,7 +103,6 @@ def test_cache_key_changes_with_contents(tmp_path):
     _write(path, 1)
     before = FaceDatabase._cache_key(path)
 
-    os.utime(path, ns=(0, 0))
     _write(path, 22222)
     after = FaceDatabase._cache_key(path)
 
@@ -122,6 +120,19 @@ def test_two_different_paths_do_not_collide(tmp_path):
     _write(a, 1)
     _write(b, 1)
     assert FaceDatabase._cache_key(a) != FaceDatabase._cache_key(b)
+
+
+def test_key_does_not_depend_on_the_clock(tmp_path):
+    """
+    Identical bytes written twice must key the same, and different bytes must
+    key differently, regardless of when either happened. A stat-based key got
+    this wrong whenever two writes shared a filesystem timestamp tick.
+    """
+    a, b = str(tmp_path / 'x.jpg'), str(tmp_path / 'x2.jpg')
+    _write(a, 5)
+    _write(b, 5)
+    assert (FaceDatabase._cache_key(a).split(':')[-1]
+            == FaceDatabase._cache_key(b).split(':')[-1])
 
 
 # ── Guards run on every upload, not only after a stream has started ────

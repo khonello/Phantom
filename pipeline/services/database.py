@@ -5,6 +5,7 @@ Handles caching of face embeddings, averaging multiple faces,
 and loading pre-saved embeddings. Extracted from face_analyser.py.
 """
 
+import hashlib
 import os
 import types
 from dataclasses import dataclass, field
@@ -113,20 +114,32 @@ class FaceDatabase:
         guards exist to prevent, arriving underneath them: the guards check the
         image that was uploaded while the swap uses the face that was cached.
 
-        Modification time and size are enough. They change on any rewrite, cost
-        one `stat`, and do not require reading a 6 MB file to hash it. A file
-        that cannot be stat'd falls back to the bare path, which is no worse
-        than the previous behaviour.
+        **Hashed, not stat'd.** Modification time and size look sufficient and
+        are not: filesystem timestamp granularity is coarser than the writes it
+        has to separate — on Windows the clock behind `st_mtime_ns` advances in
+        milliseconds — so two uploads close together can produce byte-identical
+        keys for different photos. That failed under the test suite the moment
+        the two writes landed in the same tick, which is the same thing that
+        would happen to a person clicking twice.
+
+        The cost is reading the file, which is bounded: source images are
+        capped at 6 MB and this runs when a source is set, not per frame.
+
+        A file that cannot be read falls back to the bare path, which is no
+        worse than the behaviour this replaced.
 
         Args:
             image_path: Path to the source image
 
         Returns:
-            A key that changes when the file's contents are replaced
+            A key that changes when the file's contents change
         """
         try:
-            info = os.stat(image_path)
-            return '{}:{}:{}'.format(image_path, info.st_mtime_ns, info.st_size)
+            digest = hashlib.blake2b(digest_size=16)
+            with open(image_path, 'rb') as fh:
+                for block in iter(lambda: fh.read(1024 * 1024), b''):
+                    digest.update(block)
+            return '{}:{}'.format(image_path, digest.hexdigest())
         except OSError:
             return image_path
 
