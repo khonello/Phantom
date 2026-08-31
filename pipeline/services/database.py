@@ -100,6 +100,36 @@ class FaceDatabase:
         self.config = config
         self._cache: Dict[str, Face] = {}
 
+    @staticmethod
+    def _cache_key(image_path: str) -> str:
+        """
+        Cache key for a source image: path, plus what is at that path now.
+
+        Keying on the path alone is wrong here specifically because uploads are
+        written to `uploads/<original filename>`. Two different photos named
+        `IMG_0001.jpg` — which is what phones and cameras actually produce —
+        land on the same path, and the second upload returned the **first
+        person's embedding**. That is the confidently-wrong output the source
+        guards exist to prevent, arriving underneath them: the guards check the
+        image that was uploaded while the swap uses the face that was cached.
+
+        Modification time and size are enough. They change on any rewrite, cost
+        one `stat`, and do not require reading a 6 MB file to hash it. A file
+        that cannot be stat'd falls back to the bare path, which is no worse
+        than the previous behaviour.
+
+        Args:
+            image_path: Path to the source image
+
+        Returns:
+            A key that changes when the file's contents are replaced
+        """
+        try:
+            info = os.stat(image_path)
+            return '{}:{}:{}'.format(image_path, info.st_mtime_ns, info.st_size)
+        except OSError:
+            return image_path
+
     def get_source_face(self, paths: List[str]) -> Optional[Face]:
         """
         Get a source face from one or more paths.
@@ -220,7 +250,7 @@ class FaceDatabase:
             return guards.GuardResult.failed(guards.NO_FACE), None
 
         # Cache it so `get_source_face` does not detect the same file twice.
-        self._cache[image_path] = primary.face
+        self._cache[self._cache_key(image_path)] = primary.face
         return guards.GuardResult.passed(), primary.face
 
     def _review_identity(
@@ -308,9 +338,11 @@ class FaceDatabase:
         Returns:
             Face object, or None if file not found or no face detected
         """
-        # Check cache first
-        if image_path in self._cache:
-            return self._cache[image_path]
+        # Check cache first. Keyed by file identity rather than path, so an
+        # upload that reuses a filename is treated as the new photo it is.
+        key = self._cache_key(image_path)
+        if key in self._cache:
+            return self._cache[key]
 
         if not os.path.exists(image_path):
             return None
@@ -326,7 +358,7 @@ class FaceDatabase:
 
             # Cache it
             face = detection.face
-            self._cache[image_path] = face
+            self._cache[self._cache_key(image_path)] = face
             return face
         except Exception as e:
             import sys

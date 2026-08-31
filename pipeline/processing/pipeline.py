@@ -293,10 +293,23 @@ class ProcessingPipeline:
         # after a source change would show the old face on the next guard.
         if field == 'source_path' or field == 'source_paths':
             self._reset_guard_state()
+            sources = self.config.source_paths or (
+                [self.config.source_path] if self.config.source_path else []
+            )
+            # Build the processors if a stream has never run. Without this the
+            # source guards were skipped entirely on the first upload of a
+            # pipeline's life and enforced on every one after it, so the same
+            # photos were accepted on a first desktop run and refused on the
+            # next — a difference in *when* the upload happened, reported to
+            # the operator as a problem with their photo.
+            #
+            # Only ever taken when there is no stream, so this cannot swap the
+            # compositor or stabilizer out from under a running one. The
+            # services construct lazily, so the cost is the detector load that
+            # validating a source requires anyway.
+            if sources and self._swapping_proc is None:
+                self._build_processors()
             if self._swapping_proc:
-                sources = self.config.source_paths or (
-                    [self.config.source_path] if self.config.source_path else []
-                )
                 self._swapping_proc.set_source(sources)
 
         # Landmark smoothing factor or identity floor changed -> rebuild the

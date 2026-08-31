@@ -974,8 +974,21 @@ def handle_upload_source(
             )
 
         path = os.path.join(_upload_dir(), name)
-        with open(path, 'wb') as fh:
-            fh.write(image_bytes)
+        try:
+            with open(path, 'wb') as fh:
+                fh.write(image_bytes)
+        except OSError as e:
+            # Names the file and the reason. Uncaught, this surfaced as a bare
+            # dispatch failure, which reads to an operator as "my photo was
+            # rejected" rather than "the disk is full".
+            emit_error(f'Could not write {name}: {type(e).__name__}: {e}',
+                       scope='HANDLERS')
+            return ResponseMessage(
+                type='upload_source',
+                data={},
+                success=False,
+                error=f'Could not save {name} on the server: {e}',
+            )
         saved.append(path)
 
     # Setting these runs the source guards synchronously, via the pipeline's
@@ -1959,10 +1972,14 @@ def handle_cleanup_session(config: FaceSwapConfig) -> ResponseMessage:
     config.set('source_paths', [])
     config.set('embedding_ready', False)
 
-    # Remove any uploaded temp files
+    # Remove any uploaded temp files. Resolved once: `_upload_dir()` creates
+    # the directory it returns, so calling it inside the `isdir` test made the
+    # test always true and then created the directory a second time before
+    # deleting it.
     import shutil
-    if os.path.isdir(_upload_dir()):
-        shutil.rmtree(_upload_dir(), ignore_errors=True)
+    uploads = _upload_dir()
+    if os.path.isdir(uploads):
+        shutil.rmtree(uploads, ignore_errors=True)
 
     emit_status('Session cleaned up', scope='API')
 

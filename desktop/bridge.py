@@ -704,8 +704,23 @@ class Bridge(QObject):
         # fully exited, which would cause start_stream to be rejected silently.
 
     def _restore_state_from_server(self) -> None:
-        """Sync desktop UI with pipeline state after rejoining a running session."""
-        state = self._client.get_state()
+        """
+        Sync the UI with the pipeline, which outlives this application.
+
+        Called on connect and again when a start reports `rejoined`. The
+        pipeline is the source of truth for anything it holds — a source
+        uploaded by a previous run of the desktop is still loaded on the pod,
+        and the operator has no way to know that unless they are told.
+
+        Safe to call repeatedly: every branch below is a no-op when the local
+        state already matches.
+        """
+        try:
+            state = self._client.get_state()
+        except Exception:
+            # A disconnect mid-request is an ordinary outcome of reconnecting,
+            # not a fault worth surfacing — the next connect tries again.
+            return
         if not state.get('success', False):
             return
         data = state.get('data', {})
@@ -2655,6 +2670,21 @@ class Bridge(QObject):
                 # GPU reconnected — reset jitter buffer so RTT stats
                 # recalibrate from the new connection's latency profile.
                 self._jitter_buffer.clear()
+
+                # Sync from the pipeline, which outlives this application. A
+                # source uploaded in a previous run of the desktop is still
+                # loaded on the pod, and until now nothing said so until the
+                # operator pressed Start and the pipeline happened to report
+                # `rejoined` — so reopening the app showed no source, and the
+                # obvious response was to upload it again.
+                #
+                # On a worker thread: this is a request/response over the
+                # socket and the callback runs on the receive thread.
+                threading.Thread(
+                    target=self._restore_state_from_server,
+                    name='restore-state',
+                    daemon=True,
+                ).start()
 
     # ── Webcam thread (preview + optional broadcast) ───────────────────
 
