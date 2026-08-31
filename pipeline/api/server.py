@@ -120,6 +120,7 @@ class WebSocketAPIServer:
             pipeline=self.pipeline,
             shutdown_event=self.config.shutdown_event,
             reset_auto_stop=self._reset_auto_stop if self._auto_stop_max > 0 else None,
+            server_stats=self._server_stats,
         )
 
         # Register event handlers
@@ -461,6 +462,34 @@ class WebSocketAPIServer:
             emit_error(f'Failed to send response: {e}', scope='API_SERVER')
 
     # ── Auto-stop timer ─────────────────────────────────────────────────────
+
+    def _server_stats(self) -> Dict[str, Any]:
+        """
+        The server's own runtime facts, for `get_stats`.
+
+        Uptime and the auto-stop deadline live here rather than on the config
+        or the pipeline, so this is the only place that can answer "how much of
+        the paid hour is left" — the number someone wants before starting a
+        measurement they cannot finish.
+
+        Returns:
+            uptime_seconds, connected clients, and the auto-stop picture:
+            `auto_stop_minutes` as configured (0 = disabled) and
+            `auto_stop_remaining_seconds`, None when disabled.
+        """
+        now = time.time()
+        remaining = None
+        if self._auto_stop_max > 0 and self._auto_stop_deadline > 0:
+            remaining = max(0.0, self._auto_stop_deadline - now)
+
+        return {
+            'uptime_seconds': round(now - self._start_time, 1),
+            'clients': len(getattr(self, '_clients', ()) or ()),
+            'auto_stop_minutes': self._auto_stop_max // 60,
+            'auto_stop_remaining_seconds': (
+                None if remaining is None else round(remaining, 1)
+            ),
+        }
 
     def _reset_auto_stop(self) -> None:
         """Reset the auto-stop deadline, extending uptime by the full duration."""

@@ -187,6 +187,7 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
     'stop':            {},
     'cleanup_session': {},
     'get_state':       {},
+    'get_stats':       {},
     'keep_alive':      {},
     'shutdown':        {},
 }

@@ -33,6 +33,7 @@ from pipeline.processing.pipeline import ProcessingPipeline
 from pipeline.services import guards
 from pipeline.services import swapper_models
 from pipeline.services import enhancer_models
+from pipeline.services import onnx_session
 from pipeline.services.database import SourceReview
 from pipeline.services.templates import TemplateLibrary
 from pipeline.logging import emit_status, emit_error, emit_warning
@@ -77,6 +78,11 @@ class HandlerContext:
     pipeline: Optional[ProcessingPipeline]
     shutdown_event: Optional[threading.Event]
     reset_auto_stop: Optional[Callable[[], None]] = None
+    # Facts only the server knows: how long it has been up, how long the pod
+    # has left before it stops itself, how many clients are attached. Injected
+    # the same way `reset_auto_stop` is, so handlers stay testable and the
+    # server stays the single owner of its own clock.
+    server_stats: Optional[Callable[[], Dict[str, Any]]] = None
 
 
 # ============================================================================
@@ -375,6 +381,113 @@ def handle_get_state(
         },
         success=True,
     )
+
+
+def handle_get_stats(
+    config: FaceSwapConfig,
+    ctx: 'HandlerContext',
+) -> ResponseMessage:
+    """
+    Everything needed to answer "what is this pipeline actually running".
+
+    `get_state` exists for a reconnecting desktop and reports the handful of
+    fields its UI binds to. This is the other question — the one asked from a
+    terminal, usually after a deploy, and usually because something is not
+    behaving and nobody can see which model loaded or whether the GPU is even
+    in use. Answering it required reading the log and knowing what to grep for.
+
+    Deliberately reports **resolved** values rather than requested ones: the
+    registries fall back on an unknown name, so `enhancer_model` in the config
+    and the model actually loaded can differ, and the difference is exactly
+    what someone is looking for.
+
+    Args:
+        config: FaceSwapConfig
+        ctx: HandlerContext, for the pipeline and the server's own clock
+
+    Returns:
+        ResponseMessage carrying the report
+    """
+    pipeline = ctx.pipeline
+
+    source_loaded = False
+    if pipeline is not None and hasattr(pipeline, '_swapping_proc'):
+        source_loaded = pipeline._swapping_proc.source_face is not None
+
+    swapper = swapper_models.resolve(config.swapper_model)
+    enhancer = enhancer_models.resolve(config.enhancer_model)
+
+    # What onnxruntime will actually offer, against what was asked for. A
+    # requested provider missing from this list is the silent CPU fallback that
+    # `services/execution.py` exists to catch.
+    available: List[str] = []
+    try:
+        import onnxruntime
+        available = list(onnxruntime.get_available_providers())
+    except Exception:
+        available = []
+
+    data: Dict[str, Any] = {
+        'ready': True,
+        'pipeline_running': pipeline.is_running() if pipeline else False,
+        'source_loaded': source_loaded,
+        'gpu': onnx_session.gpu_identity() or 'unknown',
+        'execution_providers': list(config.execution_providers),
+        'available_providers': available,
+        'swapper': {
+            'model': swapper.name,
+            'native_size': swapper.size,
+            'file': swapper.filename,
+        },
+        'enhancer': {
+            'enabled': bool(config.enhance),
+            'model': enhancer.name,
+            'crop': enhancer.crop,
+            'fidelity_weight': enhancer.fidelity,
+            'file': enhancer.filename,
+        },
+        'realism': {
+            'enhance_strength': config.enhance_strength,
+            # Reported with whether it does anything: it is CodeFormer's input
+            # and inert on every other model, so a configured-looking number
+            # here is misleading without the qualifier.
+            'enhancer_weight': config.enhancer_weight,
+            'enhancer_weight_active': enhancer.fidelity,
+            'aligned_ceiling': config.aligned_size,
+            'aligned_floor': config.aligned_min,
+            'temporal_alpha': config.temporal_alpha,
+            'color_correction': config.color_correction,
+            'grain': config.grain,
+            'occluder': config.occluder,
+        },
+        'capture': {
+            'quality': config.quality,
+            'width': config.capture_width,
+            'height': config.capture_height,
+            'fps': config.capture_fps,
+            'jpeg_quality': config.jpeg_quality,
+            'det_size': config.det_size,
+        },
+        'guards': {
+            'enabled': config.guards,
+            'min_frame_px': config.guard_min_frame_px,
+            'max_yaw': config.guard_max_yaw,
+        },
+        'levers': {
+            'fp16': config.fp16,
+            'cuda_graphs': config.cuda_graphs,
+            'trt': config.trt,
+            'async_encode': config.async_encode,
+        },
+    }
+
+    if ctx.server_stats is not None:
+        try:
+            data['server'] = ctx.server_stats()
+        except Exception as exc:
+            data['server'] = {'error': '{}: {}'.format(type(exc).__name__, exc)}
+
+    return ResponseMessage(type='get_stats', data=data, success=True)
 
 
 def handle_start_stream(config: FaceSwapConfig, pipeline: Optional[ProcessingPipeline]) -> ResponseMessage:
@@ -2045,6 +2158,9 @@ def dispatch_command(
 
         elif command_type == 'get_state':
             return handle_get_state(config, ctx.pipeline)
+
+        elif command_type == 'get_stats':
+            return handle_get_stats(config, ctx)
 
         elif command_type == 'keep_alive':
             return handle_keep_alive(ctx.reset_auto_stop)

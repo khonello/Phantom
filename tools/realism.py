@@ -30,8 +30,6 @@ import json
 import sys
 from typing import Any, Dict, List, Optional
 
-import websockets
-
 
 def _parse_value(raw: str) -> Any:
     """
@@ -87,6 +85,11 @@ def _parse_settings(pairs: List[str]) -> Dict[str, Any]:
 
 
 async def _run(args: argparse.Namespace) -> int:
+    # Imported here, not at module scope: the formatting and parsing
+    # helpers above are worth testing on a machine that has no
+    # WebSocket client installed, and CI is one of them.
+    import websockets
+
     url = 'ws://{}:{}/ws'.format(args.host, args.port)
     print('connecting to {}'.format(url))
 
@@ -112,8 +115,8 @@ async def _run(args: argparse.Namespace) -> int:
             return None
 
         if args.show:
-            await ws.send(json.dumps({'action': 'get_status'}))
-            reply = await collect('get_status')
+            await ws.send(json.dumps({'action': 'get_stats'}))
+            reply = await collect('get_stats')
             print(json.dumps(reply, indent=2) if reply else 'no reply')
             return 0
 

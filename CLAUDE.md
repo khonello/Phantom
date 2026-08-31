@@ -490,6 +490,14 @@ from that command. Lives in `_discover_gpus`, `_resolve_gpu_candidates`,
   every speed lever against one clip in a single pod session. Take the host and
   port from what `orchestrator.py push` prints; they change on every
   stop/resume
+- **What is it running?**: `python tools/stats.py --host <ip> --port <port>`
+  — GPU, swap model, restoration model and crop, whether restoration is on,
+  requested vs available execution providers, capture settings, active speed
+  levers, uptime and minutes left before auto-stop. Reports **resolved**
+  values, since both registries fall back on an unknown name and the gap
+  between requested and loaded is usually the bug. Exits non-zero when a
+  requested accelerator is not available — the silent CPU fallback. `--json`
+  for the raw reply
 - **Change settings live**: `python tools/realism.py --host <ip> --port <port>
   key=value ...` — the only way to reach `set_realism` without writing a
   WebSocket client. Covers model selection, realism knobs, guard thresholds and
