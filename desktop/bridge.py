@@ -1929,6 +1929,16 @@ class Bridge(QObject):
             f'target ready — {os.path.basename(local_path)} ({seconds:.0f}s)')
         return True
 
+    @Property(str, notify=outputPathChanged)
+    def outputFolder(self) -> str:
+        """Folder holding the finished render, or empty.
+
+        Exposed separately because the panel shows the basename and the file
+        lands beside the *target* rather than anywhere the operator chose, so
+        the name on its own does not say where to look.
+        """
+        return os.path.dirname(self._output_path) if self._output_path else ''
+
     def _download_output(self) -> None:
         """
         Fetch the finished render back and save it beside the chosen target.
@@ -1994,7 +2004,11 @@ class Bridge(QObject):
 
         self._output_path = local_path
         self.outputPathChanged.emit(local_path)
-        self._set_status(f'saved {name}')
+        # The folder, not just the name. A render lands beside the *target* the
+        # operator picked, which is not necessarily where they were looking —
+        # and the panel shows only the basename, so "saved clip_swapped.mp4"
+        # answered a question nobody was asking.
+        self._set_status(f'saved to {local_dir}/{name}')
 
     def _set_upload_progress(self, value: float) -> None:
         """Publish transfer progress, clamped."""

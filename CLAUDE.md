@@ -466,6 +466,20 @@ from that command. Lives in `_discover_gpus`, `_resolve_gpu_candidates`,
 
 ## Quick Commands
 
+### Operator machine setup
+**[docs/SETUP_CHECKLIST.md](docs/SETUP_CHECKLIST.md)** — what has to be
+installed locally for a call to work, and where every output file lands. Two
+third-party drivers, and neither can be created from Python: **OBS Studio** for
+the virtual camera, and **VB-Audio Virtual Cable** (or **BlackHole** on macOS)
+for the virtual microphone.
+
+The audio one is the easy one to skip and the worst one to skip. The desktop
+delays the operator's microphone to match video that arrives ~350-400ms late;
+without a virtual output that delayed audio goes to their *speakers* while the
+call still receives the real microphone undelayed — so the delay makes the
+desync worse rather than better. The app now says so at startup rather than
+appearing to work.
+
 ### Running
 - **Pipeline engine**: `python pipeline.py`
 - **Desktop GUI**: `python desktop.py`

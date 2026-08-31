@@ -1087,6 +1087,14 @@ Window {
                                     Text {
                                         text: bridge.outputPath !== "" ? bridge.outputPath.split("/").pop() : "auto"
                                         color: bridge.outputPath !== "" ? "#86efac" : "#334155"
+                                        // The folder is the half that answers
+                                        // "where did it go" — the render lands
+                                        // beside the chosen target, which is
+                                        // not necessarily where the operator
+                                        // was looking.
+                                        ToolTip.visible: outPathHover.hovered && bridge.outputPath !== ""
+                                        ToolTip.text: bridge.outputPath
+                                        HoverHandler { id: outPathHover }
                                         font.pixelSize: 11
                                         anchors.verticalCenter: parent.verticalCenter
                                         elide: Text.ElideLeft
