@@ -229,3 +229,80 @@ def test_stats_report_the_counters():
     stats = playback.stats()
     for key in ('buffered_ms', 'underruns', 'trims', 'resyncs'):
         assert key in stats
+
+
+# ── Where the delayed audio goes ───────────────────────────────────────
+
+
+def _fake_devices(monkeypatch, devices):
+    """Stand in for sounddevice.query_devices()."""
+    import types
+
+    fake = types.SimpleNamespace(
+        query_devices=lambda index=None: (devices if index is None
+                                          else devices[index]),
+    )
+    monkeypatch.setitem(__import__('sys').modules, 'sounddevice', fake)
+
+
+def test_finds_a_virtual_cable(monkeypatch):
+    """
+    The counterpart of the virtual camera. Without it the delayed audio goes to
+    the operator's speakers while the call still receives their real microphone
+    undelayed — so the delay makes the desync worse, not better.
+    """
+    from desktop import audio
+
+    _fake_devices(monkeypatch, [
+        {'name': 'Speakers (Realtek)', 'max_output_channels': 2},
+        {'name': 'CABLE Input (VB-Audio Virtual Cable)', 'max_output_channels': 2},
+    ])
+    assert audio.find_virtual_output() == 1
+
+
+def test_prefers_a_real_cable_over_a_loose_name_match(monkeypatch):
+    """`virtual` is the loosest hint and must lose to an actual cable."""
+    from desktop import audio
+
+    _fake_devices(monkeypatch, [
+        {'name': 'Some Virtual Thing', 'max_output_channels': 2},
+        {'name': 'CABLE Input (VB-Audio)', 'max_output_channels': 2},
+    ])
+    assert audio.find_virtual_output() == 1
+
+
+def test_ignores_input_only_devices(monkeypatch):
+    """A virtual *microphone* is not somewhere to write audio."""
+    from desktop import audio
+
+    _fake_devices(monkeypatch, [
+        {'name': 'CABLE Output (VB-Audio)', 'max_output_channels': 0},
+    ])
+    assert audio.find_virtual_output() is None
+
+
+def test_none_when_nothing_is_installed(monkeypatch):
+    from desktop import audio
+
+    _fake_devices(monkeypatch, [
+        {'name': 'Speakers', 'max_output_channels': 2},
+        {'name': 'Headphones', 'max_output_channels': 2},
+    ])
+    assert audio.find_virtual_output() is None
+
+
+def test_discovery_survives_no_sounddevice(monkeypatch):
+    """Audio is optional; missing it must not take the application down."""
+    import sys
+
+    from desktop import audio
+
+    monkeypatch.setitem(sys.modules, 'sounddevice', None)
+    assert audio.find_virtual_output() is None
+
+
+def test_stats_name_the_output(rig):
+    playback, _ring, _jitter = rig
+    stats = playback.stats()
+    assert 'device' in stats and 'virtual' in stats
+    assert stats['virtual'] is False

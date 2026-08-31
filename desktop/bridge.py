@@ -2502,7 +2502,8 @@ class Bridge(QObject):
                 print(
                     f'[SYNC] audio buf={audio["buffered_ms"]}ms '
                     f'underruns={audio["underruns"]} '
-                    f'trims={audio["trims"]} resyncs={audio["resyncs"]}',
+                    f'trims={audio["trims"]} resyncs={audio["resyncs"]} '
+                    f'out={audio["device"]}',
                     file=sys.stderr,
                 )
             text = (

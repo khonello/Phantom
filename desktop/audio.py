@@ -37,6 +37,67 @@ DEFAULT_BLOCK_SIZE = 1024  # ~23ms at 44100 Hz
 DEFAULT_BUFFER_SECONDS = 10  # ring buffer capacity
 
 
+# Name fragments of virtual audio devices, lowercased. A virtual *output* is
+# the counterpart of the virtual camera: the conferencing app selects it as a
+# microphone, and what this application writes to it is what the call hears.
+#
+# **None of these can be created from Python.** pyvirtualcam ships a video
+# device; there is no equivalent for audio, because a virtual microphone is a
+# kernel driver. So this finds one the operator has installed and says clearly
+# when there is none — the alternative is writing to the default output, which
+# means the operator hears their own voice half a second late and the call
+# hears their real voice with no delay at all.
+_VIRTUAL_OUTPUT_HINTS = (
+    'cable input',       # VB-Audio Virtual Cable (Windows) — the common one
+    'vb-audio',
+    'voicemeeter',       # VoiceMeeter's virtual inputs
+    'blackhole',         # macOS
+    'soundflower',       # macOS, older
+    'pulse',             # Linux, when a null sink is exposed through PulseAudio
+    'virtual',           # generic, last because it is the loosest match
+)
+
+
+def find_virtual_output() -> Optional[int]:
+    """
+    Index of an installed virtual audio output, or None.
+
+    Matched by name against `_VIRTUAL_OUTPUT_HINTS`, in that order, so a real
+    virtual cable is preferred over anything that merely has "virtual" in its
+    name. Only devices with output channels are considered.
+
+    Returns:
+        sounddevice device index, or None when nothing suitable is installed
+    """
+    try:
+        import sounddevice as sd
+        devices = sd.query_devices()
+    except Exception:
+        return None
+
+    for hint in _VIRTUAL_OUTPUT_HINTS:
+        for index, device in enumerate(devices):
+            try:
+                if int(device.get('max_output_channels', 0)) <= 0:
+                    continue
+                if hint in str(device.get('name', '')).lower():
+                    return index
+            except Exception:
+                continue
+    return None
+
+
+def describe_device(index: Optional[int]) -> str:
+    """Human-readable name for a device index, for logs and status lines."""
+    if index is None:
+        return 'system default'
+    try:
+        import sounddevice as sd
+        return str(sd.query_devices(index).get('name', index))
+    except Exception:
+        return str(index)
+
+
 class AudioRingBuffer:
     """Thread-safe ring buffer of timestamped PCM audio chunks.
 
@@ -589,6 +650,7 @@ class AudioPlayback:
         channels: int = DEFAULT_CHANNELS,
         block_size: int = DEFAULT_BLOCK_SIZE,
         audio_capture: Optional['AudioCapture'] = None,
+        device: Optional[int] = None,
     ) -> None:
         """
         Args:
@@ -598,9 +660,12 @@ class AudioPlayback:
             channels: Must match the capture channel count
             block_size: OutputStream block size (frames per callback)
             audio_capture: Optional AudioCapture for clock drift compensation
+            device: Output device index. None means the system default, which
+                is almost certainly wrong here — see `start`.
         """
         self._ring = ring_buffer
         self._jitter = jitter_buffer
+        self.device = device
         self.sample_rate = sample_rate
         self.channels = channels
         self.block_size = block_size
@@ -764,6 +829,8 @@ class AudioPlayback:
             'underruns': self._underruns,
             'trims': self._trims,
             'resyncs': self._resyncs,
+            'device': describe_device(self.device),
+            'virtual': self.device is not None,
         }
 
     def start(self) -> None:
@@ -784,8 +851,33 @@ class AudioPlayback:
         self._leftover = None
         self._needs_seek = True
 
+        # This audio is delayed to match the swapped video, so where it goes
+        # decides whether the delay is useful or harmful. Into a virtual output
+        # the conferencing app has selected as its microphone, it is the point
+        # of the whole subsystem. Into the system default it is the operator
+        # hearing themselves half a second late, while the call still receives
+        # their real voice undelayed from the real microphone.
+        if self.device is None:
+            self.device = find_virtual_output()
+
+        import sys
+        if self.device is None:
+            print(
+                '[AUDIO] No virtual audio output found — playing to the system '
+                'default. The call will NOT receive time-aligned audio: your '
+                'microphone still reaches it undelayed, ahead of the swapped '
+                'video. Install a virtual audio cable (VB-Audio on Windows, '
+                'BlackHole on macOS) and select it as the microphone in your '
+                'conferencing app.',
+                file=sys.stderr,
+            )
+        else:
+            print('[AUDIO] Playing to virtual output: {}'.format(
+                describe_device(self.device)), file=sys.stderr)
+
         try:
             self._stream = sd.OutputStream(
+                device=self.device,
                 samplerate=self.sample_rate,
                 channels=self.channels,
                 blocksize=self.block_size,
