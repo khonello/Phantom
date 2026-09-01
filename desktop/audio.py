@@ -36,6 +36,35 @@ DEFAULT_CHANNELS = 1
 DEFAULT_BLOCK_SIZE = 1024  # ~23ms at 44100 Hz
 DEFAULT_BUFFER_SECONDS = 10  # ring buffer capacity
 
+# Fixed playout delay, in nanoseconds. Every frame and every audio sample is
+# presented exactly this long after it was captured, whatever the network did
+# in between.
+#
+# **Fixed, not adaptive, because audio shares the clock.** An adaptive delay is
+# right for video alone — it chases the network and the viewer sees nothing.
+# The moment audio is played against the same number, every adjustment becomes
+# a discontinuity: move the read point forward and samples are skipped, move it
+# back and silence is inserted. A measured session had the adaptive target
+# swinging 380 -> 500 -> 420 -> 490ms every couple of seconds, and that is what
+# an operator hears as speech breaking up. Jitter is far more damaging than
+# delay: people adapt to a constant 550ms, nobody adapts to a delay that moves.
+#
+# 550ms is chosen from measurement, not taste: RTT p50 ~350ms, p95 ~450ms, with
+# occasional 700ms outliers. It covers p95 with margin, and it is barely above
+# what the adaptive buffer was already averaging — so it costs almost nothing
+# in latency and removes the variance entirely.
+#
+# Set 0 to restore the adaptive behaviour.
+DEFAULT_PLAYOUT_DELAY_NS = 550_000_000
+
+# Raising the delay is a visible step, so it happens on evidence and rarely:
+# only when repeats have been sustained, meaning the link genuinely needs more
+# headroom than D allows.
+_ESCALATE_AFTER_SLOTS = 300        # ~10s at 30fps
+_ESCALATE_REPEAT_RATIO = 0.20
+_ESCALATE_STEP_NS = 100_000_000
+_ESCALATE_CEILING_NS = 2_000_000_000
+
 
 # Name fragments of virtual audio devices, lowercased. A virtual *output* is
 # the counterpart of the virtual camera: the conferencing app selects it as a
@@ -506,9 +535,19 @@ class JitterBuffer:
 
     MAX_FRAMES: int = 60  # ~2 seconds at 30 fps
 
-    def __init__(self) -> None:
+    def __init__(self, fixed_delay_ns: int = DEFAULT_PLAYOUT_DELAY_NS) -> None:
         self._buf: 'collections.deque[Any]' = collections.deque(maxlen=self.MAX_FRAMES)
         self._rtt = RTTTracker()
+        # 0 means adapt, which is the previous behaviour and still reachable.
+        self._fixed_delay_ns = int(fixed_delay_ns)
+        # The last frame actually shown. A slot with nothing eligible repeats
+        # it rather than slipping the schedule — see `next_for_slot`.
+        self._last_shown: Optional[Tuple[int, bytes]] = None
+        self._slots = 0
+        self._repeats = 0
+        self._repeats_total = 0
+        self._late_dropped = 0
+        self._escalations = 0
 
     def push(self, capture_ts: int, jpeg_bytes: bytes) -> None:
         """Enqueue a processed frame. Called from the WS receive thread.
@@ -567,13 +606,101 @@ class JitterBuffer:
 
     @property
     def target_delay_ns(self) -> int:
-        """Current adaptive playout delay in nanoseconds."""
+        """
+        The playout delay both streams are held to.
+
+        Fixed unless `fixed_delay_ns` was 0. The RTT tracker keeps measuring
+        either way — that telemetry says whether the fixed value is still the
+        right one — it simply stops steering.
+        """
+        if self._fixed_delay_ns > 0:
+            return self._fixed_delay_ns
         return self._rtt.target_delay_ns
 
+    def next_for_slot(self) -> Optional[Tuple[int, bytes]]:
+        """
+        The frame to display for this slot, holding the schedule.
+
+        Called once per display tick. Three rules, and the second is the one
+        that is easy to get wrong:
+
+        1. **The slot fires on time, always.** Waiting for a late frame would
+           slip the schedule, and audio is locked to the same clock — so a
+           stall is either a gap in speech or a drift out of sync, and both
+           defeat the point of a fixed delay.
+        2. **A frame that missed its slot is discarded, not shown late.**
+           Playing the straggler shifts everything one slot later and the
+           pattern never recovers; the next frame to show is the next one that
+           is *on time*. `pop_eligible` already drops all but the newest.
+        3. **A slot with nothing eligible repeats the last shown frame.** One
+           repeat is 33-50ms of an already mostly-still face and is invisible,
+           which is exactly why video is the cheap place to absorb jitter and
+           audio is not. It is always the last *swapped* frame — never the raw
+           camera, never black.
+
+        Returns:
+            (capture_ts, jpeg) to display, or None before the first frame ever
+            arrives, when there is nothing to repeat.
+        """
+        self._slots += 1
+
+        eligible = self.pop_eligible()
+        if eligible is not None:
+            self._last_shown = eligible
+            self._maybe_escalate()
+            return eligible
+
+        if self._last_shown is not None:
+            self._repeats += 1
+            self._repeats_total += 1
+
+        self._maybe_escalate()
+        return self._last_shown
+
+    def _maybe_escalate(self) -> None:
+        """
+        Raise the fixed delay when repeats have been sustained.
+
+        One repeat is invisible; a sustained rate is a frozen face while audio
+        keeps going, which reads as a broken swap rather than a slow network.
+        That is evidence D is too small for this link — so it steps, once, on a
+        window of evidence, rather than being chased per frame the way the
+        adaptive version was.
+        """
+        if self._fixed_delay_ns <= 0 or self._slots < _ESCALATE_AFTER_SLOTS:
+            return
+
+        ratio = self._repeats / float(self._slots)
+        self._slots = 0
+        self._repeats = 0
+
+        if ratio < _ESCALATE_REPEAT_RATIO:
+            return
+        if self._fixed_delay_ns >= _ESCALATE_CEILING_NS:
+            return
+
+        self._fixed_delay_ns = min(
+            _ESCALATE_CEILING_NS, self._fixed_delay_ns + _ESCALATE_STEP_NS)
+        self._escalations += 1
+        import sys
+        print(
+            '[SYNC] {:.0f}% of slots repeated — raising playout delay to '
+            '{:.0f}ms. The link needs more headroom than the current delay '
+            'allows.'.format(ratio * 100, self._fixed_delay_ns / 1_000_000),
+            file=sys.stderr,
+        )
+
     def clear(self) -> None:
-        """Discard all buffered frames and reset RTT statistics."""
+        """Discard all buffered frames and reset RTT statistics.
+
+        The held frame goes with them: it belongs to the session that just
+        ended, and repeating it into a new one would show a stale face.
+        """
         self._buf.clear()
         self._rtt.reset()
+        self._last_shown = None
+        self._slots = 0
+        self._repeats = 0
 
     @property
     def depth(self) -> int:
@@ -616,6 +743,9 @@ class JitterBuffer:
             'rtt_p50_ms': round(p50_ms, 1),
             'rtt_p95_ms': round(p95_ms, 1),
             'rtt_stddev_ms': round(std_ms, 1),
+            'fixed_delay': self._fixed_delay_ns > 0,
+            'repeats': self._repeats_total,
+            'escalations': self._escalations,
         }
 
 

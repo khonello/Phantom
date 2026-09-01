@@ -719,9 +719,13 @@ check('both feed calls live in the live-frame path',
       _poll.count('_to_vcam(') == 2,
       'a writer outside _poll_frames is a second source for the device')
 check('the device is fed only from the jitter buffer',
-      '_jitter_buffer.pop_eligible()' in _poll,
+      '_jitter_buffer.next_for_slot()' in _poll,
       'that buffer carries pipeline output; the raw webcam is a different buffer')
-_before_pop = _poll[:_poll.find('pop_eligible')]
+# `next_for_slot` may hand back the previously shown frame when nothing arrived
+# in time. That is still pipeline output — the last *swapped* frame — which is
+# the property this section exists to protect: a held frame is safe, the raw
+# camera never is.
+_before_pop = _poll[:_poll.find('next_for_slot')]
 check('the raw webcam preview never reaches the device',
       'webcam_buffer' in _before_pop and '_to_vcam' not in _before_pop,
       'the operator is on the call precisely so their own face is not sent')

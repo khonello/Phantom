@@ -2432,10 +2432,11 @@ class Bridge(QObject):
             self._webcam_version += 1
             self.webcamVersionChanged.emit(self._webcam_version)
 
-        # Pop the most recent eligible frame from the jitter buffer.
-        # If multiple frames are eligible the intermediate ones are dropped
-        # so the display stays current.
-        eligible = self._jitter_buffer.pop_eligible()
+        # One slot per tick. The buffer decides what belongs in it: the newest
+        # on-time frame, or a repeat of the last one shown when nothing arrived
+        # in time. It never slips the schedule to wait, because audio is played
+        # against the same clock — see JitterBuffer.next_for_slot.
+        eligible = self._jitter_buffer.next_for_slot()
         if eligible is not None:
             _capture_ts, jpeg_bytes = eligible
             if self._decorating():
@@ -2513,6 +2514,7 @@ class Bridge(QObject):
                 f'[SYNC] delay={stats["target_delay_ms"]}ms '
                 f'rtt={stats["rtt_p50_ms"]}/{stats["rtt_p95_ms"]}ms '
                 f'buf={stats["buffer_depth"]} '
+                f'held={stats["repeats"]} '
                 f'up={uplink_mbps:.1f}Mbps/{uplink_fps:.0f}fps',
                 file=sys.stderr,
             )
@@ -2527,12 +2529,17 @@ class Bridge(QObject):
                     f'out={audio["device"]}',
                     file=sys.stderr,
                 )
+            # The delay is what the viewer experiences; RTT is what the
+            # network is doing. Both, because the interesting state is when
+            # they diverge — RTT climbing toward the fixed delay is the warning
+            # that repeats are coming.
             text = (
-                f'{stats["rtt_p50_ms"]:.0f}ms'
-                f' · p95 {stats["rtt_p95_ms"]:.0f}'
-                f' · buf {stats["buffer_depth"]}'
+                f'{stats["target_delay_ms"]:.0f}ms delay'
+                f' · rtt {stats["rtt_p50_ms"]:.0f}/{stats["rtt_p95_ms"]:.0f}'
                 f' · up {uplink_mbps:.1f}Mbps'
             )
+            if stats.get('repeats'):
+                text += f' · {stats["repeats"]} held'
         else:
             text = ''
 

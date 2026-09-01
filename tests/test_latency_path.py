@@ -12,7 +12,9 @@ import queue
 
 import pytest
 
-from desktop.audio import JitterBuffer, RTTTracker
+from desktop.audio import (
+    DEFAULT_PLAYOUT_DELAY_NS, JitterBuffer, RTTTracker,
+)
 
 _MS = 1_000_000
 
@@ -189,3 +191,134 @@ def test_uplink_arithmetic(kb_per_frame, fps, expected_mbps):
     """
     mbps = (kb_per_frame * 1000 * fps * 8) / 1_000_000
     assert mbps == pytest.approx(expected_mbps, rel=0.01)
+
+
+# ── Fixed playout: one delay, held for both streams ────────────────────
+
+
+def test_the_delay_is_fixed_by_default():
+    """
+    Adaptive is right for video alone and wrong once audio shares the clock:
+    every adjustment becomes a skip or a silence. Jitter is more damaging than
+    delay — people adapt to a constant 550ms and never to one that moves.
+    """
+    buf = JitterBuffer()
+    assert buf.target_delay_ns == DEFAULT_PLAYOUT_DELAY_NS
+
+    for rtt in (20, 25, 22, 900, 30, 28):
+        buf._rtt.record(1_000_000_000, 1_000_000_000 + rtt * _MS)
+
+    assert buf.target_delay_ns == DEFAULT_PLAYOUT_DELAY_NS, (
+        'the delay must not follow the network once it is fixed'
+    )
+
+
+def test_rtt_is_still_measured_while_fixed():
+    """The telemetry says whether the fixed value is still right — keep it."""
+    buf = JitterBuffer()
+    for _ in range(20):
+        buf._rtt.record(1_000_000_000, 1_000_000_000 + 300 * _MS)
+    assert buf.sync_stats()['rtt_p50_ms'] == pytest.approx(300, rel=0.05)
+
+
+def test_adaptive_is_still_reachable():
+    buf = JitterBuffer(fixed_delay_ns=0)
+    assert buf.target_delay_ns == RTTTracker.INITIAL_DELAY_NS
+
+
+# ── The slot rule ──────────────────────────────────────────────────────
+
+
+def _buf_with(frames, now, delay_ms=100):
+    buf = JitterBuffer(fixed_delay_ns=delay_ms * _MS)
+    for ts, payload in frames:
+        buf.push(ts, payload)
+    return buf
+
+
+def test_an_on_time_frame_is_shown(monkeypatch):
+    buf = _buf_with([(0, b'a')], now=0)
+    monkeypatch.setattr('desktop.audio.time.perf_counter_ns',
+                        lambda: 200 * _MS)
+    assert buf.next_for_slot() == (0, b'a')
+
+
+def test_an_empty_slot_repeats_the_last_shown_frame(monkeypatch):
+    """
+    The slot fires on time regardless. Waiting would slip the schedule, and
+    audio is locked to the same clock — a stall is a gap in speech.
+    """
+    buf = _buf_with([(0, b'a')], now=0)
+    monkeypatch.setattr('desktop.audio.time.perf_counter_ns',
+                        lambda: 200 * _MS)
+
+    assert buf.next_for_slot() == (0, b'a')
+    assert buf.next_for_slot() == (0, b'a')     # nothing new arrived
+    assert buf.next_for_slot() == (0, b'a')
+    assert buf.sync_stats()['repeats'] == 2
+
+
+def test_nothing_to_show_before_the_first_frame(monkeypatch):
+    """No frame has ever arrived, so there is nothing to repeat."""
+    buf = JitterBuffer()
+    monkeypatch.setattr('desktop.audio.time.perf_counter_ns', lambda: 0)
+    assert buf.next_for_slot() is None
+    assert buf.sync_stats()['repeats'] == 0
+
+
+def test_a_late_frame_does_not_displace_a_newer_one(monkeypatch):
+    """
+    A frame that missed its slot is stale. Showing it would shift everything
+    one slot later and the pattern would never recover — the next frame to
+    show is the next one that is on time.
+    """
+    buf = _buf_with([(0, b'old'), (100 * _MS, b'new')], now=0)
+    monkeypatch.setattr('desktop.audio.time.perf_counter_ns',
+                        lambda: 400 * _MS)
+
+    assert buf.next_for_slot() == (100 * _MS, b'new')
+
+
+def test_clear_forgets_the_held_frame(monkeypatch):
+    """It belongs to the session that ended; repeating it would be a stale face."""
+    buf = _buf_with([(0, b'a')], now=0)
+    monkeypatch.setattr('desktop.audio.time.perf_counter_ns',
+                        lambda: 200 * _MS)
+    buf.next_for_slot()
+    buf.clear()
+    assert buf.next_for_slot() is None
+
+
+# ── Escalation happens on evidence, not per frame ──────────────────────
+
+
+def test_sustained_repeats_raise_the_delay(monkeypatch):
+    """
+    One repeat is invisible; a sustained rate is a frozen face while audio
+    continues, which reads as a broken swap rather than a slow link.
+    """
+    buf = _buf_with([(0, b'a')], now=0)
+    monkeypatch.setattr('desktop.audio.time.perf_counter_ns',
+                        lambda: 200 * _MS)
+    before = buf.target_delay_ns
+
+    for _ in range(400):
+        buf.next_for_slot()
+
+    assert buf.target_delay_ns > before
+    assert buf.sync_stats()['escalations'] >= 1
+
+
+def test_a_healthy_stream_never_escalates(monkeypatch):
+    """A step is visible, so ordinary operation must not cause one."""
+    clock = {'now': 0}
+    monkeypatch.setattr('desktop.audio.time.perf_counter_ns',
+                        lambda: clock['now'])
+
+    buf = JitterBuffer(fixed_delay_ns=100 * _MS)
+    for i in range(400):
+        buf.push(i * 30 * _MS, b'f')
+        clock['now'] = i * 30 * _MS + 150 * _MS
+        buf.next_for_slot()
+
+    assert buf.sync_stats()['escalations'] == 0

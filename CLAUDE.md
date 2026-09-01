@@ -240,6 +240,50 @@ models. Worth measuring the readout first — if RTT is 200ms and the buffer add
 the GPU does not touch. Further compute work should be justified by the readout
 showing compute as the largest term, which it currently is not.
 
+### Playout is fixed, not adaptive
+
+Both streams are presented **550ms after capture**, whatever the network did in
+between (`DEFAULT_PLAYOUT_DELAY_NS`; 0 restores the adaptive behaviour).
+
+Adaptive playout is right for video alone — it chases the network and the
+viewer sees nothing. It becomes wrong the moment audio is played against the
+same number, because every adjustment is a discontinuity: move the read point
+forward and samples are skipped, back and silence is inserted. A measured
+session had the target swinging 380 -> 500 -> 420 -> 490ms every two seconds,
+which is what an operator hears as speech breaking up. **Jitter is far more
+damaging than delay** — people adapt to a constant 550ms and never to one that
+moves.
+
+550 comes from measurement: RTT p50 ~350ms, p95 ~450ms, 700ms outliers. It
+covers p95 with margin and is barely above what the adaptive buffer already
+averaged, so it costs almost nothing and removes the variance entirely.
+
+**Only video crosses the network.** Audio is captured into a local ring buffer
+and is available in ~23ms; video does a round trip to the pod and takes ~350ms.
+So audio spends most of the budget waiting, jitter is entirely video's, and D
+is set by the video distribution alone. That changes if voice processing ever
+moves server-side — there is a `set_voice_transformer` hook suggesting someone
+considered it — at which point a fixed buffer matters more, not less.
+
+`JitterBuffer.next_for_slot` holds the schedule, and the second rule is the one
+that is easy to get wrong:
+
+1. **The slot fires on time, always.** Stalling for a late frame slips the
+   schedule, and audio is locked to the same clock, so a stall is either a gap
+   in speech or a drift out of sync.
+2. **A frame that missed its slot is discarded, not shown late.** Playing the
+   straggler shifts everything one slot later and the pattern never recovers.
+3. **An empty slot repeats the last shown frame.** 33-50ms of an already
+   mostly-still face is invisible, which is exactly why video is the cheap
+   place to absorb jitter. Always the last *swapped* frame — never the raw
+   camera, never black, which is the same invariant `_run_vcam` holds.
+
+Repeats are counted and shown in the badge as `N held`. One is invisible; a
+sustained rate is a frozen face while audio continues, which reads as a broken
+swap rather than a slow link — so **>20% of slots over ~10s steps the delay up
+by 100ms, once, and says so**. That is the only place playout adapts, and it
+adapts on evidence rather than per frame.
+
 ### Session gotchas worth not rediscovering
 
 - **The first stream after a pipeline start pays model warm-up**, tens of
