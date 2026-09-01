@@ -271,6 +271,37 @@ def test_prefers_a_real_cable_over_a_loose_name_match(monkeypatch):
     assert audio.find_virtual_output() == 1
 
 
+def test_prefers_the_lowest_latency_instance(monkeypatch):
+    """
+    Windows lists the same device once per host API and enumeration puts MME
+    first. On a real machine the same VB-Audio cable offered 90ms on MME,
+    120ms on DirectSound and 2ms on WASAPI — so taking the first match added
+    88ms to a path already carrying a 350ms round trip, and it would have read
+    as more of the latency everything else was being blamed for.
+    """
+    from desktop import audio
+
+    _fake_devices(monkeypatch, [
+        {'name': 'CABLE Input (VB-Audio Virtual C', 'max_output_channels': 2,
+         'default_low_output_latency': 0.090},                       # MME
+        {'name': 'CABLE Input (VB-Audio Virtual Cable)', 'max_output_channels': 2,
+         'default_low_output_latency': 0.120},                       # DirectSound
+        {'name': 'CABLE Input (VB-Audio Virtual Cable)', 'max_output_channels': 2,
+         'default_low_output_latency': 0.002},                       # WASAPI
+    ])
+    assert audio.find_virtual_output() == 2
+
+
+def test_a_missing_latency_field_does_not_break_selection(monkeypatch):
+    """Not every backend reports one; absence must not exclude the device."""
+    from desktop import audio
+
+    _fake_devices(monkeypatch, [
+        {'name': 'CABLE Input', 'max_output_channels': 2},
+    ])
+    assert audio.find_virtual_output() == 0
+
+
 def test_ignores_input_only_devices(monkeypatch):
     """A virtual *microphone* is not somewhere to write audio."""
     from desktop import audio

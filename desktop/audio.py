@@ -95,6 +95,18 @@ def find_virtual_output() -> Optional[int]:
     virtual cable is preferred over anything that merely has "virtual" in its
     name. Only devices with output channels are considered.
 
+    **Among devices with the same name, the lowest-latency one wins.** Windows
+    exposes each device once per host API, and the difference is not small: one
+    machine offered the same VB-Audio cable at 90ms on MME, 120ms on
+    DirectSound and **2ms on WASAPI**. Enumeration order puts MME first, so
+    taking the first match added 88ms to a path already carrying a 350ms round
+    trip — and it would never have looked like a bug, just like more of the
+    latency everything else was being blamed for.
+
+    Sorting on the driver's own reported latency rather than matching API names
+    keeps this working on macOS and Linux, where the same idea has different
+    labels.
+
     Returns:
         sounddevice device index, or None when nothing suitable is installed
     """
@@ -105,14 +117,20 @@ def find_virtual_output() -> Optional[int]:
         return None
 
     for hint in _VIRTUAL_OUTPUT_HINTS:
+        matches = []
         for index, device in enumerate(devices):
             try:
                 if int(device.get('max_output_channels', 0)) <= 0:
                     continue
-                if hint in str(device.get('name', '')).lower():
-                    return index
+                if hint not in str(device.get('name', '')).lower():
+                    continue
+                latency = float(device.get('default_low_output_latency', 0.0) or 0.0)
+                matches.append((latency, index))
             except Exception:
                 continue
+        if matches:
+            matches.sort()
+            return matches[0][1]
     return None
 
 

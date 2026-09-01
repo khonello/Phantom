@@ -70,6 +70,12 @@ the conferencing app can select as a microphone.
 
 3. In the conferencing app, set **Microphone → CABLE Output**.
 
+Windows lists the same cable once per audio API, and the difference matters:
+on one machine the same device measured **90ms on MME, 120ms on DirectSound
+and 2ms on WASAPI**. The app picks the lowest-latency instance automatically,
+so the name in the log is not enough to tell them apart — the latency it
+reports is.
+
 ### macOS
 
 Install [BlackHole](https://existential.audio/blackhole/) (2ch is enough) and
