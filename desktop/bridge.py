@@ -1952,6 +1952,9 @@ class Bridge(QObject):
         operator can see it, and copying it beside itself would be noise.
         """
         if not self._target_remote_path:
+            # Local pipeline: the file is already where the operator can see
+            # it, and `_output_path` already names it.
+            self._set_status(f'saved to {self._output_path}')
             return
 
         info = self._client.get_output_info()
@@ -2056,12 +2059,16 @@ class Bridge(QObject):
         # locally. Naming a Windows path to a pod asks it to write somewhere
         # that is not a path there at all, and the render fails at the last
         # step after all the work.
-        if not self._output_path:
-            import os
-            pipeline_target = self._target_remote_path or self._target_path
-            base, ext = os.path.splitext(pipeline_target)
-            self._output_path = base + '_swapped' + ext
-            self.outputPathChanged.emit(self._output_path)
+        # Always derived, never reused. After a download `_output_path` holds
+        # the *local* copy — the one the operator can open — so carrying it
+        # into a second render would name a Windows path to a pod, where it is
+        # not a path at all, and the render fails at the last step after all
+        # the work.
+        import os
+        pipeline_target = self._target_remote_path or self._target_path
+        base, ext = os.path.splitext(pipeline_target)
+        self._output_path = base + '_swapped' + ext
+        self.outputPathChanged.emit(self._output_path)
 
         # A video has to be transferred before the pipeline can be told to
         # open it. Done here rather than at selection so the transfer starts
@@ -2658,7 +2665,18 @@ class Bridge(QObject):
                     self._batch_complete = True
                     self.batchCompleteChanged.emit(True)
                     self._refresh_output_thumbnail()
-                    self._download_output()
+                    # On a worker thread. This runs inside the WebSocket
+                    # receive callback, and the download is a request/response
+                    # — the reply can only be delivered by the very thread
+                    # that would be blocked waiting for it. It timed out, the
+                    # error dict had no `success` key so it read as a success
+                    # with no data, and the finished render was left on the
+                    # pod until the pod was terminated.
+                    threading.Thread(
+                        target=self._download_output,
+                        name='download-output',
+                        daemon=True,
+                    ).start()
                     if self._photo_targets:
                         # Fetching the images is a blocking request, and this
                         # runs on the socket's own receive thread — waiting

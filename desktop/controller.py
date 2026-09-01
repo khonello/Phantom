@@ -310,7 +310,7 @@ class PipelineClient:
             ws = self._ws
 
         if ws is None:
-            return {'error': 'not connected'}
+            return {'success': False, 'error': 'not connected'}
 
         payload = json.dumps({'action': action, **kwargs})
 
@@ -325,7 +325,32 @@ class PipelineClient:
         except Exception as e:
             with self._pending_lock:
                 self._response_events.pop(action, None)
-            return {'error': str(e)}
+            # `success` is set explicitly on every failure path. Callers read
+            # `reply.get('success', True)` — defaulting to True, because a
+            # handler that answers without the field has succeeded — so an
+            # error dict without it was being read as a success with no data.
+            return {'success': False, 'error': str(e)}
+
+        # A request issued from the receive thread can never be answered: the
+        # reply is delivered by `_dispatch_message`, which is what is currently
+        # blocked here. It cost a whole render — the download of a finished
+        # video ran inside the PIPELINE_STOPPED callback, timed out, and the
+        # file was left on a pod that was later terminated. Callbacks must hand
+        # this kind of work to a worker thread.
+        if threading.current_thread() is self._recv_thread:
+            import sys
+            print(
+                '[CONTROLLER] BUG: {} was sent from the receive thread and '
+                'cannot be answered — move this call to a worker thread.'
+                .format(action),
+                file=sys.stderr,
+            )
+            with self._pending_lock:
+                self._response_events.pop(action, None)
+            return {
+                'success': False,
+                'error': '{} called from the receive thread'.format(action),
+            }
 
         # Wait for the response
         if event.wait(timeout=_timeout):
@@ -336,7 +361,10 @@ class PipelineClient:
         else:
             with self._pending_lock:
                 self._response_events.pop(action, None)
-            return {'error': 'timeout waiting for response'}
+            return {
+                'success': False,
+                'error': 'timeout waiting for response to {}'.format(action),
+            }
 
     def status(self) -> Dict[str, Any]:
         """Get pipeline status (health check via WebSocket)."""
