@@ -1,4 +1,4 @@
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 # Quality presets — single source of truth, applied via FaceSwapConfig.apply_preset().
 #
@@ -147,6 +147,39 @@ VIDEO_CHUNK_BYTES = 4 * 1024 * 1024
 # `keep_fps` and `keep_audio` are here because they are output-format choices,
 # not quality knobs: they decide what file the operator gets, not how the face
 # looks.
+# Restoration strength, as named steps rather than a raw 0-1.
+#
+# The header once had an ENHANCE *toggle*, and it was removed because off was
+# never "less plastic" — it was no restoration at all, a 128-native swap
+# dropped into a sharp frame. A switch across an axis that is not binary.
+#
+# A list fixes that rather than working around it: **`off` as the bottom of a
+# scale is a different object from `off` as a switch.** It reads as one end of
+# a range, which is what it actually is.
+#
+# `auto` is the default and means "whatever this swap model's profile asks
+# for". It exists so the operator's choice and the model's profile cannot fight:
+# `apply_model_profile` sets `enhance_strength` per model — 0.7 for
+# inswapper_128, 0.5 for hyperswap — and without `auto` a model change would
+# silently revert a choice the operator had made. That is precisely the
+# `set_enhance` mistake already recorded in CLAUDE.md, where `startPipeline`
+# reverted a pipeline launched with `--no-enhance`.
+#
+# The numbers are starting points chosen on the design target rather than
+# measured: full-strength restoration is what makes a swap read as AI, so
+# `full` is named honestly rather than as the best option. Retune them from
+# footage; that is what a named step is for.
+RESTORATION_PRESETS: Dict[str, Optional[Dict[str, Any]]] = {
+    'auto': None,
+    'off': {'enhance': False},
+    'subtle': {'enhance': True, 'enhance_strength': 0.35},
+    'balanced': {'enhance': True, 'enhance_strength': 0.7},
+    'full': {'enhance': True, 'enhance_strength': 1.0},
+}
+
+DEFAULT_RESTORATION_PRESET = 'auto'
+
+
 COMMANDS: Dict[str, Dict[str, Any]] = {
     # Source / target / output
     'set_source':      {'path': str},
@@ -177,6 +210,7 @@ COMMANDS: Dict[str, Dict[str, Any]] = {
     'set_color_correction': {'value': bool},
     'set_preprocessing': {'value': bool},
     'set_realism':     {'values': dict},
+    'set_restoration': {'preset': str},
     # Stream routing
     'set_input_url':   {'url': str},
     # Source embedding

@@ -758,6 +758,41 @@ desktop header, and a preset must not silently undo something the operator just
 clicked. `color_correction` is left alone for a different reason — it is on and
 stays on (see below).
 
+### Restoration strength — the one appearance control
+A dropdown in the sidebar under QUALITY: **auto / off / subtle / balanced /
+full** (`RESTORATION_PRESETS` in `pipeline/api/schema.py`).
+
+This is the ENHANCE toggle's replacement, and the difference is the shape
+rather than the placement. The toggle was removed because "off" was never
+"less plastic" — it was *no restoration at all*, a 128-native swap dropped into
+a sharp frame — a switch across an axis that is not binary. **In a list, `off`
+is the bottom of a scale rather than one of two states**, which is what it
+actually is. The objection dissolves instead of being worked around.
+
+Named steps rather than a raw 0-1 slider because `0.7` means nothing to an
+operator and "balanced" does, and because a support question has an answer.
+
+**`auto` is the default and is what makes the control safe.** It means "follow
+this swap model's profile", which is the behaviour that existed before the
+dropdown. It exists because `apply_model_profile` sets `enhance_strength` per
+model — 0.7 for inswapper_128, 0.5 for hyperswap — and the desktop applies a
+profile on start, so without `auto` an operator's choice would be silently
+reverted by a model change. That is exactly the `set_enhance` mistake recorded
+below, and `config.apply_model_profile` now skips the restoration fields when
+the preset is pinned.
+
+**It is global, deliberately.** `enhance_strength` governs LIVE, RENDER and
+photo output alike, and scoping the control to one of them would make the other
+two disagree with the UI. This is the one place the desktop asserts an
+appearance default at all — `startPipeline` still pushes only `set_quality` —
+and it does so because the operator asked for the control rather than because
+the desktop has an opinion.
+
+The values are starting points chosen on the design target, not measured:
+full-strength restoration is what makes a swap read as AI, so `full` is named
+honestly rather than as the best option. Retune them from footage; that is what
+a named step is for.
+
 ### Header toggles — what a consumer is allowed to change
 **None.** The header is status only: the app name on the left, the status
 message, connection state and the media tabs on the right. `VCAM`, `COLOR`,

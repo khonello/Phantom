@@ -518,6 +518,10 @@ class PipelineClient:
 
     # ── Stream routing ────────────────────────────────────────────────────────
 
+    def set_restoration(self, preset: str) -> Dict[str, Any]:
+        """Set restoration strength by name (auto/off/subtle/balanced/full)."""
+        return self._send('set_restoration', preset=preset)
+
     def set_input_url(self, url: str) -> Dict[str, Any]:
         """Set network input stream URL."""
         return self._send('set_input_url', url=url)

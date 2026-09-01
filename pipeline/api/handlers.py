@@ -22,6 +22,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from pipeline.config import FaceSwapConfig
 from pipeline.api.schema import (
+    RESTORATION_PRESETS,
     MAX_PHOTO_BYTES,
     MAX_PHOTO_TARGETS,
     MAX_VIDEO_BYTES,
@@ -376,8 +377,51 @@ def handle_get_state(
             'source_paths': config.source_paths,
             'quality': config.quality,
             'enhance': config.enhance,
+            # So a reconnecting desktop shows the strength that is actually in
+            # force rather than resetting its dropdown to the default.
+            'restoration_preset': config.restoration_preset,
             'pipeline_running': pipeline.is_running() if pipeline else False,
             'source_loaded': source_loaded,
+        },
+        success=True,
+    )
+
+
+def handle_set_restoration(config: FaceSwapConfig, preset: str) -> ResponseMessage:
+    """
+    Set restoration strength by name.
+
+    Its own command rather than a `set_realism` field because it is the one
+    appearance control with a place in the UI, and because applying it is more
+    than assigning a value: `auto` means "re-read the swap model's profile",
+    which only the config can do.
+
+    Args:
+        config: FaceSwapConfig
+        preset: A key of `schema.RESTORATION_PRESETS`
+
+    Returns:
+        ResponseMessage naming the resolved strength, so a client can show what
+        the choice actually did rather than only what was asked for.
+    """
+    if not config.apply_restoration_preset(preset):
+        return ResponseMessage(
+            type='set_restoration',
+            data={'valid': sorted(RESTORATION_PRESETS)},
+            success=False,
+            error="Unknown restoration preset: {!r}".format(preset),
+        )
+
+    emit_status('Restoration: {} (strength {}, {})'.format(
+        config.restoration_preset, config.enhance_strength,
+        'on' if config.enhance else 'off'), scope='API')
+
+    return ResponseMessage(
+        type='set_restoration',
+        data={
+            'preset': config.restoration_preset,
+            'enhance': config.enhance,
+            'enhance_strength': config.enhance_strength,
         },
         success=True,
     )
@@ -819,6 +863,8 @@ _REALISM_FIELDS: Dict[str, Any] = {
     # being unable to sweep the largest cost in the pipeline made the one
     # measurement that bounds every optimisation impossible to take.
     'enhance': lambda v: bool(v),
+    'restoration_preset': (
+        lambda v: str(v) if str(v) in RESTORATION_PRESETS else None),
     # Inference speed levers. Live-switchable for the same reason the swapper
     # is: the only way to know what a lever is worth is to compare it against
     # the same clip, and a pod session is paid for by the hour. Restarting the
@@ -2178,6 +2224,9 @@ def dispatch_command(
 
         elif command_type == 'get_stats':
             return handle_get_stats(config, ctx)
+
+        elif command_type == 'set_restoration':
+            return handle_set_restoration(config, data.get('preset', ''))
 
         elif command_type == 'keep_alive':
             return handle_keep_alive(ctx.reset_auto_stop)

@@ -250,6 +250,7 @@ class Bridge(QObject):
     faceChoiceChanged = Signal()
     guardReasonChanged = Signal(str)
     latencyTextChanged = Signal(str)
+    restorationChanged = Signal(str)
     faceNoticeOpenChanged = Signal(bool)
     autoStopWarning = Signal(int)  # minutes remaining
     # Internal: carries a licence-server reply from a worker thread back to the
@@ -369,6 +370,9 @@ class Bridge(QObject):
         self._uplink_frames: int = 0
         self._uplink_mark: Tuple[float, int, int] = (time.perf_counter(), 0, 0)
         self._latency_text: str = ''
+        # 'auto' defers to the swap model's profile, which is what
+        # happened before this was a control.
+        self._restoration: str = 'auto'
         self._health_tick: int = 0  # counter for periodic health checks
 
         # Single webcam thread — always running
@@ -728,6 +732,11 @@ class Bridge(QObject):
         # Restore quality & enhance to match server
         self._quality = data.get('quality', self._quality)
 
+        preset = data.get('restoration_preset')
+        if preset and preset != self._restoration:
+            self._restoration = preset
+            self.restorationChanged.emit(preset)
+
         enhance = data.get('enhance', self._enhance_active)
         if enhance != self._enhance_active:
             self._enhance_active = enhance
@@ -957,6 +966,49 @@ class Bridge(QObject):
     def setQuality(self, preset: str) -> None:
         self._quality = preset
         self._start_webcam(self._webcam_index)
+
+    @Property(str, notify=restorationChanged)
+    def restoration(self) -> str:
+        """Current restoration strength preset."""
+        return self._restoration
+
+    @Slot(str)
+    def setRestoration(self, preset: str) -> None:
+        """
+        Set restoration strength.
+
+        Sent to the pipeline rather than held locally, because
+        `enhance_strength` is global config: it governs LIVE, RENDER and photo
+        output alike. The desktop deliberately owns no other appearance
+        default — `startPipeline` pushes only `set_quality` — so this is the
+        one place that rule is relaxed, and it is relaxed because the operator
+        asked for the control.
+        """
+        if preset == self._restoration:
+            return
+        self._restoration = preset
+        self.restorationChanged.emit(preset)
+
+        if not self._connected:
+            return
+
+        def _apply() -> None:
+            reply = self._client.set_restoration(preset)
+            if not reply.get('success', True):
+                self._set_status(
+                    'restoration: {}'.format(reply.get('error', 'refused')),
+                    error=True)
+                return
+            data = reply.get('data') or {}
+            if not data.get('enhance', True):
+                self._set_status('restoration off')
+            else:
+                self._set_status('restoration {} ({})'.format(
+                    data.get('preset', preset), data.get('enhance_strength')))
+
+        # Off the GUI thread: this is a request/response over the socket.
+        threading.Thread(target=_apply, name='set-restoration',
+                         daemon=True).start()
 
     @Slot(str)
     def setPlatform(self, platform: str) -> None:

@@ -149,6 +149,12 @@ class FaceSwapConfig:
                                     # there and `enhance_strength` is the only
                                     # remaining control.
     enhance_strength: float = 0.7   # how much of the restored face to keep
+
+    # Named restoration strength — see schema.RESTORATION_PRESETS. `auto`
+    # defers to the swap model's profile, which is the behaviour that existed
+    # before this was a control. Anything else is an explicit operator choice
+    # and outranks the profile, so switching models cannot silently undo it.
+    restoration_preset: str = 'auto'
     aligned_size: int = 256         # compositing ceiling (128-512), from the preset
     # Compositing floor, from the model profile. Compositing below a model's
     # native output size throws away detail it already generated, so a 256 model
@@ -306,8 +312,45 @@ class FaceSwapConfig:
         model = resolve(model_name or self.swapper_model)
         self.set('swapper_model', model.name)
 
+        # An explicit restoration choice outranks the model's profile. Without
+        # this, picking a strength and then changing swapper — which the
+        # desktop does on start, and `set_realism` does live — would revert it
+        # with nothing said. The same shape of bug as `startPipeline` firing
+        # `set_enhance` over a pipeline launched with `--no-enhance`.
+        pinned = (self.restoration_preset or 'auto') != 'auto'
+
         for key, value in model.look().items():
+            if pinned and key in ('enhance_strength', 'enhance'):
+                continue
             self.set(key, int(value) if key == 'aligned_min' else value)
+
+    def apply_restoration_preset(self, name: str) -> bool:
+        """
+        Apply a named restoration strength.
+
+        Args:
+            name: A key of `schema.RESTORATION_PRESETS`
+
+        Returns:
+            True if applied. `auto` re-applies the current model's profile,
+            since "follow the model" is only meaningful as the model's value.
+        """
+        from pipeline.api.schema import RESTORATION_PRESETS
+
+        key = (name or '').strip().lower()
+        if key not in RESTORATION_PRESETS:
+            return False
+
+        self.set('restoration_preset', key)
+
+        values = RESTORATION_PRESETS[key]
+        if values is None:
+            self.apply_model_profile()
+            return True
+
+        for name_, value in values.items():
+            self.set(name_, value)
+        return True
 
     def apply_preset(self, preset_name: str) -> None:
         """
@@ -364,6 +407,7 @@ class FaceSwapConfig:
             'enhancer_model': self.enhancer_model,
             'enhancer_weight': self.enhancer_weight,
             'enhance_strength': self.enhance_strength,
+            'restoration_preset': self.restoration_preset,
             'aligned_size': self.aligned_size,
             'restore_size': self.restore_size,
             'restore_min_face': self.restore_min_face,

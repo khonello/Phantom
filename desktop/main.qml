@@ -495,6 +495,93 @@ Window {
                                 }
                             }
 
+                            // ── Restoration ───────────────────────────────────────
+                            // Strength, not a switch. The header once had an
+                            // ENHANCE toggle and it was removed because "off"
+                            // was never "less plastic" - it was no restoration
+                            // at all. As the bottom of a list, off reads as one
+                            // end of a range, which is what it is.
+                            //
+                            // "auto" follows the swap model's own profile, so
+                            // the operator's choice and the model cannot fight.
+                            Text {
+                                text: "RESTORATION"
+                                color: "#252545"; font.pixelSize: 8; font.letterSpacing: 1.5
+                                Layout.topMargin: 16; Layout.bottomMargin: 8
+                            }
+
+                            Rectangle {
+                                id: restBox
+                                Layout.fillWidth: true; height: 38; radius: 8
+                                color: restHover.containsMouse ? "#1a1a2e" : "#12121e"
+                                border.color: restBox.open ? "#3a3a60" : "#1e1e35"
+                                border.width: 1
+                                z: open ? 10 : 0
+                                Behavior on color { ColorAnimation { duration: 130 } }
+
+                                property var opts: ["auto", "off", "subtle", "balanced", "full"]
+                                property bool open: false
+                                property int sel: Math.max(0, opts.indexOf(bridge.restoration))
+
+                                Row {
+                                    anchors { fill: parent; leftMargin: 14; rightMargin: 10 }
+                                    Text {
+                                        text: restBox.opts[restBox.sel]
+                                        color: "#cbd5e1"; font.pixelSize: 12
+                                        width: parent.width - 20
+                                        anchors.verticalCenter: parent.verticalCenter
+                                    }
+                                    Text { text: "⌄"; color: "#334155"; font.pixelSize: 10; anchors.verticalCenter: parent.verticalCenter }
+                                }
+
+                                HoverHandler { id: restHover }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    onClicked: restBox.open = !restBox.open
+                                    cursorShape: Qt.PointingHandCursor
+                                }
+
+                                Rectangle {
+                                    visible: restBox.open
+                                    anchors.top: parent.bottom; anchors.topMargin: 4
+                                    anchors.left: parent.left
+                                    width: parent.width
+                                    height: restBox.opts.length * 32 + 10
+                                    radius: 8; color: "#12121e"
+                                    border.color: "#252545"; border.width: 1
+
+                                    Column {
+                                        anchors { fill: parent; margins: 5 }
+                                        spacing: 2
+
+                                        Repeater {
+                                            model: restBox.opts
+                                            Rectangle {
+                                                width: parent.width; height: 30; radius: 5
+                                                color: restBox.sel === index ? "#1e1e38"
+                                                     : (rrh.containsMouse ? "#171730" : "transparent")
+                                                HoverHandler { id: rrh }
+                                                Text {
+                                                    anchors { left: parent.left; leftMargin: 10; verticalCenter: parent.verticalCenter }
+                                                    text: modelData
+                                                    color: restBox.sel === index ? "#c4b5fd" : "#475569"
+                                                    font.pixelSize: 12
+                                                }
+                                                MouseArea {
+                                                    anchors.fill: parent
+                                                    onClicked: {
+                                                        restBox.sel = index
+                                                        bridge.setRestoration(modelData)
+                                                        restBox.open = false
+                                                    }
+                                                    cursorShape: Qt.PointingHandCursor
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
                             // ── Voice ─────────────────────────────────────────────
                             Text {
                                 text: "VOICE"
