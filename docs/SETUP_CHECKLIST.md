@@ -1,35 +1,48 @@
 # Setup checklist
 
-What has to be installed on the **operator's machine** for a call to work, and
-where the app puts the files it produces.
-
-Everything here is about the local machine. The GPU pod needs none of it —
-see [RUNPOD_DEPLOYMENT.md](../RUNPOD_DEPLOYMENT.md) for that side.
+What has to be installed, **on which machine**, for a call to work — and where
+the app puts the files it produces.
 
 ---
 
-## The short version
+## Two machines, two different jobs
 
-| | Software | Why | Without it |
-|---|---|---|---|
-| **Video** | **OBS Studio** | Provides the virtual camera the call sees | No swapped video reaches the call |
-| **Audio** | **VB-Audio Virtual Cable** (Windows)<br>**BlackHole** (macOS) | Provides the virtual microphone the call hears | Your real voice reaches the call **undelayed**, ahead of your face |
+Phantom runs as two processes, and they are usually not on the same computer.
 
-Both are third-party and both are drivers. Nothing in this application can
-create either one — a virtual camera and a virtual microphone are kernel-level
-devices, so they are installed once, per machine.
+| | **Operator machine** | **Pipeline machine** |
+|---|---|---|
+| Runs | `desktop.py` | `pipeline.py` |
+| Typically | your laptop | a rented GPU pod |
+| Has | webcam, microphone, the conferencing app | a GPU and the model weights |
+| Sees | the person | frames over a WebSocket |
+
+**OBS and VB-Audio Cable go on the operator machine only.**
+
+That is worth stating plainly because it is the natural thing to get wrong. The
+pipeline is headless: it receives JPEG frames, swaps the face, and sends them
+back. It has no virtual camera, no audio path, no conferencing app, and no
+screen. It never touches a microphone — **audio is never uploaded to the
+pipeline at all** — and `pyvirtualcam` and `sounddevice` appear nowhere in its
+imports or its requirements files.
+
+Installing either driver on a pod does nothing. Forgetting them on the operator
+machine breaks the call.
 
 ---
 
-## 1. Video — OBS Studio
+# Part 1 — The operator machine
+
+The machine with the camera and the person in front of it. Everything in this
+part is about that machine.
+
+## 1.1 Video — OBS Studio
 
 The desktop writes swapped frames into OBS's virtual camera device, and the
 conferencing app selects that device as its webcam.
 
 1. Install [OBS Studio](https://obsproject.com/).
 2. Open it once and press **Start Virtual Camera**, then close it. This
-   registers the device with the system; OBS does not need to stay running
-   afterwards.
+   registers the device with the system; OBS does not need to stay running.
 3. In the conferencing app, set **Camera → OBS Virtual Camera**.
 
 The badge in the bottom-left of the viewport shows whether the device is open.
@@ -41,18 +54,17 @@ makes a conferencing app go looking for another one, and the next one it finds
 is your real webcam. That is the exact failure this product exists to prevent,
 so there is no button to turn it off.
 
----
-
-## 2. Audio — a virtual cable
+## 1.2 Audio — a virtual cable
 
 This is the counterpart of the virtual camera, and the reason it is needed is
 not obvious.
 
-Your swapped video arrives from the pod **~350–400ms late** — that is the
+Your swapped video arrives from the pipeline **~350–400ms late** — that is the
 network round trip, not the processing. If your microphone goes straight to the
-call, your voice arrives **half a second ahead of your face**. So the desktop
-captures your microphone, delays it by exactly the amount the video was
-delayed, and plays it out again.
+call, your voice arrives **ahead of your face**: the other person hears the word
+and then sees your lips form it, like a badly dubbed film. So the desktop
+captures your microphone, holds it by exactly the amount the video was held,
+and releases both together.
 
 That re-timed audio has to reach the call, which means it has to go to a device
 the conferencing app can select as a microphone.
@@ -60,9 +72,9 @@ the conferencing app can select as a microphone.
 ### Windows
 
 1. Install [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) (donationware).
-   It creates two devices: `CABLE Input` (a playback device) and `CABLE Output`
-   (a recording device).
-2. Restart the Phantom desktop. It finds `CABLE Input` automatically and logs:
+   It creates `CABLE Input` (a playback device) and `CABLE Output` (a recording
+   device).
+2. Restart the desktop. It finds the cable automatically and logs:
 
    ```
    [AUDIO] Playing to virtual output: CABLE Input (VB-Audio Virtual Cable)
@@ -70,11 +82,10 @@ the conferencing app can select as a microphone.
 
 3. In the conferencing app, set **Microphone → CABLE Output**.
 
-Windows lists the same cable once per audio API, and the difference matters:
-on one machine the same device measured **90ms on MME, 120ms on DirectSound
-and 2ms on WASAPI**. The app picks the lowest-latency instance automatically,
-so the name in the log is not enough to tell them apart — the latency it
-reports is.
+Windows lists the same cable once per audio API, and the difference is large: on
+one machine the same device measured **90ms on MME, 120ms on DirectSound and
+2ms on WASAPI**. The app picks the lowest-latency instance automatically, so the
+name alone does not identify which one is in use.
 
 ### macOS
 
@@ -93,32 +104,113 @@ it undelayed, ahead of the swapped video.
 ```
 
 In that state the delayed audio goes to your **speakers** — you hear yourself
-half a second late, which sounds broken, while the call hears your real
+half a second late, which sounds broken — while the call still hears your real
 microphone with no delay at all. **The delay makes the desync worse, not
 better.** It is the one configuration that is worse than having no audio
 handling at all.
 
 ### Monitoring yourself
 
-Sending your voice into a cable means you no longer hear it, which is normal —
-you do not usually hear your own microphone. If you want to monitor the delayed
-audio, VB-Audio's **VoiceMeeter** can route one input to two outputs. Note that
-what you would hear is delayed by ~400ms, which most people find harder to
-speak over than silence.
+Sending your voice into a cable means you stop hearing it, which is normal — you
+do not usually hear your own microphone. VB-Audio's **VoiceMeeter** can route
+one input to two outputs if you want to monitor, but what you would hear is
+~400ms delayed, which most people find harder to speak over than silence.
+
+## 1.3 Python
+
+```bash
+pip install PySide6 pyvirtualcam sounddevice websockets opencv-python numpy
+```
+
+`sounddevice` is optional in the sense that the app starts without it — audio
+capture and playback disable themselves and say so — but then none of 1.2
+applies.
 
 ---
 
-## 3. Where the output files go
+# Part 2 — The pipeline machine
 
-### LIVE
+**Nothing from Part 1 belongs here.** No OBS, no VB-Cable, no webcam, no
+microphone.
 
-Nothing is written. Frames go to the virtual camera and are gone.
+## 2.1 On a rented pod
 
-### VIDEO → RENDER
+`runpod/orchestrator.py start` provisions everything — CUDA image, venv,
+dependencies, model weights on the network volume. See
+[RUNPOD_DEPLOYMENT.md](../RUNPOD_DEPLOYMENT.md), which is the authority for that
+side. You install nothing by hand.
 
-The render happens on the **pipeline's** filesystem, which on a pod is another
-machine. The desktop reads the finished file back in chunks and saves it
-**beside the video you selected**, with a `_swapped` suffix:
+## 2.2 On your own GPU machine
+
+```bash
+pip install -r requirements-pipeline-gpu.txt    # or -cpu without CUDA
+python pipeline.py --execution-provider cuda
+```
+
+Plus **FFmpeg** on `PATH`, required for video encode and decode in RENDER mode.
+
+Model weights download on first use into `pipeline/models/`, or
+`/workspace/models/` when that exists. Confirm what actually loaded:
+
+```bash
+python tools/stats.py --host <ip> --port <port>
+```
+
+That exits non-zero if an accelerator was requested and is not available — the
+silent CPU fallback, which bills a GPU hour and produces nothing usable.
+
+---
+
+# Part 3 — Both on one machine
+
+Supported, and the simplest way to develop. Run `pipeline.py` and `desktop.py`
+side by side and point the desktop at `localhost`.
+
+You still need OBS and the virtual cable, because you are still the operator —
+they are needed by the *desktop*, and the desktop is here. What changes is that
+the network round trip disappears, so the playout delay is mostly wasted; set
+`DEFAULT_PLAYOUT_DELAY_NS` lower (or 0 for adaptive) if the lag is distracting.
+
+Renders are **not** downloaded in this configuration — the file is already at
+the output path, and copying it beside itself would be noise.
+
+---
+
+# Part 4 — Moving to a new machine
+
+### A new operator machine
+
+1. OBS Studio, virtual camera started once (1.1)
+2. VB-Audio Cable or BlackHole (1.2)
+3. Python packages (1.3)
+4. Conferencing app: camera → OBS Virtual Camera, microphone → CABLE Output
+5. Copy `.env` across — **it is gitignored**, so it does not arrive with a
+   `git clone`, and it holds the API key and `RUNPOD_POD_ID`
+
+### A new pipeline machine
+
+1. `requirements-pipeline-gpu.txt` and FFmpeg (2.2)
+2. Nothing from Part 1
+3. `python tools/stats.py` to confirm the GPU and both models
+
+`.env` deserves its own warning on either machine: it is read by the
+orchestrator at **pod creation time only**, so editing it never affects a pod
+that already exists. On a running pipeline use `tools/realism.py`. See
+RUNPOD_DEPLOYMENT.md, "Changing settings on a pod that already exists".
+
+---
+
+# Part 5 — Where the output files go
+
+| Mode | Written to |
+|---|---|
+| **LIVE** | Nothing. Frames go to the virtual camera and are gone |
+| **VIDEO → RENDER** | Beside the video you selected, `_swapped` suffix |
+| **IMAGE → UPLOAD** | Beside the photo you picked, `_swapped` suffix |
+| **IMAGE → TEMPLATES** | `Pictures/Phantom/` |
+
+A render happens on the *pipeline's* filesystem, which on a pod is another
+machine, so the desktop reads it back in chunks and saves it locally:
 
 ```
 C:\Videos\interview.mp4          <- the target you picked
@@ -129,55 +221,40 @@ The status line names the full path when it lands (`saved to …`), the panel
 shows the filename with the full path on hover, and **OPEN OUTPUT** opens the
 containing folder.
 
-If the pipeline is running locally rather than on a pod, nothing is downloaded
-— the file is already at the output path, because copying it beside itself
-would be noise.
-
-### IMAGE → UPLOAD and TEMPLATES
-
-Swapped photos are returned inline over the socket and written **beside the
-photo you picked**, with the same `_swapped` suffix. Template results go to
-`Pictures/Phantom/`, because a template's target is a shared asset and writing
-next to it would leave your face there for the next job.
+Template results go to `Pictures/Phantom/` rather than beside the template,
+because a template's target is a shared asset and writing next to it would leave
+your face there for the next job.
 
 ---
 
-## 4. Checking it is all working
+# Part 6 — Checking it all works
 
-With the pipeline running, ask it what it has:
+Ask the pipeline what it is running:
 
 ```bash
 python tools/stats.py --host <ip> --port <port>
 ```
 
-That reports the GPU, both models, whether restoration is on, and whether the
-models are on CUDA or quietly on CPU.
+GPU, both models, whether restoration is on, requested vs available execution
+providers, and how long before the pod stops itself.
 
-On the desktop side, the viewport shows:
+On the desktop, the viewport shows:
 
-- **top-right** — round-trip latency, buffer depth, uplink Mbps
+- **top-right** — playout delay, RTT, uplink Mbps, frames held
 - **bottom-left** — virtual camera state
 - **bottom-centre** — detection, and why the swap is paused if it is
 
-And the console carries a line every two seconds:
+And the console carries, every two seconds:
 
 ```
-[SYNC] delay=396ms rtt=348/383ms buf=1 up=6.0Mbps/30fps
-[SYNC] audio buf=210ms underruns=0 trims=0 resyncs=0 out=CABLE Input (VB-Audio)
+[SYNC] delay=550ms rtt=348/383ms buf=1 held=0 up=6.0Mbps/30fps
+[SYNC] audio buf=210ms underruns=0 trims=0 resyncs=0 out=CABLE Input (VB-Audio Virtual Cable)
 ```
 
-`out=` is the one to check after setting up the cable. If it says anything
-other than a virtual device, the call is not getting time-aligned audio.
+Two lines to check after setting up a new machine:
 
----
-
-## 5. Python dependencies
-
-```bash
-pip install -r requirements-pipeline-cpu.txt   # or -gpu on a CUDA machine
-```
-
-The desktop additionally needs `PySide6`, `pyvirtualcam`, `sounddevice` and
-`websockets`. `sounddevice` is optional in the sense that the app starts
-without it — audio capture and playback disable themselves and say so — but
-then none of section 2 applies.
+- **`out=`** — anything other than a virtual device means the call is not
+  getting time-aligned audio.
+- **`held=`** — climbing steadily means the playout delay is too tight for the
+  link. It raises itself and says so, but a high number is the signal that the
+  network, not the app, is the problem.

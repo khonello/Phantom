@@ -5,6 +5,17 @@ WebSocket. `runpod/orchestrator.py` owns the whole lifecycle from your machine â
 provisioning, setup, launching the pipeline, and writing the connection URL back
 into `.env`.
 
+## What does NOT belong on a pod
+
+OBS Studio and a virtual audio cable are **operator-machine** software. The pod
+is headless: it receives JPEG frames over a WebSocket, swaps the face, and sends
+them back. It has no virtual camera, no conferencing app, and no audio path at
+all â€” audio is never uploaded to the pipeline, and neither `pyvirtualcam` nor
+`sounddevice` is imported by it or listed in its requirements.
+
+Installing either on a pod does nothing. See
+[docs/SETUP_CHECKLIST.md](docs/SETUP_CHECKLIST.md) for which machine needs what.
+
 ## Where to start
 
 **`.env` is the entire input.** There is no config file, no CLI flag and no

@@ -510,12 +510,16 @@ from that command. Lives in `_discover_gpus`, `_resolve_gpu_candidates`,
 
 ## Quick Commands
 
-### Operator machine setup
+### Machine setup
 **[docs/SETUP_CHECKLIST.md](docs/SETUP_CHECKLIST.md)** — what has to be
-installed locally for a call to work, and where every output file lands. Two
-third-party drivers, and neither can be created from Python: **OBS Studio** for
-the virtual camera, and **VB-Audio Virtual Cable** (or **BlackHole** on macOS)
-for the virtual microphone.
+installed **on which machine**, and where every output file lands.
+
+The split is the part that gets got wrong: **OBS Studio and VB-Audio Cable
+belong on the operator machine, never the pipeline machine.** The pipeline is
+headless — it receives JPEG frames, swaps, and sends them back. It has no
+virtual camera, no conferencing app, and no audio path at all, since **audio is
+never uploaded to it**; `pyvirtualcam` and `sounddevice` appear nowhere in its
+imports or requirements. Installing either driver on a pod does nothing.
 
 The audio one is the easy one to skip and the worst one to skip. The desktop
 delays the operator's microphone to match video that arrives ~350-400ms late;
