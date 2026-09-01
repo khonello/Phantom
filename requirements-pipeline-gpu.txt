@@ -1,6 +1,19 @@
-# GPU pipeline requirements
-# torch/torchvision are not pinned — use pre-installed versions on RunPod,
-# or pip will pull the latest CUDA build automatically.
+# GPU pipeline requirements.
+#
+# Written for RunPod, whose base image already ships PyTorch and CUDA. On your
+# own machine this file alone is NOT enough and the gaps all end the same way:
+# a working-looking install running silently on CPU.
+#
+#   1. It installs torch on macOS only (see below). The default PyPI wheel on
+#      Windows is the CPU build, and a requirements file cannot name PyTorch's
+#      index.
+#   2. insightface pulls in the CPU onnxruntime, which overwrites the GPU one.
+#   3. onnxruntime-gpu needs cuDNN 9 on the loader path.
+#
+# `python tools/setup_local_gpu.py` handles all three and then verifies.
+# See docs/LOCAL_GPU_SETUP.md.
+#
+# torch/torchvision are not pinned here - the RunPod image supplies them.
 # For macOS, torch/torchvision are included without CUDA builds.
 
 torch; sys_platform == 'darwin'

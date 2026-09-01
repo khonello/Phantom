@@ -528,6 +528,21 @@ call still receives the real microphone undelayed — so the delay makes the
 desync worse rather than better. The app now says so at startup rather than
 appearing to work.
 
+### Running the pipeline on your own GPU
+**[docs/LOCAL_GPU_SETUP.md](docs/LOCAL_GPU_SETUP.md)** and
+`python tools/setup_local_gpu.py`. `requirements-pipeline-gpu.txt` is written
+for RunPod and is not sufficient locally: it installs torch on **macOS only**,
+insightface overwrites `onnxruntime-gpu` with the CPU wheel, and cuDNN 9 lands
+in site-packages where the loader does not look. Each gap ends in a
+working-looking install running silently on CPU, which for an all-ONNX pipeline
+is seconds per frame. The script mirrors `runpod/startup.sh` and verifies at the
+end; `--check` is safe anywhere.
+
+Worth knowing why it is attractive: a local 4090 is not faster than a rented
+4090, it is **closer**. It removes the ~350ms round trip that dominates felt
+latency, which is the largest single improvement available and one no amount of
+GPU work can reach.
+
 ### Running
 - **Pipeline engine**: `python pipeline.py`
 - **Desktop GUI**: `python desktop.py`
