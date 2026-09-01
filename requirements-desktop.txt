@@ -1,0 +1,43 @@
+# Desktop dependencies — the OPERATOR's machine, not the pipeline's.
+#
+# This is the process with the webcam, the microphone and the person in front
+# of it. It never loads a face model: it sends JPEG frames to the pipeline and
+# displays what comes back, so none of onnxruntime, insightface or torch
+# belongs here. See requirements-pipeline-{cpu,gpu}.txt for that side.
+#
+# Usage: pip install -r requirements-desktop.txt
+#
+# Two things this file cannot install, because they are kernel drivers rather
+# than Python packages — see docs/SETUP_CHECKLIST.md:
+#   OBS Studio             provides the virtual camera the call sees
+#   VB-Audio Cable / BlackHole   provides the virtual microphone it hears
+
+# Qt. The whole UI is QML driven from desktop/bridge.py.
+PySide6>=6.5.0
+
+# Frame handling: decode what the pipeline returns, encode what is sent up,
+# and every filter and effect. numpy comes with it but is pinned explicitly
+# because the compositing helpers assume it directly.
+opencv-python>=4.8.0
+numpy>=1.24.0
+
+# The virtual camera device. Writes swapped frames where the conferencing app
+# can select them; it does not create the device, OBS does.
+pyvirtualcam>=0.10.0
+
+# Microphone capture and playout into the virtual audio cable. The application
+# starts without it — capture and playback disable themselves and say so — but
+# then the call receives the operator's real voice undelayed, ahead of the
+# swapped video, which is worse than no audio handling at all.
+sounddevice>=0.4.6
+
+# The single connection to the pipeline: JSON commands and binary frames.
+websockets>=12.0
+
+# Reads .env for PHANTOM_API_URL and the session settings.
+python-dotenv>=1.0.0
+
+# Voice transformation (desktop/audio.py::set_voice_transformer). Optional in
+# practice — the hook is unused on the default path — but imported at module
+# scope, so it has to be present.
+praat-parselmouth>=0.4.3

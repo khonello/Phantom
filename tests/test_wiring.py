@@ -132,6 +132,76 @@ stranded = sorted(declared - forwarded_names - exempt)
 check('no pipeline setting is stranded on the local machine', not stranded,
       'read by the pipeline but never forwarded: {}'.format(stranded))
 
+# ── The desktop's dependencies are declared ────────────────────────────
+# The desktop had no requirements file at all: its packages lived only in one
+# developer's venv, so "set it up on another machine" meant reading imports and
+# guessing. A third-party import missing from the file is a machine that
+# installs cleanly and then fails at startup.
+print('\nDesktop dependencies are declared')
+
+
+def _declared(filename):
+    """Distribution names a requirements file actually declares.
+
+    Parsed rather than substring-matched: these files explain themselves, and
+    this one names onnxruntime and torch in a comment saying they do *not*
+    belong. A check reading the prose would agree with the opposite of what the
+    file says.
+    """
+    names = set()
+    for line in read(filename).splitlines():
+        line = line.split('#', 1)[0].strip()
+        if not line or line.startswith('-'):
+            continue
+        names.add(re.split(r'[<>=!\[;]', line)[0].strip().lower())
+    return names
+
+
+_DESKTOP_REQS = _declared('requirements-desktop.txt')
+
+# Import name -> distribution name, where they differ.
+_DIST = {
+    'cv2': 'opencv-python',
+    'dotenv': 'python-dotenv',
+    'parselmouth': 'praat-parselmouth',
+}
+# Standard library and first-party; never in a requirements file.
+_NOT_A_DEPENDENCY = {
+    'argparse', 'base64', 'collections', 'dataclasses', 'desktop', 'gc',
+    'hashlib', 'json', 'math', 'os', 'pathlib', 'pipeline', 'platform',
+    'queue', 'secrets', 'struct', 'subprocess', 'sys', 'threading', 'time',
+    'two', 'typing', 'urllib', 'uuid', 'winreg',
+}
+
+_desktop_src = ''
+for _name in _os.listdir(_os.path.join(_REPO_ROOT, 'desktop')):
+    if _name.endswith('.py'):
+        _desktop_src += read('desktop', _name)
+_desktop_src += read('desktop.py')
+
+_imported = set(re.findall(r'^\s*(?:import|from) ([a-zA-Z_][a-zA-Z0-9_]*)',
+                           _desktop_src, re.M))
+_undeclared = [m for m in sorted(_imported - _NOT_A_DEPENDENCY)
+               if _DIST.get(m, m).lower() not in _DESKTOP_REQS]
+check('requirements-desktop.txt covers every third-party import',
+      not _undeclared, 'missing: {}'.format(_undeclared))
+
+# The desktop must never pull in the face models. It sends frames and displays
+# what comes back; the moment it imports onnxruntime the two halves have been
+# confused and a laptop starts trying to be the GPU.
+check('the desktop declares no ML runtime',
+      not (_DESKTOP_REQS & {'onnxruntime', 'onnxruntime-gpu', 'insightface',
+                            'torch', 'tensorflow'}),
+      'the desktop displays frames; the pipeline swaps faces')
+
+# Every tool that opens a socket to a running pipeline lives in the
+# orchestrator environment, so that file has to carry websockets. It did not,
+# which meant a fresh machine could manage pods and then fail on the first
+# command sent to one.
+check('requirements-orchestrator.txt carries websockets',
+      'websockets' in _declared('requirements-orchestrator.txt'))
+
+
 # ── The orchestrator's own settings are documented ─────────────────────
 # The forwarding checks above cover settings that travel *to* the pod. These
 # cover the ones that configure the orchestrator itself, which drifted the other

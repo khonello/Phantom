@@ -119,12 +119,48 @@ one input to two outputs if you want to monitor, but what you would hear is
 ## 1.3 Python
 
 ```bash
-pip install PySide6 pyvirtualcam sounddevice websockets opencv-python numpy
+pip install -r requirements-desktop.txt
 ```
 
-`sounddevice` is optional in the sense that the app starts without it — audio
-capture and playback disable themselves and say so — but then none of 1.2
-applies.
+PySide6, opencv-python, numpy, pyvirtualcam, sounddevice, websockets,
+python-dotenv, praat-parselmouth. `sounddevice` is optional in the sense that
+the app starts without it — capture and playback disable themselves and say so
+— but then none of 1.2 applies.
+
+**No face models here.** The desktop sends JPEG frames and displays what comes
+back; it never loads onnxruntime, insightface or torch. `tests/test_wiring.py`
+asserts both halves of that: every third-party import is declared, and no ML
+runtime is.
+
+## 1.4 Three environments, not one
+
+This is the thing that costs an afternoon on a new machine. **No single
+environment runs everything**, and the failure is always the same
+`ModuleNotFoundError` from a script you did not expect to be picky.
+
+| Environment | Runs | Needs |
+|---|---|---|
+| **Test / lint** (system or pyenv) | `pytest tests/`, `flake8`, `mypy` | `requirements-ci.txt` plus pytest, flake8, mypy |
+| **`environ-orchestrator/`** | `runpod/orchestrator.py`, `tools/sweep_levers.py`, `tools/stats.py`, `tools/realism.py` | `requirements-orchestrator.txt` |
+| **Desktop venv** | `desktop.py`, `tools/build_desktop.py` | `requirements-desktop.txt` |
+
+Two things worth knowing before you copy the layout:
+
+- **The test environment deliberately has no ML libraries.** `tests/conftest.py`
+  stubs insightface, onnxruntime, torch and tensorflow, which is what lets the
+  suite run in ~40s on any machine instead of needing a GPU box. It is not an
+  incomplete install.
+- **The desktop venv on this machine is named `Python_3_12_0venv` and is
+  actually Python 3.10.0.** Qt Creator named it; nothing reads the name. Do not
+  install 3.12 on a new machine because a directory says so.
+
+They can be one environment if you would rather — nothing prevents installing
+all three requirement sets together. The split here is history, not design.
+
+## 1.5 What is NOT installable from Python
+
+`ffmpeg` must be on `PATH` for RENDER mode (this machine has 7.1). OBS and the
+audio cable are the other two, covered above. Everything else is pip.
 
 ---
 
@@ -180,12 +216,20 @@ the output path, and copying it beside itself would be noise.
 
 ### A new operator machine
 
-1. OBS Studio, virtual camera started once (1.1)
-2. VB-Audio Cable or BlackHole (1.2)
-3. Python packages (1.3)
-4. Conferencing app: camera → OBS Virtual Camera, microphone → CABLE Output
-5. Copy `.env` across — **it is gitignored**, so it does not arrive with a
+1. **Python 3.10** — the version everything here is built and tested against
+2. **Git**, and clone the repository
+3. **FFmpeg** on `PATH` (RENDER mode decodes and encodes with it)
+4. **OBS Studio**, virtual camera started once (1.1)
+5. **VB-Audio Cable** or **BlackHole** (1.2)
+6. `pip install -r requirements-desktop.txt` in the desktop environment
+7. `pip install -r requirements-orchestrator.txt` if this machine will also
+   manage pods or run the measurement tools
+8. Conferencing app: camera → OBS Virtual Camera, microphone → CABLE Output
+9. Copy `.env` across — **it is gitignored**, so it does not arrive with a
    `git clone`, and it holds the API key and `RUNPOD_POD_ID`
+
+For running the test suite as well, add `requirements-ci.txt` plus `pytest`,
+`flake8` and `mypy` — see 1.4 for why that is a separate environment.
 
 ### A new pipeline machine
 
