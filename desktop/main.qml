@@ -441,9 +441,18 @@ Window {
                         Item {
                             Layout.fillWidth: true
                             Layout.fillHeight: true
+                            // An anchored child contributes nothing to its
+                            // parent's implicitHeight, so without this the pane
+                            // measured 0 and the sidebar's content height came
+                            // out equal to the viewport at every window size —
+                            // the Flickable had nothing to scroll and the button
+                            // at the bottom of livePane stayed as unreachable as it
+                            // was before there was a Flickable at all.
+                            Layout.preferredHeight: livePane.implicitHeight
                             visible: bridge.currentMode === "realtime"
 
                             ColumnLayout {
+                                id: livePane
                                 anchors { fill: parent }
                                 spacing: 0
 
@@ -867,9 +876,18 @@ Window {
                         Item {
                             Layout.fillWidth: true
                             Layout.fillHeight: true
+                            // An anchored child contributes nothing to its
+                            // parent's implicitHeight, so without this the pane
+                            // measured 0 and the sidebar's content height came
+                            // out equal to the viewport at every window size —
+                            // the Flickable had nothing to scroll and the button
+                            // at the bottom of batchPane stayed as unreachable as it
+                            // was before there was a Flickable at all.
+                            Layout.preferredHeight: batchPane.implicitHeight
                             visible: bridge.currentMode !== "realtime"
 
                             ColumnLayout {
+                                id: batchPane
                                 anchors { fill: parent }
                                 spacing: 0
 

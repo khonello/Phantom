@@ -31,7 +31,7 @@ import cv2
 import numpy as np
 
 from pipeline.config import FaceSwapConfig
-from pipeline.types import Detection, Frame
+from pipeline.types import Bbox, Detection, Frame
 
 # Guard reason codes. Strings rather than an enum because they travel to the
 # desktop over JSON and appear in logs, where a stable readable token is worth
@@ -130,22 +130,67 @@ def face_size(detection: Detection) -> int:
     return int(min(detection.bbox.w, detection.bbox.h))
 
 
-def sharpness(frame: Frame) -> float:
-    """
-    Laplacian variance of a frame, the standard cheap focus measure.
+# Edge length the face crop is normalised to before measuring focus. Laplacian
+# variance is scale-dependent — the same face photographed larger scores higher —
+# so without a canonical size the reading says as much about the camera's
+# megapixels as about whether the photo is sharp.
+_SHARPNESS_SIZE = 256
 
-    Scale-dependent by nature — the same face photographed larger scores higher —
-    so this is only meaningful against images of roughly comparable framing. That
-    is acceptable here because it is applied to source uploads, which are all
-    face photographs, and because the floor is set permissively.
+
+def sharpness(frame: Frame, bbox: Optional[Bbox] = None) -> float:
+    """
+    Laplacian variance of the **face**, at a canonical size.
+
+    Two things were wrong with measuring the whole frame, which is what this
+    did. It answered a question nobody asked — a portrait shot at f/1.8 has a
+    deliberately blurred background, and averaged over the frame that reads as
+    an out-of-focus photo even when the face is perfectly sharp, so good photos
+    were refused for the composition that makes them good ones. And it missed
+    the case the guard exists for, since a sharp busy background carries a soft
+    face over the floor.
+
+    Normalising the crop removes the other half of the problem, which the
+    previous docstring admitted rather than fixed: the reading no longer moves
+    with how many pixels the camera happened to spend on the face, so one
+    threshold means the same thing for a phone portrait and a webcam grab.
 
     Args:
         frame: Image to measure
+        bbox: Face to measure within it. None measures the whole frame, which
+              is only right when there is no detection to speak of
 
     Returns:
         Variance of the Laplacian; higher is sharper
     """
-    gray = frame if frame.ndim == 2 else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    region = frame
+    if bbox is not None:
+        # The box exactly, with no padding for context. Padding was the first
+        # attempt and it quietly reintroduced the bug: a portrait's blurred
+        # background bleeds back in around the edges and drags a sharp face
+        # down, which is the thing this crop exists to stop.
+        height, width = frame.shape[:2]
+        x0 = max(0, bbox.x)
+        y0 = max(0, bbox.y)
+        x1 = min(width, bbox.x + bbox.w)
+        y1 = min(height, bbox.y + bbox.h)
+        # A degenerate box measures the frame rather than an empty array. It
+        # cannot happen behind the size guard, which runs first and needs a real
+        # box to pass, but this is also called from telemetry.
+        if x1 - x0 >= 2 and y1 - y0 >= 2:
+            region = frame[y0:y1, x0:x1]
+
+    gray = region if region.ndim == 2 else cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+
+    # INTER_AREA downsamples without the aliasing that would read as detail;
+    # a face smaller than this is left alone rather than upsampled, since
+    # interpolating cannot add the focus the guard is looking for.
+    if gray.shape[0] > _SHARPNESS_SIZE or gray.shape[1] > _SHARPNESS_SIZE:
+        scale = _SHARPNESS_SIZE / float(max(gray.shape[:2]))
+        gray = cv2.resize(
+            gray, (max(1, int(gray.shape[1] * scale)), max(1, int(gray.shape[0] * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
@@ -350,7 +395,9 @@ def check_source(
             TOO_SMALL, f'{size}px, need {config.guard_min_source_px}px',
         )
 
-    variance = sharpness(frame)
+    # The face, not the frame: a portrait's blurred background is the point of
+    # the photograph, and averaging it in refuses good pictures for it.
+    variance = sharpness(frame, detection.bbox)
     if variance < config.guard_min_sharpness:
         return GuardResult.failed(
             BLURRED, f'sharpness {variance:.0f}, need {config.guard_min_sharpness:.0f}',

@@ -15,7 +15,9 @@ HandlerContext provides dependency injection — no module-level globals.
 
 import base64
 import os
+import shutil
 import tempfile
+import uuid
 import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -61,6 +63,62 @@ def _upload_dir() -> str:
     path = os.path.join(get_temp_root(), 'uploads')
     os.makedirs(path, exist_ok=True)
     return path
+
+
+def _source_job_dirs(config: FaceSwapConfig) -> List[str]:
+    """
+    Upload directories the current source images live in.
+
+    Read before a replacement is written so the old copies can be removed after
+    the new ones land. Kept to directories this module created — a source set by
+    path, on a pipeline running locally, is a file the operator owns and points
+    at, not one uploaded into scratch, and deleting it would be destroying their
+    photo rather than tidying up after a transfer.
+    """
+    root = os.path.realpath(_upload_dir())
+    found: List[str] = []
+    for path in (config.source_paths or []):
+        parent = os.path.dirname(os.path.realpath(path))
+        if (
+            os.path.basename(parent).startswith('source_')
+            and os.path.dirname(parent) == root
+            and parent not in found
+        ):
+            found.append(parent)
+    return found
+
+
+def _unique_name(directory: str, name: str) -> str:
+    """
+    A filename that does not already exist in `directory`.
+
+    Uploads are addressed by basename, and phones and cameras produce
+    `IMG_0001.jpg` by the thousand — so two photos chosen from two folders
+    collided, the second silently overwrote the first, and the review then saw
+    the *same* image twice. Two identical images agree perfectly, so the
+    identity check waved them through and the average was one photo counted
+    twice with the other one gone. Nothing reported anything.
+
+    Suffixed rather than replaced with a uuid, because the name is shown back to
+    whoever chose the file when their photo is refused, and "IMG_0001 (2).jpg"
+    still tells them which one that was.
+
+    Args:
+        directory: Where the file is about to be written
+        name: Preferred basename
+
+    Returns:
+        `name`, or the first free `stem (n)ext` variant of it
+    """
+    if not os.path.exists(os.path.join(directory, name)):
+        return name
+
+    stem, ext = os.path.splitext(name)
+    for index in range(2, 1000):
+        candidate = f'{stem} ({index}){ext}'
+        if not os.path.exists(os.path.join(directory, candidate)):
+            return candidate
+    return f'{stem}-{uuid.uuid4().hex[:8]}{ext}'
 
 
 @dataclass
@@ -996,10 +1054,17 @@ def handle_upload_source(
             error='No images provided',
         )
 
+    # A directory per upload, like the target paths already use. Without it two
+    # uploads a minute apart shared a namespace, so replacing a source with a
+    # photo of the same name overwrote the old one while both were still
+    # referenced.
+    job_dir = tempfile.mkdtemp(prefix='source_', dir=_upload_dir())
+    previous = _source_job_dirs(config)
+
     saved: List[str] = []
 
     for img in images:
-        name = os.path.basename(img.get('name', 'source.jpg'))
+        name = os.path.basename(img.get('name', 'source.jpg')) or 'source.jpg'
         b64 = img.get('data', '')
         if not b64:
             return ResponseMessage(
@@ -1019,7 +1084,7 @@ def handle_upload_source(
                 error=f'Invalid base64 data for: {name}',
             )
 
-        path = os.path.join(_upload_dir(), name)
+        path = os.path.join(job_dir, _unique_name(job_dir, name))
         try:
             with open(path, 'wb') as fh:
                 fh.write(image_bytes)
@@ -1036,6 +1101,12 @@ def handle_upload_source(
                 error=f'Could not save {name} on the server: {e}',
             )
         saved.append(path)
+
+    # The replacement is on disk, so the copies it supersedes can go. After the
+    # write rather than before it: a failed upload should cost the operator the
+    # new photos, never the ones that were already working.
+    for stale in previous:
+        shutil.rmtree(stale, ignore_errors=True)
 
     # Setting this runs the source guards synchronously, via the pipeline's
     # config listener, so the review is available by the time this returns.
@@ -1732,7 +1803,7 @@ def handle_upload_target(
             })
             continue
 
-        path = os.path.join(job_dir, name)
+        path = os.path.join(job_dir, _unique_name(job_dir, name))
         with open(path, 'wb') as fh:
             fh.write(image_bytes)
         saved.append(path)
@@ -2065,7 +2136,6 @@ def handle_cleanup_session(
     # the directory it returns, so calling it inside the `isdir` test made the
     # test always true and then created the directory a second time before
     # deleting it.
-    import shutil
     uploads = _upload_dir()
     if os.path.isdir(uploads):
         shutil.rmtree(uploads, ignore_errors=True)
