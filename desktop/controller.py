@@ -23,6 +23,8 @@ import os
 import subprocess
 import sys
 import threading
+from collections import OrderedDict
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import cv2
@@ -49,6 +51,15 @@ def _get_ws_url() -> str:
     if not url.startswith(('ws://', 'wss://')):
         url = f'ws://{url}/ws'
     return url
+
+
+@dataclass
+class _Pending:
+    """One in-flight request, waiting for the reply that carries its id."""
+
+    action: str
+    event: threading.Event = field(default_factory=threading.Event)
+    data: Dict[str, Any] = field(default_factory=dict)
 
 
 class PipelineClient:
@@ -111,13 +122,17 @@ class PipelineClient:
         self._ws_lock = threading.Lock()
         self._connected = False
 
-        # Pending responses keyed by action name (simple matching)
-        self._pending: Dict[str, Any] = {}
+        # Pending requests, keyed by request id rather than by action name.
+        #
+        # Keying by action is what let a reply the caller had already given up
+        # on satisfy the *next* request of the same name. An upload that timed
+        # out client-side does not stop the server working, so when the operator
+        # retried, the first attempt's reply arrived and unblocked the retry —
+        # which then reported a review of a request it was not waiting on, while
+        # its own reply was dropped for having no waiter left.
+        self._pending: "OrderedDict[str, _Pending]" = OrderedDict()
         self._pending_lock = threading.Lock()
-
-        # Response events
-        self._response_events: Dict[str, threading.Event] = {}
-        self._response_data: Dict[str, Dict[str, Any]] = {}
+        self._request_seq = 0
 
         # Background receiver thread
         self._recv_thread: Optional[threading.Thread] = None
@@ -225,6 +240,41 @@ class PipelineClient:
                 attempt = max_backoff_steps  # cap the delay, keep retrying
             self._stop_event.wait(timeout=min(retry_delay * (2 ** (attempt - 1)), 30.0))
 
+    def _resolve_pending(
+        self,
+        data: Dict[str, Any],
+        action: str,
+    ) -> Optional['_Pending']:
+        """
+        Find the waiter a reply belongs to, and retire it.
+
+        Matched on `request_id` when the server echoed one. A reply carrying an
+        id we no longer hold is stale — the caller timed out and gave up — and
+        is dropped rather than handed to whoever is waiting now.
+
+        The fall-back to matching by action exists for a pipeline old enough not
+        to echo the id at all; it takes the oldest waiter for that action, which
+        is the best guess available and the behaviour this had before ids.
+
+        Args:
+            data: The parsed reply
+            action: Command name the reply claims to answer
+
+        Returns:
+            The retired waiter, or None if nothing is waiting for this reply.
+        """
+        request_id = str(data.get('request_id') or '')
+
+        with self._pending_lock:
+            if request_id:
+                return self._pending.pop(request_id, None)
+
+            for key, candidate in self._pending.items():
+                if candidate.action == action:
+                    self._pending.pop(key, None)
+                    return candidate
+        return None
+
     def _dispatch_message(self, data: Dict[str, Any]) -> None:
         """
         Route an inbound JSON message.
@@ -237,12 +287,11 @@ class PipelineClient:
 
         # Response to a command — unblock waiting caller
         if msg_type == 'response' or 'success' in data:
-            key = action
-            with self._pending_lock:
-                if key in self._response_events:
-                    self._response_data[key] = data
-                    self._response_events[key].set()
-                    return
+            pending = self._resolve_pending(data, action)
+            if pending is not None:
+                pending.data = data
+                pending.event.set()
+                return
 
         # Push event — call callback
         if self.on_event:
@@ -312,19 +361,21 @@ class PipelineClient:
         if ws is None:
             return {'success': False, 'error': 'not connected'}
 
-        payload = json.dumps({'action': action, **kwargs})
-
-        # Register response waiter
-        event = threading.Event()
+        # Register the waiter before sending, so a reply that arrives while
+        # this thread is still in `ws.send` has somewhere to land.
         with self._pending_lock:
-            self._response_events[action] = event
-            self._response_data.pop(action, None)
+            self._request_seq += 1
+            request_id = str(self._request_seq)
+            pending = _Pending(action=action)
+            self._pending[request_id] = pending
+
+        payload = json.dumps({'action': action, 'request_id': request_id, **kwargs})
 
         try:
             ws.send(payload)
         except Exception as e:
             with self._pending_lock:
-                self._response_events.pop(action, None)
+                self._pending.pop(request_id, None)
             # `success` is set explicitly on every failure path. Callers read
             # `reply.get('success', True)` — defaulting to True, because a
             # handler that answers without the field has succeeded — so an
@@ -346,25 +397,25 @@ class PipelineClient:
                 file=sys.stderr,
             )
             with self._pending_lock:
-                self._response_events.pop(action, None)
+                self._pending.pop(request_id, None)
             return {
                 'success': False,
                 'error': '{} called from the receive thread'.format(action),
             }
 
-        # Wait for the response
-        if event.wait(timeout=_timeout):
-            with self._pending_lock:
-                result = self._response_data.pop(action, {})
-                self._response_events.pop(action, None)
-            return result
-        else:
-            with self._pending_lock:
-                self._response_events.pop(action, None)
-            return {
-                'success': False,
-                'error': 'timeout waiting for response to {}'.format(action),
-            }
+        # Wait for the response. `_resolve_pending` retires the entry when the
+        # reply lands, so the only entry left to drop here is a timed-out one —
+        # and dropping it is what makes its late reply stale rather than an
+        # answer to whatever is sent next.
+        if pending.event.wait(timeout=_timeout):
+            return pending.data
+
+        with self._pending_lock:
+            self._pending.pop(request_id, None)
+        return {
+            'success': False,
+            'error': 'timeout waiting for response to {}'.format(action),
+        }
 
     def status(self) -> Dict[str, Any]:
         """Get pipeline status (health check via WebSocket)."""
@@ -418,8 +469,15 @@ class PipelineClient:
 
         Each entry: {'name': filename, 'data': base64_string}.
         Works for both single and multi-image (averaged embedding) cases.
+
+        The generous timeout is not about the transfer. The reply only comes
+        once the server has decoded and written every image *and* run the full
+        source review over them — an InsightFace detection per photo, behind a
+        first-upload model load that costs tens of seconds on its own. On the
+        default 5s this timed out routinely, and the operator, seeing nothing,
+        uploaded again.
         """
-        return self._send('upload_source', images=images)
+        return self._send('upload_source', _timeout=180.0, images=images)
 
     def list_templates(self) -> Dict[str, Any]:
         """Fetch the bundled template library, thumbnails included.

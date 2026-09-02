@@ -8,7 +8,10 @@ is what happened: the download ran on the WebSocket receive thread, could not
 be answered, and reported success anyway.
 """
 
+import json
 import threading
+import time
+from collections import OrderedDict
 
 import pytest
 
@@ -29,9 +32,11 @@ def client():
     c._ws = _FakeWS()
     c._ws_lock = threading.Lock()
     c._pending_lock = threading.Lock()
-    c._response_events = {}
-    c._response_data = {}
+    c._pending = OrderedDict()
+    c._request_seq = 0
     c._recv_thread = None
+    # A reply with no waiter falls through to the event path.
+    c.on_event = None
     return c
 
 
@@ -83,7 +88,7 @@ def test_a_request_from_the_receive_thread_is_refused(client):
     assert reply.get('success', True) is False
     assert 'receive thread' in reply['error']
     # And it must not have burned the timeout waiting.
-    assert client._response_events == {}
+    assert not client._pending
 
 
 def test_a_request_from_any_other_thread_proceeds(client):
@@ -119,3 +124,81 @@ def test_output_path_is_never_reused_across_renders():
         'not kept from the previous one'
     )
     assert 'pipeline_target = self._target_remote_path or self._target_path' in src
+
+
+# ── A reply must answer the request that asked for it ──────────────────
+
+
+def test_a_late_reply_cannot_answer_the_next_request(client):
+    """
+    Waiters used to be keyed by action name, so a reply the caller had already
+    given up on satisfied the *next* request of the same name.
+
+    That is what an operator saw as the source upload misbehaving: the first
+    upload timed out client-side while the server kept working, they uploaded
+    again, and the first attempt's review came back and unblocked the retry —
+    reporting a verdict on a request nobody was waiting for, while the retry's
+    own reply was dropped for having no waiter left.
+    """
+    # First request times out; the server has not answered yet.
+    first = client._send('upload_source', _timeout=0.01)
+    assert first.get('success', True) is False
+
+    first_id = json.loads(client._ws.sent[0])['request_id']
+
+    # The operator retries.
+    done = {}
+
+    def _retry():
+        done['reply'] = client._send('upload_source', _timeout=2.0)
+
+    thread = threading.Thread(target=_retry)
+    thread.start()
+    while len(client._ws.sent) < 2:
+        time.sleep(0.01)
+    second_id = json.loads(client._ws.sent[1])['request_id']
+    assert second_id != first_id
+
+    # Now the first attempt's reply finally lands.
+    client._dispatch_message({
+        'type': 'response',
+        'action': 'upload_source',
+        'request_id': first_id,
+        'success': True,
+        'data': {'count': 1},
+    })
+    time.sleep(0.05)
+    assert 'reply' not in done, 'a stale reply answered the retry'
+
+    # The retry's own reply is what unblocks it.
+    client._dispatch_message({
+        'type': 'response',
+        'action': 'upload_source',
+        'request_id': second_id,
+        'success': True,
+        'data': {'count': 3},
+    })
+    thread.join(timeout=3.0)
+    assert done['reply']['data'] == {'count': 3}
+
+
+def test_a_reply_without_an_id_still_matches_by_action(client):
+    """A pipeline old enough not to echo the id must still be answerable."""
+    done = {}
+
+    def _ask():
+        done['reply'] = client._send('get_output_info', _timeout=2.0)
+
+    thread = threading.Thread(target=_ask)
+    thread.start()
+    while not client._pending:
+        time.sleep(0.01)
+
+    client._dispatch_message({
+        'type': 'response',
+        'action': 'get_output_info',
+        'success': True,
+        'data': {'size': 7},
+    })
+    thread.join(timeout=3.0)
+    assert done['reply']['data'] == {'size': 7}

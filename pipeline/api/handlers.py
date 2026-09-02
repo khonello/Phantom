@@ -1037,10 +1037,16 @@ def handle_upload_source(
             )
         saved.append(path)
 
-    # Setting these runs the source guards synchronously, via the pipeline's
+    # Setting this runs the source guards synchronously, via the pipeline's
     # config listener, so the review is available by the time this returns.
+    #
+    # `source_path` is assigned rather than `set`, deliberately. The listener
+    # fires on either field and resolves both to `source_paths`, so notifying
+    # twice ran the whole review — a detection per photo — a second time over
+    # the identical list. That doubled the wait an operator sits through before
+    # this replies, which is the window the upload timeout lives in.
+    config.source_path = saved[0]
     config.set('source_paths', saved)
-    config.set('source_path', saved[0])
 
     review = _source_review(pipeline)
     if review is None:

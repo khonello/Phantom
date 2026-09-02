@@ -352,15 +352,28 @@ class WebSocketAPIServer:
                 self.config,
                 self._ctx,
             )
+            # Echo the client's request id. Without it a client can only match
+            # a reply to a request by action name, which means a reply to a
+            # request that already timed out answers the next one of the same
+            # name — see `PipelineClient._resolve_pending`.
+            request_id = data.get('request_id')
+            if request_id is not None:
+                response.request_id = str(request_id)
             self._send_json(websocket, response.to_dict())
         except Exception as e:
             emit_error(f'Command dispatch error: {e}', exception=e, scope='API_SERVER')
-            self._send_json(websocket, {
+            failure = {
                 'type': 'response',
                 'action': action,
                 'success': False,
                 'error': str(e),
-            })
+            }
+            # A failure has to carry the id too, or the caller waits out its
+            # whole timeout for a reply that already came back.
+            request_id = data.get('request_id')
+            if request_id is not None:
+                failure['request_id'] = str(request_id)
+            self._send_json(websocket, failure)
 
     # Size of the capture_ts header prepended to binary frames (int64 nanoseconds)
     _TS_HEADER_SIZE = 8

@@ -253,7 +253,9 @@ class FaceDatabase:
             return guards.GuardResult.failed(guards.UNREADABLE), None
 
         # The full list, not `detect_one`: counting faces is the multi-face guard.
-        detections = self.detector.detect(frame)
+        # `detect_source` rather than `detect`, so the verdict on a photo does
+        # not depend on which capture preset was loaded when it was uploaded.
+        detections = self.detector.detect_source(frame)
         result = guards.check_source(self.config, frame, detections)
         if not result.ok:
             return result, None

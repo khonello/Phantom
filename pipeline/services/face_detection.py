@@ -71,6 +71,11 @@ class FaceDetector:
         self._analyser: Optional[Any] = None
         self._prepared_size: int = 0
         self._lock = threading.Lock()
+        # Set for the duration of `detect_source`, which pins the detector size
+        # rather than taking it from the capture preset. Guarded by its own lock
+        # because `_lock` is held inside `_get_analyser` and is not reentrant.
+        self._det_override: Optional[int] = None
+        self._override_lock = threading.Lock()
         # What this model pack actually provides, probed on the first real
         # detection. Several guards silently become no-ops when their input is
         # absent, and a guard that never fires because its data is missing looks
@@ -85,9 +90,32 @@ class FaceDetector:
     _DET_MAX = 640
     _DET_STRIDE = 32
 
+    # Detector input used when reviewing an uploaded source photo. Fixed, and
+    # deliberately *not* the capture preset's `det_size`.
+    #
+    # A source is a still of arbitrary resolution and has nothing to do with the
+    # webcam's, but `det_size` moves 320 / 448 / 640 across the presets and the
+    # source guards ran at whichever happened to be loaded. That made the verdict
+    # on a photo depend on when it was uploaded relative to `set_quality`: a face
+    # in the background that 320 misses and 640 finds turns a clean photo into a
+    # MULTIPLE_FACES rejection, and size, pose and landmarks all shift with it.
+    # One flipped verdict then changes the set the identity outlier pass sees,
+    # and leave-one-out is set-dependent — so a single difference cascades into
+    # several rejections, on the same photos that were accepted a moment before.
+    #
+    # `_DET_MAX` rather than a middle value: a review runs once per upload, so
+    # its cost does not matter, and failing to see a second face is the
+    # expensive error here — it is the one that lets a stranger into the
+    # identity every frame is swapped to.
+    _SOURCE_DET_SIZE = _DET_MAX
+
     def _resolve_det_size(self) -> int:
         """Detector input size from config, snapped to a valid value."""
-        requested = int(getattr(self.config, 'det_size', 448) or 448)
+        override = self._det_override
+        requested = (
+            override if override is not None
+            else int(getattr(self.config, 'det_size', 448) or 448)
+        )
         clamped = max(self._DET_MIN, min(self._DET_MAX, requested))
         return clamped - (clamped % self._DET_STRIDE)
 
@@ -122,6 +150,31 @@ class FaceDetector:
                 self._prepared_size = size
 
         return self._analyser
+
+    def detect_source(self, frame: Frame) -> List[Detection]:
+        """
+        Detect faces in an uploaded source photo, at a fixed detector size.
+
+        Same detection as `detect`, pinned to `_SOURCE_DET_SIZE` so a source
+        review returns the same verdict whatever capture preset happens to be
+        loaded. See the note on that constant for what varied before.
+
+        The analyser is left prepared at the review size; the next `detect` sees
+        the mismatch against `config.det_size` and re-prepares itself, so no
+        restore step is needed here.
+
+        Args:
+            frame: Decoded source image
+
+        Returns:
+            List of Detection objects (may be empty if no faces found)
+        """
+        with self._override_lock:
+            self._det_override = self._SOURCE_DET_SIZE
+            try:
+                return self.detect(frame)
+            finally:
+                self._det_override = None
 
     def detect(self, frame: Frame) -> List[Detection]:
         """

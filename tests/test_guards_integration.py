@@ -266,6 +266,11 @@ class StubDetector:
     def detect(self, frame):
         return self.by_shape.get(frame.shape[0], [])
 
+    def detect_source(self, frame):
+        # Source review goes through this rather than `detect`, so that a
+        # photo's verdict does not move with the capture preset's det_size.
+        return self.detect(frame)
+
     @staticmethod
     def select_primary(detections):
         return FaceDetector.select_primary(detections)
