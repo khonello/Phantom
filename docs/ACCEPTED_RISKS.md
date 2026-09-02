@@ -226,7 +226,7 @@ that compound:
   44100 plays everything about 8.8% fast — roughly a tone and a half up. Ugly,
   but at least stable.
 - **A drift with no bound.** It consumes ~3,900 more samples per second than
-  arrive, so the playout cursor walks steadily away from the fixed 550ms target
+  arrive, so the playout cursor walks steadily away from the calibrated target
   and audio separates from video without limit. The fixed-delay design has no
   mechanism to pull it back; not having one is the point of it being fixed.
 
@@ -239,7 +239,16 @@ speculatively, on the one path where a mistake is continuously audible.
 
 **Closes when:** a machine turns up whose two devices genuinely cannot be set to
 the same rate. `AudioCapture._drift_samples` already measures the clock
-difference this would have to correct; nothing acts on it yet.
+difference this would have to correct; nothing acts on it.
+
+That last clause used to be untrue in a way that cost latency.
+`AudioPlayback._output_callback` *did* act on it — `playback_point = now -
+target + drift_ns` — which is a half-correction that cannot work: the read
+cursor is continuous, so the term only moved the seek point, and seeking is not
+resampling. What it did instead was fold the input device's open latency into
+the position permanently, since the drift baseline was taken before the stream
+delivered its first block. Both are fixed; drift is measured and reported and
+nothing reads it back into the timebase.
 
 ### 🟡 Nothing locks the detector against concurrent use
 

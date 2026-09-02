@@ -407,8 +407,13 @@ class Bridge(QObject):
         self._audio_capture = AudioCapture(sample_rate=self._sample_rate)
         self._audio_capture.set_voice_transformer(self._voice_transformer)
 
-        # Jitter buffer: holds processed frames until their playout time
-        self._jitter_buffer = JitterBuffer()
+        # Jitter buffer: holds processed frames until their playout time.
+        # D is measured from the link and then frozen; `PHANTOM_PLAYOUT_DELAY_MS`
+        # pins it instead, and 0 there restores the adaptive behaviour. Until
+        # this existed the only way to change the delay was to edit audio.py,
+        # which is why a value measured once against one datacenter was still
+        # in force everywhere.
+        self._jitter_buffer = JitterBuffer(**self._playout_options())
 
         # Audio playback: reads from capture ring buffer at the jitter
         # buffer's target_delay offset so audio stays in sync with video
@@ -423,7 +428,13 @@ class Bridge(QObject):
         # Virtual camera output
         self._vcam_thread: Optional[threading.Thread] = None
         self._vcam_stop: Optional[threading.Event] = None
-        self._vcam_queue: 'queue.Queue[Any]' = queue.Queue(maxsize=2)
+        # One slot, not two. This queue sits on the leg that reaches the
+        # call, between the 33ms display tick and the vcam thread's own 30fps
+        # pacer, so a second slot only ever adds a variable frame of delay to
+        # the picture the far end sees while audio is held to a fixed number.
+        # Nothing needs it: `_push_frame_to_vcam` evicts on overflow and
+        # `_run_vcam` holds and re-sends when it finds the queue empty.
+        self._vcam_queue: 'queue.Queue[Any]' = queue.Queue(maxsize=1)
 
         # Wire up WebSocket push callbacks from the client
         self._client.on_frame = self._on_ws_frame
@@ -2623,26 +2634,46 @@ class Bridge(QObject):
 
         # 3. Log sync stats, and publish them where someone can see them
         stats = self._jitter_buffer.sync_stats()
+        audio = self._audio_playback.stats()
+        skew_ms = self._av_skew_ms(stats, audio)
         uplink_mbps, uplink_fps = self._uplink_rate()
 
         if stats['rtt_samples'] > 0:
             print(
-                f'[SYNC] delay={stats["target_delay_ms"]}ms '
+                f'[SYNC] delay={stats["target_delay_ms"]}ms'
+                f'{"" if stats["calibrated"] else " (calibrating)"} '
                 f'rtt={stats["rtt_p50_ms"]}/{stats["rtt_p95_ms"]}ms '
                 f'buf={stats["buffer_depth"]} '
                 f'held={stats["repeats"]} '
                 f'up={uplink_mbps:.1f}Mbps/{uplink_fps:.0f}fps',
                 file=sys.stderr,
             )
+            # The measurement that was missing. Both streams claim to present
+            # `capture + D`, and for a long time they did not — video read the
+            # adaptive estimate while audio read the fixed delay, and no
+            # readout anywhere disagreed because none of them compared the two.
+            # A negative skew is audio presenting older material than the
+            # picture: the sound trailing the lips.
+            if skew_ms is not None:
+                if abs(skew_ms) < 1.0:
+                    verdict = 'aligned'
+                else:
+                    verdict = 'audio late' if skew_ms < 0 else 'audio early'
+                print(
+                    f'[SYNC] av video=+{stats["video_age_ms"]:.0f}ms '
+                    f'audio=+{audio["audio_age_ms"]:.0f}ms '
+                    f'skew={skew_ms:+.0f}ms ({verdict})',
+                    file=sys.stderr,
+                )
             # Audio faults are audible but were invisible. An underrun, a trim
             # and a dead output device all sound like "it is breaking up".
-            audio = self._audio_playback.stats()
             if audio['underruns'] or audio['trims'] or audio['resyncs']:
                 print(
                     f'[SYNC] audio buf={audio["buffered_ms"]}ms '
                     f'underruns={audio["underruns"]} '
                     f'trims={audio["trims"]} resyncs={audio["resyncs"]} '
-                    f'out={audio["device"]}',
+                    f'drift={audio["drift_ms"]}ms '
+                    f'out={audio["device"]} (+{audio["out_latency_ms"]}ms)',
                     file=sys.stderr,
                 )
             # The delay is what the viewer experiences; RTT is what the
@@ -2656,12 +2687,45 @@ class Bridge(QObject):
             )
             if stats.get('repeats'):
                 text += f' · {stats["repeats"]} held'
+            # Only when it is worth acting on. Below one frame interval the
+            # skew is quantisation in the display tick rather than a fault, and
+            # a badge that always shows a number teaches people to ignore it.
+            if skew_ms is not None:
+                _w, _h, fps, _q = self._capture_settings()
+                interval_ms = 1000.0 / fps if fps else 50.0
+                if abs(skew_ms) > interval_ms:
+                    text += f' · skew {skew_ms:+.0f}ms'
         else:
             text = ''
 
         if text != self._latency_text:
             self._latency_text = text
             self.latencyTextChanged.emit(text)
+
+    @staticmethod
+    def _av_skew_ms(
+        video: Dict[str, Any], audio: Dict[str, Any]
+    ) -> Optional[float]:
+        """
+        How far the two presented streams disagree, in milliseconds.
+
+        Both are ages: how old the material each stream just presented is. The
+        difference is therefore signed the way an operator would describe it —
+        **negative means audio is presenting older material than the picture**,
+        which is heard as the sound trailing the lips.
+
+        Args:
+            video: `JitterBuffer.sync_stats()`
+            audio: `AudioPlayback.stats()`
+
+        Returns:
+            The skew, or None while either stream has yet to present anything
+        """
+        video_ms = float(video.get('video_age_ms') or 0.0)
+        audio_ms = float(audio.get('audio_age_ms') or 0.0)
+        if video_ms <= 0.0 or audio_ms <= 0.0:
+            return None
+        return video_ms - audio_ms
 
     def _uplink_rate(self) -> Tuple[float, float]:
         """Uplink megabits/sec and frames/sec since the previous call.
@@ -2869,6 +2933,39 @@ class Bridge(QObject):
 
     # Size of the capture_ts header prepended to binary frames (int64 nanoseconds)
     _TS_HEADER_SIZE = 8
+
+    @staticmethod
+    def _playout_options() -> Dict[str, Any]:
+        """
+        How the playout delay is chosen, from `PHANTOM_PLAYOUT_DELAY_MS`.
+
+        Unset calibrates: a provisional delay for the first few seconds, then
+        one measured from this link, then frozen. A positive value pins that
+        number and skips calibration, which is what a measurement run wants —
+        two sessions cannot be compared if the delay chose itself differently
+        in each. 0 restores the fully adaptive behaviour.
+
+        Returns:
+            kwargs for `JitterBuffer`
+        """
+        raw = os.environ.get('PHANTOM_PLAYOUT_DELAY_MS', '').strip()
+        if not raw:
+            return {}
+        try:
+            ms = float(raw)
+        except ValueError:
+            print(
+                '[SYNC] PHANTOM_PLAYOUT_DELAY_MS={!r} is not a number — '
+                'calibrating instead'.format(raw), file=sys.stderr)
+            return {}
+        pinned = max(0, int(ms * 1_000_000))
+        if pinned:
+            note = '[SYNC] playout delay pinned to {:.0f}ms'.format(
+                pinned / 1_000_000)
+        else:
+            note = '[SYNC] playout delay is adaptive'
+        print(note + ' by PHANTOM_PLAYOUT_DELAY_MS', file=sys.stderr)
+        return {'fixed_delay_ns': pinned, 'calibrate': False}
 
     def _capture_settings(self) -> Tuple[int, int, int, int]:
         """

@@ -14,7 +14,7 @@ These pin the properties that make it continuous instead.
 import numpy as np
 import pytest
 
-from desktop.audio import AudioPlayback, AudioRingBuffer
+from desktop.audio import AudioPlayback, AudioRingBuffer, JitterBuffer
 
 _RATE = 44100
 _CHUNK = 1024
@@ -22,10 +22,13 @@ _CHUNK_NS = int(_CHUNK / _RATE * 1_000_000_000)
 
 
 class _FakeJitter:
-    """Stands in for JitterBuffer, exposing only the delay playback reads."""
+    """Stands in for JitterBuffer, exposing only what playback reads."""
 
-    def __init__(self, delay_ns):
+    def __init__(self, delay_ns, epoch=0):
         self.target_delay_ns = delay_ns
+        # Bumped when D is decided rather than estimated. Playback follows this
+        # and never the delay itself — see the tests below.
+        self.delay_epoch = epoch
 
 
 def _pcm(value):
@@ -44,6 +47,10 @@ def rig():
     jitter = _FakeJitter(200_000_000)
     playback = AudioPlayback(ring, jitter, sample_rate=_RATE,
                              channels=1, block_size=_CHUNK)
+    # Attached and already aware of this buffer's delay generation, so the
+    # tests below exercise the seek, trim and resync paths rather than the
+    # one-off reposition a fresh epoch triggers.
+    playback._delay_epoch = jitter.delay_epoch
     return playback, ring, jitter
 
 
@@ -337,3 +344,147 @@ def test_stats_name_the_output(rig):
     stats = playback.stats()
     assert 'device' in stats and 'virtual' in stats
     assert stats['virtual'] is False
+
+
+# ── The delay changes exactly once, and says so ────────────────────────
+
+
+def test_a_delay_epoch_change_repositions_the_cursor(rig, monkeypatch):
+    """
+    Calibration commits a delay measured from the link, and escalation raises
+    it. The cursor is continuous precisely so it does not chase an *estimate* —
+    but a committed decision is not an estimate, and audio has to land on the
+    new number rather than sit at the old one for the rest of the session.
+    """
+    playback, ring, jitter = rig
+    _fill(ring, 20)
+    monkeypatch.setattr('desktop.audio.time.perf_counter_ns', lambda: 0)
+
+    assert float(_pull(playback)[0][0]) == 1.0
+    assert float(_pull(playback)[0][0]) == 2.0
+
+    jitter.target_delay_ns = 0
+    jitter.delay_epoch += 1
+    monkeypatch.setattr('desktop.audio.time.perf_counter_ns',
+                        lambda: 10 * _CHUNK_NS)
+
+    assert float(_pull(playback)[0][0]) == 11.0, 'did not follow the new delay'
+    assert float(_pull(playback)[0][0]) == 12.0, 'not continuous afterwards'
+
+
+def test_the_delay_alone_never_moves_the_cursor(rig, monkeypatch):
+    """
+    The converse, and the reason the epoch exists at all. A delay that moved on
+    its own would be followed per block, which is the skip-and-silence the
+    fixed delay was introduced to remove.
+    """
+    playback, ring, jitter = rig
+    _fill(ring, 12)
+    monkeypatch.setattr('desktop.audio.time.perf_counter_ns', lambda: 0)
+
+    values = []
+    for delay_ms in (380, 500, 420, 490, 400, 460):
+        jitter.target_delay_ns = delay_ms * 1_000_000   # epoch unchanged
+        values.append(float(_pull(playback)[0][0]))
+
+    assert values == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+
+
+def test_output_device_latency_is_taken_off_the_read_point(rig, monkeypatch):
+    """
+    A block written here is audible once the device has played what it already
+    holds, so the real delay was D *plus* the device — and the same VB-Audio
+    cable reports 2ms on WASAPI and 90ms on MME. `find_virtual_output` picks
+    the low-latency instance; this accounts for whatever is left.
+    """
+    playback, ring, jitter = rig
+    _fill(ring, 40)
+    jitter.target_delay_ns = 10 * _CHUNK_NS
+    monkeypatch.setattr('desktop.audio.time.perf_counter_ns',
+                        lambda: 20 * _CHUNK_NS)
+
+    playback._output_latency_ns = 5 * _CHUNK_NS
+    playback._needs_seek = True
+
+    # 20 - 10 + 5 lands on chunk index 15, whose value is 16.
+    assert float(_pull(playback)[0][0]) == 16.0
+
+
+# ── The two streams present the same moment ────────────────────────────
+
+
+def test_video_and_audio_present_the_same_capture_instant(monkeypatch):
+    """
+    The test whose absence let the split ship.
+
+    Both streams claim to present `capture + D`. Nothing ever compared what
+    they *actually* presented, so video reading the adaptive estimate while
+    audio read the fixed delay survived a test suite, a log line and a badge —
+    and reached a live call as speech arriving after the lips had stopped.
+
+    Video is allowed to be up to one frame interval older, because frames are
+    discrete and the newest eligible one may have been captured an interval
+    before the deadline. Anything beyond that is the fault this pins.
+    """
+    clock = {'now': 0}
+    monkeypatch.setattr('desktop.audio.time.perf_counter_ns',
+                        lambda: clock['now'])
+
+    delay = 20 * _CHUNK_NS
+    jitter = JitterBuffer(fixed_delay_ns=delay, calibrate=False)
+    ring = AudioRingBuffer(max_chunks=200, sample_rate=_RATE)
+    playback = AudioPlayback(ring, jitter, sample_rate=_RATE, channels=1,
+                             block_size=_CHUNK)
+
+    # The same capture instants on both streams.
+    for i in range(60):
+        ts = i * _CHUNK_NS + 1
+        ring.append(ts, _pcm(i + 1))
+        jitter.push(ts, b'v')
+
+    clock['now'] = 40 * _CHUNK_NS
+    jitter.next_for_slot()
+    _pull(playback)
+
+    video_ms = jitter.sync_stats()['video_age_ms']
+    audio_ms = playback.stats()['audio_age_ms']
+    interval_ms = _CHUNK_NS / 1_000_000
+
+    assert video_ms > 0 and audio_ms > 0
+    assert abs(video_ms - audio_ms) <= interval_ms * 1.5, (
+        'video +{}ms against audio +{}ms'.format(video_ms, audio_ms)
+    )
+
+
+def test_the_skew_is_visible_when_the_delays_disagree(monkeypatch):
+    """
+    And it has to *fail* when they do — a readout that always says 'aligned' is
+    the state this was in before.
+    """
+    clock = {'now': 0}
+    monkeypatch.setattr('desktop.audio.time.perf_counter_ns',
+                        lambda: clock['now'])
+
+    jitter = JitterBuffer(fixed_delay_ns=20 * _CHUNK_NS, calibrate=False)
+    ring = AudioRingBuffer(max_chunks=200, sample_rate=_RATE)
+    playback = AudioPlayback(ring, jitter, sample_rate=_RATE, channels=1,
+                             block_size=_CHUNK)
+
+    for i in range(60):
+        ts = i * _CHUNK_NS + 1
+        ring.append(ts, _pcm(i + 1))
+        jitter.push(ts, b'v')
+
+    clock['now'] = 40 * _CHUNK_NS
+    jitter.next_for_slot()
+
+    # Audio alone held twice as long — the shape of the original defect.
+    jitter._fixed_delay_ns = 40 * _CHUNK_NS
+    playback._needs_seek = True
+    _pull(playback)
+
+    skew = (jitter.sync_stats()['video_age_ms']
+            - playback.stats()['audio_age_ms'])
+    assert skew < -10 * _CHUNK_NS / 1_000_000, (
+        'a several-chunk split reported as aligned'
+    )

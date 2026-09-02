@@ -159,9 +159,11 @@ python pipeline.py --execution-provider cuda
 ```
 
 And point the desktop at it. If the desktop is the **same machine**, that is
-`localhost` and the network round trip disappears — worth lowering
-`DEFAULT_PLAYOUT_DELAY_NS` in `desktop/audio.py`, since 550ms exists to cover a
-network that is no longer there.
+`localhost` and the network round trip disappears — and the playout delay
+follows it down on its own, since D is measured from the link over the first
+few seconds rather than assumed. Watch for the
+`[SYNC] playout delay calibrated to Nms` line; `PHANTOM_PLAYOUT_DELAY_MS`
+overrides it if you want a specific number.
 
 You still need OBS and a virtual audio cable on that machine, because you are
 still the operator. See [SETUP_CHECKLIST.md](SETUP_CHECKLIST.md).

@@ -201,6 +201,9 @@ def test_the_delay_is_fixed_by_default():
     Adaptive is right for video alone and wrong once audio shares the clock:
     every adjustment becomes a skip or a silence. Jitter is more damaging than
     delay — people adapt to a constant 550ms and never to one that moves.
+
+    550ms is now the *provisional* value, replaced once by a measured one — but
+    only after a full RTT window, which six samples is not.
     """
     buf = JitterBuffer()
     assert buf.target_delay_ns == DEFAULT_PLAYOUT_DELAY_NS
@@ -230,7 +233,7 @@ def test_adaptive_is_still_reachable():
 
 
 def _buf_with(frames, now, delay_ms=100):
-    buf = JitterBuffer(fixed_delay_ns=delay_ms * _MS)
+    buf = JitterBuffer(fixed_delay_ns=delay_ms * _MS, calibrate=False)
     for ts, payload in frames:
         buf.push(ts, payload)
     return buf
@@ -322,3 +325,165 @@ def test_a_healthy_stream_never_escalates(monkeypatch):
         buf.next_for_slot()
 
     assert buf.sync_stats()['escalations'] == 0
+
+
+# ── One delay, and it is the one both streams read ─────────────────────
+
+
+def test_release_uses_the_delay_in_force_not_the_rtt_estimate(monkeypatch):
+    """
+    The defect this file exists to prevent recurring.
+
+    `pop_eligible` read `self._rtt.target_delay_ns` while audio positioned
+    itself against `self.target_delay_ns`. Video was therefore released on
+    arrival while audio waited the fixed delay, and on a call the sound trailed
+    the lips by the difference — several hundred milliseconds on a link whose
+    RTT is nowhere near the fixed value.
+
+    Nothing caught it because every existing assertion advanced the clock past
+    *both* numbers. This one drives them apart on purpose.
+    """
+    clock = {'now': 0}
+    monkeypatch.setattr('desktop.audio.time.perf_counter_ns',
+                        lambda: clock['now'])
+
+    buf = JitterBuffer(fixed_delay_ns=600 * _MS, calibrate=False)
+    for _ in range(200):
+        buf._rtt.record(1_000_000_000, 1_000_000_000 + 20 * _MS)
+    assert buf._rtt.target_delay_ns < 100 * _MS, 'estimate not driven apart'
+
+    buf.push(1, b'frame')
+
+    clock['now'] = 300 * _MS
+    assert buf.next_for_slot() is None, (
+        'released against the RTT estimate instead of the delay in force'
+    )
+
+    clock['now'] = 650 * _MS
+    assert buf.next_for_slot() == (1, b'frame')
+
+
+def test_stats_report_the_delay_actually_in_force():
+    """
+    The readout named the adaptive estimate, so `[SYNC] delay=` and the badge
+    never showed the number either stream was held to — which is most of why
+    the split above survived so long. Both numbers are reported now, because
+    the interesting state is when they disagree.
+    """
+    buf = JitterBuffer(fixed_delay_ns=600 * _MS, calibrate=False)
+    for _ in range(200):
+        buf._rtt.record(1_000_000_000, 1_000_000_000 + 20 * _MS)
+
+    stats = buf.sync_stats()
+    assert stats['target_delay_ms'] == 600.0
+    assert stats['rtt_target_ms'] < 600.0
+
+
+def test_escalation_moves_the_delay_video_reads(monkeypatch):
+    """
+    Escalation raised `_fixed_delay_ns`, which only audio read — so a link bad
+    enough to trigger it pushed audio further behind the picture while doing
+    nothing about the repeats it was raised to steady.
+    """
+    clock = {'now': 200 * _MS}
+    monkeypatch.setattr('desktop.audio.time.perf_counter_ns',
+                        lambda: clock['now'])
+
+    buf = _buf_with([(1, b'a')], now=0)
+    assert buf.next_for_slot() == (1, b'a')
+    for _ in range(400):
+        buf.next_for_slot()
+
+    assert buf.sync_stats()['escalations'] >= 1
+    assert buf.target_delay_ns > 100 * _MS
+
+    # A frame younger than the raised delay must now be held back too.
+    buf.push(clock['now'] - 150 * _MS, b'b')
+    assert buf.next_for_slot() == (1, b'a'), 'video ignored the raised delay'
+
+
+# ── Calibrate once, then freeze ────────────────────────────────────────
+
+
+def _calibrated(monkeypatch, rtt_ns=200 * _MS, frames=60):
+    """A buffer fed `frames` frames at a steady round trip."""
+    clock = {'now': 0}
+    monkeypatch.setattr('desktop.audio.time.perf_counter_ns',
+                        lambda: clock['now'])
+    buf = JitterBuffer()
+    # The clock starts past the round trip, so no frame carries a capture
+    # stamp at or below zero — which `RTTTracker.record` discards as a clock
+    # anomaly and `pop_eligible` treats as a legacy frame.
+    for i in range(1, frames + 1):
+        clock['now'] = rtt_ns + i * 50 * _MS
+        buf.push(clock['now'] - rtt_ns, b'f')
+    return buf, clock
+
+
+def test_calibration_commits_once_and_then_holds(monkeypatch):
+    """
+    D cannot be smaller than what video costs — a frame cannot be shown before
+    it arrives. What it must not be is *larger*, which is what a constant tuned
+    against one datacenter guarantees everywhere else: 550ms against a 200ms
+    link holds audio a third of a second longer than the picture needs.
+
+    p95 (200) + the spread floor (50) + margin (80) = 330, quantised to 325.
+    """
+    buf, clock = _calibrated(monkeypatch)
+
+    assert buf.calibrated
+    assert buf.target_delay_ns == 325 * _MS
+    assert buf.target_delay_ns < DEFAULT_PLAYOUT_DELAY_NS
+
+    for i in range(61, 1061):
+        clock['now'] = 200 * _MS + i * 50 * _MS
+        buf.push(clock['now'] - 200 * _MS, b'f')
+
+    assert buf.target_delay_ns == 325 * _MS, 'D moved after it was committed'
+
+
+def test_calibration_moves_the_epoch_once(monkeypatch):
+    """Audio's cursor will not follow a changing delay; the epoch tells it to."""
+    buf, clock = _calibrated(monkeypatch)
+    epoch = buf.delay_epoch
+    assert epoch > 0
+
+    for i in range(61, 400):
+        clock['now'] = 200 * _MS + i * 50 * _MS
+        buf.push(clock['now'] - 200 * _MS, b'f')
+
+    assert buf.delay_epoch == epoch, 'one commit, one reposition'
+
+
+def test_a_new_session_is_measured_again(monkeypatch):
+    """
+    `clear()` runs on reconnect, and a new pod is a new link — inheriting the
+    last one's answer is how a delay measured in Romania ends up in force
+    somewhere else.
+    """
+    buf, _clock = _calibrated(monkeypatch)
+    epoch = buf.delay_epoch
+
+    buf.clear()
+
+    assert not buf.calibrated
+    assert buf.target_delay_ns == DEFAULT_PLAYOUT_DELAY_NS
+    assert buf.delay_epoch > epoch, 'audio was not told the number changed'
+
+
+def test_a_pinned_delay_is_never_calibrated(monkeypatch):
+    """
+    A measurement run pins it: two sessions cannot be compared if the delay
+    chose itself differently in each.
+    """
+    clock = {'now': 0}
+    monkeypatch.setattr('desktop.audio.time.perf_counter_ns',
+                        lambda: clock['now'])
+    buf = JitterBuffer(fixed_delay_ns=400 * _MS, calibrate=False)
+    for i in range(1, 201):
+        clock['now'] = 200 * _MS + i * 50 * _MS
+        buf.push(clock['now'] - 200 * _MS, b'f')
+
+    assert not buf.calibrated
+    assert buf.target_delay_ns == 400 * _MS
+    assert buf.delay_epoch == 0

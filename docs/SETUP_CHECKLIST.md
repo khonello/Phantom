@@ -350,9 +350,16 @@ On the desktop, the viewport shows:
 And the console carries, every two seconds:
 
 ```
-[SYNC] delay=550ms rtt=348/383ms buf=1 held=0 up=6.0Mbps/30fps
-[SYNC] audio buf=210ms underruns=0 trims=0 resyncs=0 out=CABLE Input (VB-Audio Virtual Cable)
+[SYNC] playout delay calibrated to 575ms (rtt p50 348 / p95 383 over 60 samples, was 550ms)
+[SYNC] delay=575ms rtt=348/383ms buf=1 held=0 up=6.0Mbps/30fps
+[SYNC] av video=+591ms audio=+578ms skew=+13ms (aligned)
+[SYNC] audio buf=210ms underruns=0 trims=0 resyncs=0 drift=2.1ms out=CABLE Input (VB-Audio Virtual Cable) (+2.0ms)
 ```
+
+`skew` is the one to read. It is how far apart the two streams' *presented*
+material is: negative means the sound is behind the picture. Within one frame
+interval (50ms at `optimal`) is discrete frames and not a fault; a steady
+several hundred means video and audio are not being held to the same delay.
 
 Two lines to check after setting up a new machine:
 
@@ -407,10 +414,11 @@ confirmed — camera, pod, virtual camera — with nobody else present.
 **3. Check audio on the input meter.** Still in **Settings → Audio**, speak and
 watch the input level bar for `CABLE Output`.
 
-It should move — **about half a second after you speak.** That lag is the
-expected signature, not a fault: audio is deliberately held to
-`DEFAULT_PLAYOUT_DELAY_NS` (550ms) so it lands with video that took a round trip
-to the pod. A meter that responds *instantly* is the thing to worry about, since
+It should move — **about half a second after you speak**, on a remote pod. That
+lag is the expected signature, not a fault: audio is deliberately held to the
+calibrated playout delay so it lands with video that took a round trip to the
+pod. The exact figure is in the `[SYNC] playout delay calibrated to` line, and
+it is smaller on a closer link. A meter that responds *instantly* is the thing to worry about, since
 it means Zoom is on your real microphone and the call will hear you ahead of
 your own face.
 

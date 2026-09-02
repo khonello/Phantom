@@ -61,6 +61,26 @@ DEFAULT_BUFFER_SECONDS = 10  # ring buffer capacity
 # Set 0 to restore the adaptive behaviour.
 DEFAULT_PLAYOUT_DELAY_NS = 550_000_000
 
+# D is *measured*, then frozen — not assumed.
+#
+# 550ms above was picked from one session against one datacenter, and there was
+# no way to change it short of editing this line. On a link with a 350ms round
+# trip that holds audio 200ms longer than video actually costs, which is heard
+# as the sound trailing the lips. Calibration keeps the property that matters —
+# D never moves once speech is running — while letting the number come from the
+# link rather than from a constant: measure for the first `_CALIBRATE_SAMPLES`
+# frames, commit once, and hold.
+#
+# The floor is not `RTTTracker.FLOOR_NS`. D also has to absorb the 33ms display
+# tick and the virtual camera's own queue, neither of which is RTT, so a
+# calibrated delay below ~100ms would freeze the picture to save latency
+# nothing can perceive.
+_CALIBRATE_SAMPLES = 60              # a full RTT window, ~3s at 20fps
+_CALIBRATE_MARGIN_NS = 80_000_000    # headroom above p95, so slots stay fed
+_CALIBRATE_SPREAD_FLOOR_NS = 50_000_000   # one frame interval at 20fps
+_CALIBRATE_FLOOR_NS = 100_000_000
+_DELAY_QUANTUM_NS = 25_000_000       # a delay reported to 1ms invites tuning it
+
 # Raising the delay is a visible step, so it happens on evidence and rarely:
 # only when repeats have been sustained, meaning the link genuinely needs more
 # headroom than D allows.
@@ -229,6 +249,25 @@ def resolve_sample_rate(
     return rate
 
 
+def _stream_latency_ns(stream: Any) -> int:
+    """
+    What a PortAudio stream holds, in nanoseconds, or 0 if it will not say.
+
+    Both ends of the path need it and neither can assume it: the same VB-Audio
+    cable reports 2ms on WASAPI and 90ms on MME. `find_virtual_output` already
+    prefers the low-latency instance; this accounts for whatever is left, so
+    the presented delay is D rather than D plus an unknown device.
+    """
+    try:
+        latency = getattr(stream, 'latency', 0.0)
+        # An OutputStream on a duplex device can report a pair.
+        if isinstance(latency, (tuple, list)):
+            latency = latency[-1] if latency else 0.0
+        return max(0, int(float(latency or 0.0) * 1_000_000_000))
+    except Exception:
+        return 0
+
+
 def describe_device(index: Optional[int]) -> str:
     """Human-readable name for a device index, for logs and status lines."""
     if index is None:
@@ -359,10 +398,17 @@ class AudioCapture:
         self._stream: Optional[Any] = None
         self._running = False
 
+        # What the device holds before handing a block over. Read from
+        # PortAudio once the stream is open, and subtracted from every chunk's
+        # timestamp — a block delivered now was recorded before now.
+        self._input_latency_ns: int = 0
+
         # Voice transformer (set externally via set_voice_transformer)
         self._voice_transformer: Optional['VoiceTransformer'] = None
 
-        # Clock drift monitoring — tracks expected vs actual sample count
+        # Clock drift monitoring — tracks expected vs actual sample count.
+        # 0 means "no baseline yet"; it is taken at the first delivered block,
+        # never at `start()` — see `_audio_callback`.
         self._drift_start_ns: int = 0
         self._drift_samples: int = 0
         # Threshold in seconds: warn if audio clock drifts more than this
@@ -386,8 +432,30 @@ class AudioCapture:
         if status:
             print(f'[AUDIO] capture status: {status}', file=sys.stderr)
 
-        capture_ts = time.perf_counter_ns()
-        self._drift_samples += frames
+        delivered_ts = time.perf_counter_ns()
+
+        # **A chunk's timestamp is its first sample, not its delivery.** `_seek`
+        # computes its offset into a chunk as `(playback_point - chunk_ts)`, so
+        # it reads the stamp as the moment the first sample was recorded. This
+        # callback runs once the block is complete and the device has handed it
+        # over, which is a block's duration plus the input latency later. Both
+        # were previously inside the stamp, and both pushed audio later than it
+        # happened — the direction that makes the sound trail the picture.
+        span_ns = int(frames / self.sample_rate * 1_000_000_000)
+        capture_ts = delivered_ts - span_ns - self._input_latency_ns
+
+        # **The drift baseline starts at the first block, not at `start()`.**
+        # Opening a device takes time — tens to hundreds of milliseconds on
+        # Windows — and measuring from before the stream ran counted that
+        # interval as samples which failed to arrive. `drift_ns` therefore sat
+        # permanently negative by the device-open cost, for the whole session,
+        # and `check_health` only rebaselines above 200ms so anything under
+        # that was warned about every two seconds and never corrected.
+        if self._drift_start_ns == 0:
+            self._drift_start_ns = capture_ts
+        else:
+            self._drift_samples += frames
+
         # Copy the data — sounddevice reuses the buffer after callback returns
         pcm = indata.copy()
         if self._voice_transformer is not None:
@@ -417,8 +485,9 @@ class AudioCapture:
             return
 
         self.ring_buffer.clear()
-        self._drift_start_ns = time.perf_counter_ns()
+        self._drift_start_ns = 0
         self._drift_samples = 0
+        self._input_latency_ns = 0
 
         try:
             self._stream = sd.InputStream(
@@ -430,6 +499,7 @@ class AudioCapture:
                 callback=self._audio_callback,
             )
             self._stream.start()
+            self._input_latency_ns = _stream_latency_ns(self._stream)
             self._running = True
         except Exception as e:
             import sys
@@ -476,6 +546,8 @@ class AudioCapture:
         Used by AudioPlayback to compensate the playback point so audio stays
         aligned with the video playout offset despite hardware clock skew.
         """
+        if self._drift_start_ns == 0:
+            return 0
         elapsed_ns = time.perf_counter_ns() - self._drift_start_ns
         if elapsed_ns <= 0 or self._drift_samples <= 0:
             return 0
@@ -505,7 +577,8 @@ class AudioCapture:
 
         drift_ms = 0.0
         drift_warning = False
-        elapsed_ns = time.perf_counter_ns() - self._drift_start_ns
+        elapsed_ns = (0 if self._drift_start_ns == 0
+                      else time.perf_counter_ns() - self._drift_start_ns)
         if elapsed_ns > 0 and self._drift_samples > 0:
             expected_samples = elapsed_ns / 1_000_000_000 * self.sample_rate
             drift_s = abs(self._drift_samples - expected_samples) / self.sample_rate
@@ -662,14 +735,39 @@ class JitterBuffer:
 
     MAX_FRAMES: int = 60  # ~2 seconds at 30 fps
 
-    def __init__(self, fixed_delay_ns: int = DEFAULT_PLAYOUT_DELAY_NS) -> None:
+    def __init__(
+        self,
+        fixed_delay_ns: int = DEFAULT_PLAYOUT_DELAY_NS,
+        calibrate: bool = True,
+    ) -> None:
+        """
+        Args:
+            fixed_delay_ns: The delay both streams are held to. 0 means adapt,
+                which is the previous behaviour and still reachable
+            calibrate: Treat `fixed_delay_ns` as a provisional value and replace
+                it, once, with one measured from the link. False pins it
+        """
         self._buf: 'collections.deque[Any]' = collections.deque(maxlen=self.MAX_FRAMES)
         self._rtt = RTTTracker()
         # 0 means adapt, which is the previous behaviour and still reachable.
         self._fixed_delay_ns = int(fixed_delay_ns)
+        # What `clear()` returns to, since a new pod is a new link and has to
+        # be measured again rather than inheriting the last one's answer.
+        self._provisional_delay_ns = int(fixed_delay_ns)
+        self._calibrate = bool(calibrate) and self._fixed_delay_ns > 0
+        self._calibrated = False
+        # Bumped whenever D moves. Audio's read cursor is deliberately
+        # continuous and will not follow a changing delay, so it watches this
+        # instead and repositions once — see `AudioPlayback._output_callback`.
+        self._delay_epoch = 0
         # The last frame actually shown. A slot with nothing eligible repeats
         # it rather than slipping the schedule — see `next_for_slot`.
         self._last_shown: Optional[Tuple[int, bytes]] = None
+        # Age of the picture presented at the last slot. Half of the A/V skew
+        # measurement; `AudioPlayback` owns the other half. Nothing measured
+        # this before, which is how video and audio came to be held to two
+        # different delays without any readout disagreeing.
+        self._last_video_age_ns = 0
         self._slots = 0
         self._repeats = 0
         self._repeats_total = 0
@@ -685,6 +783,7 @@ class JitterBuffer:
         """
         arrival_ts = time.perf_counter_ns()
         self._rtt.record(capture_ts, arrival_ts)
+        self._maybe_calibrate()
         self._buf.append((capture_ts, jpeg_bytes))
         self._drop_overflow()
 
@@ -701,7 +800,14 @@ class JitterBuffer:
             return None
 
         now = time.perf_counter_ns()
-        target = self._rtt.target_delay_ns
+        # `self.target_delay_ns`, never `self._rtt.target_delay_ns`. Audio
+        # positions itself against the property, so reading the adaptive
+        # estimate here held the two streams to two different delays: video was
+        # released on arrival while audio waited the fixed D, and the sound
+        # trailed the lips by the difference. It also made escalation actively
+        # harmful — raising D moved audio further back and never touched the
+        # video it was raised to steady.
+        target = self.target_delay_ns
         result: Optional[Tuple[int, bytes]] = None
 
         while self._buf:
@@ -744,6 +850,67 @@ class JitterBuffer:
             return self._fixed_delay_ns
         return self._rtt.target_delay_ns
 
+    @property
+    def delay_epoch(self) -> int:
+        """Increments whenever `target_delay_ns` moves. Audio watches this."""
+        return self._delay_epoch
+
+    @property
+    def calibrated(self) -> bool:
+        """True once D has been measured from this link and frozen."""
+        return self._calibrated
+
+    @property
+    def video_age_ns(self) -> int:
+        """Age of the picture presented at the last slot."""
+        return self._last_video_age_ns
+
+    def _maybe_calibrate(self) -> None:
+        """
+        Replace the provisional delay with one measured from this link, once.
+
+        D cannot be smaller than what video actually costs — a frame cannot be
+        shown before it arrives — so audio necessarily waits as long as video
+        does. What it must not do is wait *longer*, which is what a constant
+        tuned against one datacenter guarantees on every other one.
+
+        p95 rather than the median, because a D that only covers half the
+        frames repeats the other half. Plus the spread and a margin, with the
+        spread floored at one frame interval so a suspiciously steady window
+        cannot produce a delay carrying no headroom at all.
+
+        Committed exactly once per session, about three seconds in, and then
+        frozen: a delay that keeps moving is what made speech break up, and
+        this keeps the fixed-delay property while dropping the guessed number.
+        """
+        if not self._calibrate or self._calibrated:
+            return
+        samples = self._rtt._samples
+        if len(samples) < _CALIBRATE_SAMPLES:
+            return
+
+        arr = np.array(samples, dtype=np.float64)
+        p50 = float(np.median(arr))
+        p95 = float(np.percentile(arr, 95))
+        spread = max(float(np.std(arr)), float(_CALIBRATE_SPREAD_FLOOR_NS))
+        raw = p95 + spread + _CALIBRATE_MARGIN_NS
+        quantised = int(round(raw / _DELAY_QUANTUM_NS)) * _DELAY_QUANTUM_NS
+        delay = max(_CALIBRATE_FLOOR_NS, min(self._rtt.CEILING_NS, quantised))
+
+        self._calibrated = True
+        if delay == self._fixed_delay_ns:
+            return
+
+        self._fixed_delay_ns = delay
+        self._delay_epoch += 1
+        print(
+            '[SYNC] playout delay calibrated to {:.0f}ms '
+            '(rtt p50 {:.0f} / p95 {:.0f} over {} samples, was {:.0f}ms)'
+            .format(delay / 1_000_000, p50 / 1_000_000, p95 / 1_000_000,
+                    len(samples), self._provisional_delay_ns / 1_000_000),
+            file=sys.stderr,
+        )
+
     def next_for_slot(self) -> Optional[Tuple[int, bytes]]:
         """
         The frame to display for this slot, holding the schedule.
@@ -770,16 +937,20 @@ class JitterBuffer:
             arrives, when there is nothing to repeat.
         """
         self._slots += 1
+        now = time.perf_counter_ns()
 
         eligible = self.pop_eligible()
         if eligible is not None:
             self._last_shown = eligible
-            self._maybe_escalate()
-            return eligible
-
-        if self._last_shown is not None:
+        elif self._last_shown is not None:
             self._repeats += 1
             self._repeats_total += 1
+
+        # Measured on the frame actually presented, repeats included: a held
+        # frame really is getting older on screen, and pretending otherwise
+        # would hide the one case where the skew grows.
+        if self._last_shown is not None and self._last_shown[0] > 0:
+            self._last_video_age_ns = now - self._last_shown[0]
 
         self._maybe_escalate()
         return self._last_shown
@@ -809,7 +980,7 @@ class JitterBuffer:
         self._fixed_delay_ns = min(
             _ESCALATE_CEILING_NS, self._fixed_delay_ns + _ESCALATE_STEP_NS)
         self._escalations += 1
-        import sys
+        self._delay_epoch += 1
         print(
             '[SYNC] {:.0f}% of slots repeated — raising playout delay to '
             '{:.0f}ms. The link needs more headroom than the current delay '
@@ -826,8 +997,19 @@ class JitterBuffer:
         self._buf.clear()
         self._rtt.reset()
         self._last_shown = None
+        self._last_video_age_ns = 0
         self._slots = 0
         self._repeats = 0
+        # A new session is a new link, so D is measured again rather than
+        # inheriting the last one's answer. The epoch moves with it: audio may
+        # still be running — `clear()` is called on reconnect — and has to be
+        # told the number under it changed.
+        if self._calibrate and (
+                self._calibrated
+                or self._fixed_delay_ns != self._provisional_delay_ns):
+            self._calibrated = False
+            self._fixed_delay_ns = self._provisional_delay_ns
+            self._delay_epoch += 1
 
     @property
     def depth(self) -> int:
@@ -864,7 +1046,15 @@ class JitterBuffer:
             p50_ms = p95_ms = std_ms = 0.0
 
         return {
-            'target_delay_ms': round(self._rtt.target_delay_ns / 1_000_000, 1),
+            # The delay actually in force. This used to report the adaptive
+            # estimate, so the `[SYNC] delay=` line and the viewport badge never
+            # showed the number either stream was held to, and never moved when
+            # escalation fired — which is most of why a several-hundred-
+            # millisecond A/V split went unnoticed for so long.
+            'target_delay_ms': round(self.target_delay_ns / 1_000_000, 1),
+            'rtt_target_ms': round(self._rtt.target_delay_ns / 1_000_000, 1),
+            'calibrated': self._calibrated,
+            'video_age_ms': round(self._last_video_age_ns / 1_000_000, 1),
             'buffer_depth': len(self._buf),
             'rtt_samples': len(samples),
             'rtt_p50_ms': round(p50_ms, 1),
@@ -935,6 +1125,18 @@ class AudioPlayback:
         # Set when playback has no cursor yet — at start, and after a
         # correction large enough that continuing would be meaningless.
         self._needs_seek = True
+        # Capture instant of the next sample to be written. Advanced by what is
+        # actually consumed, re-anchored to a chunk's own stamp whenever a block
+        # starts on one, so it survives a gap in capture. This is what makes the
+        # audio half of the A/V skew measurable at all.
+        self._cursor_ts = 0
+        self._last_audio_age_ns = 0
+        # What the output device holds after this callback returns. Read from
+        # PortAudio once the stream is open.
+        self._output_latency_ns = 0
+        # The delay generation this cursor was positioned against. -1 so the
+        # first callback always establishes it.
+        self._delay_epoch = -1
         # Diagnosis. Audio faults are audible but invisible: "it sounds broken"
         # could be an underrun, a trim, or the device itself, and until these
         # were counted there was no way to tell which.
@@ -974,6 +1176,7 @@ class AudioPlayback:
         pieces missing.
         """
         self._leftover = None
+        self._cursor_ts = playback_point
 
         while True:
             chunk = self._ring.peek_oldest()
@@ -988,7 +1191,11 @@ class AudioPlayback:
                 continue
 
             if chunk_ts >= playback_point:
-                return                        # future audio; start at its head
+                # Future audio; playback starts at its head, which is later
+                # than asked for. Say so, rather than reporting the age we
+                # wanted — that gap is the underrun about to be counted.
+                self._cursor_ts = chunk_ts
+                return
 
             self._ring.popleft()
             offset = int((playback_point - chunk_ts)
@@ -1026,10 +1233,31 @@ class AudioPlayback:
 
         now = time.perf_counter_ns()
         target = self._jitter.target_delay_ns
-        drift_ns = 0
-        if self._audio_capture is not None:
-            drift_ns = self._audio_capture.drift_ns
-        playback_point = now - target + drift_ns
+
+        # The block written here is not audible now — it is audible once the
+        # device has played what it already holds. So the sample to write is
+        # the one whose presentation instant is `now + output_latency`, not
+        # `now`. Without this the delay is D *plus* the device, and the device
+        # is 2ms on WASAPI and 90ms on MME for the same cable.
+        #
+        # The capture clock's drift is deliberately **not** added here any
+        # more. The cursor below is continuous, so a drift term only moves the
+        # seek point — and a rate mismatch cannot be repaired by seeking
+        # somewhere the samples are not; that needs a resampler, which
+        # docs/ACCEPTED_RISKS.md records as not being carried. What it did do
+        # was fold the input device's open latency into the position for the
+        # whole session. It is still measured, and now only reported.
+        playback_point = now - target + self._output_latency_ns
+
+        # D moved: calibration committed, or the buffer escalated. This is the
+        # only thing besides a trim or a resync permitted to move the cursor.
+        # The cursor is continuous precisely so it does not chase an estimate;
+        # calibrating is what turns the estimate into a decision, once, and a
+        # decision is worth one reposition.
+        epoch = self._jitter.delay_epoch
+        if epoch != self._delay_epoch:
+            self._delay_epoch = epoch
+            self._needs_seek = True
 
         # Establish or re-establish the cursor. After this the fill below is
         # pure sequential reading.
@@ -1049,6 +1277,7 @@ class AudioPlayback:
                 self._seek(playback_point)
 
         written = 0
+        cursor_ts = self._cursor_ts
 
         if self._leftover is not None and self._leftover.shape[0] > 0:
             n = min(self._leftover.shape[0], frames - written)
@@ -1061,12 +1290,23 @@ class AudioPlayback:
             chunk = self._ring.popleft()
             if chunk is None:
                 break
-            _chunk_ts, pcm = chunk
+            chunk_ts, pcm = chunk
+            if written == 0:
+                # Nothing carried over, so this block begins exactly at this
+                # chunk. Re-anchoring on its own stamp keeps the reported age
+                # true across a gap in capture, which a running count would
+                # quietly absorb.
+                cursor_ts = chunk_ts
             n = min(pcm.shape[0], frames - written)
             outdata[written:written + n] = pcm[:n]
             written += n
             if n < pcm.shape[0]:
                 self._leftover = pcm[n:]
+
+        if written > 0:
+            self._last_audio_age_ns = now - cursor_ts
+            self._cursor_ts = cursor_ts + int(
+                written / self.sample_rate * 1_000_000_000)
 
         if written < frames:
             # Underrun: nothing captured yet for this block. Silence is the
@@ -1081,11 +1321,20 @@ class AudioPlayback:
         Returns:
             buffered_ms, and counts of underruns, trims and resyncs since start
         """
+        drift_ms = 0.0
+        if self._audio_capture is not None:
+            drift_ms = round(self._audio_capture.drift_ns / 1_000_000, 1)
         return {
             'buffered_ms': round(self._buffered_ns() / 1_000_000, 1),
+            # Age of the audio this callback emitted. The counterpart of
+            # `JitterBuffer.video_age_ms`; the difference between the two is
+            # the A/V skew, and nothing measured it before.
+            'audio_age_ms': round(self._last_audio_age_ns / 1_000_000, 1),
             'underruns': self._underruns,
             'trims': self._trims,
             'resyncs': self._resyncs,
+            'drift_ms': drift_ms,
+            'out_latency_ms': round(self._output_latency_ns / 1_000_000, 1),
             'device': describe_device(self.device),
             'virtual': self.device is not None,
         }
@@ -1107,6 +1356,8 @@ class AudioPlayback:
 
         self._leftover = None
         self._needs_seek = True
+        self._cursor_ts = 0
+        self._output_latency_ns = 0
 
         # This audio is delayed to match the swapped video, so where it goes
         # decides whether the delay is useful or harmful. Into a virtual output
@@ -1142,6 +1393,7 @@ class AudioPlayback:
                 callback=self._output_callback,
             )
             self._stream.start()
+            self._output_latency_ns = _stream_latency_ns(self._stream)
             self._running = True
         except Exception as e:
             wanted = device_sample_rate(self.device)
