@@ -1468,3 +1468,29 @@ class ProcessingPipeline:
     def photo_results(self) -> List[PhotoResult]:
         """Per-photo outcomes of the most recent batch, in target order."""
         return list(self._photo_results)
+
+    def forget_session(self) -> None:
+        """
+        Drop everything this session learned about the operator's face.
+
+        The files are the obvious half and `handle_cleanup_session` removes
+        them, but deleting an upload does not unload what was built from it:
+        the averaged embedding lives on `SwappingProcessor.source_face`, the
+        per-image faces sit in `FaceDatabase`'s cache, and the compositor still
+        holds smoothed pixels of the last swapped frame. On a rented pod that
+        is a stranger's identity left in the memory of a machine about to be
+        handed to someone else.
+
+        Photo results go too. They name output paths that are being deleted
+        alongside them, so keeping the list would leave `get_photo_results`
+        answering with files that are no longer there.
+
+        Safe at any time — every field is rebuilt by the next `set_source`.
+        """
+        if self._database is not None:
+            self._database.clear()
+        if self._swapping_proc is not None:
+            self._swapping_proc.source_face = None
+            self._swapping_proc.last_review = None
+        self._photo_results = []
+        self._reset_guard_state()

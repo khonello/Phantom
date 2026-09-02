@@ -865,12 +865,42 @@ Read by the orchestrator. `.env.example` carries the same list with commentary.
 | `RUNPOD_REPO_URL` | — | Cloned on first deploy. Embed a token for a private repo |
 | `RUNPOD_MAX_UPTIME` | `120` | Minutes before the pod stops itself. `0` disables |
 | `RUNPOD_STOP_WARNING` | `5` | Minutes of warning before that |
+| `PHANTOM_SESSION_GRACE` | `120` | Seconds with no client before the session is erased. `0` disables |
 
 Leave `RUNPOD_GPU_TYPES` unset unless you have a reason to pin. Auto-discovery
 queries RunPod, filters by VRAM and price, drops GPUs whose compute capability
 exceeds what the image's PyTorch and ONNX builds support — Blackwell `sm_120` on
 an `sm_90` image, say — and tries the cheapest first. A pinned list gets none of
 that and goes stale as RunPod's fleet changes.
+
+---
+
+## Session erase
+
+The pipeline holds the operator's face: the source photos, the embedding built
+from them, uploaded target photos and videos, and every swapped output. All of
+it lives under one tree — `PHANTOM_TEMP_DIR`, else `/workspace/tmp/phantom` when
+a network volume is mounted — so one delete covers it.
+
+That matters because the pod is rented and handed on afterwards, and **the
+network volume survives a stop**, so an upload outlives the customer who made
+it unless something removes it.
+
+Two things trigger the erase. The desktop sends `cleanup_session` as it closes,
+which is the prompt path; and the pipeline sweeps on its own once the last
+client has been gone for `PHANTOM_SESSION_GRACE` seconds, which is what covers
+the app being killed rather than closed.
+
+The grace period is why it is a delay and not an event. `PipelineClient`
+reconnects indefinitely by design — a pod can be slow and a laptop can sleep —
+so a dropped socket is usually a live session rather than a finished one, and
+erasing on the disconnect itself would delete the operator's face mid-call every
+time the link hiccuped. A reconnect inside the window calls the sweep off.
+
+Set it to `0` on a pipeline that several clients legitimately come and go from.
+A desktop that reconnects after the erase is told: `_restore_state_from_server`
+reads back an empty source and clears the sidebar, rather than leaving it
+claiming a face the pod no longer has.
 
 ---
 

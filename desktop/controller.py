@@ -662,9 +662,15 @@ class PipelineClient:
         finally:
             self._ws_lock.release()
 
-    def cleanup_session(self) -> Dict[str, Any]:
-        """Clean up session."""
-        return self._send('cleanup_session')
+    def cleanup_session(self, timeout: float = 5.0) -> Dict[str, Any]:
+        """Erase the session on the pipeline: source, targets, outputs, embedding.
+
+        Args:
+            timeout: Seconds to wait. The default is short because the caller is
+                     usually a window trying to close, and a pod that has already
+                     gone away should not hold that up.
+        """
+        return self._send('cleanup_session', _timeout=timeout)
 
     def shutdown(self) -> Dict[str, Any]:
         """Request server shutdown."""

@@ -758,6 +758,20 @@ class Bridge(QObject):
             # shows the label only (no broken image path).
             self._source_thumbnail = ''
             self._set_source_set(True)
+        elif not source_loaded and self._source_set:
+            # The losing direction, which is the one the session sweep creates.
+            # The pipeline erases the session once the last client has been gone
+            # for `PHANTOM_SESSION_GRACE`, so a long enough outage comes back to
+            # a pod that no longer has the face this window is still showing.
+            # Left alone, the next job fails for a reason nothing on screen
+            # explains — the sidebar says a source is set and the server
+            # disagrees.
+            self._source_thumbnail = ''
+            self._source_label = ''
+            self._set_source_set(False)
+            self.sourceLabelChanged.emit(self._source_label)
+            self._set_status('session expired on the pipeline — select a face source',
+                             error=True)
 
     @Slot()
     def toggleVirtualCam(self) -> None:
@@ -2213,6 +2227,22 @@ class Bridge(QObject):
         if self._webcam_thread is not None:
             self._webcam_thread.join(timeout=3)
         self._client.stop_stream()
+
+        # Erase the session before dropping the socket, so the operator's face
+        # and everything swapped from it do not outlive the app on a machine
+        # that is rented and handed on. Best-effort and bounded: this runs while
+        # someone is waiting for a window to close, and a pod that has already
+        # gone away must not hold the close open for the full default timeout.
+        #
+        # The pipeline sweeps on its own once the last client has been gone for
+        # `PHANTOM_SESSION_GRACE`, which is what covers the app being killed
+        # rather than closed. This is the prompt path, not the only one.
+        try:
+            self._client.cleanup_session(timeout=5.0)
+        except Exception as e:
+            print(f'[BRIDGE] session cleanup failed: {type(e).__name__}: {e}',
+                  file=sys.stderr)
+
         self._client.close()
 
     # ── Internal ──────────────────────────────────────────────────────

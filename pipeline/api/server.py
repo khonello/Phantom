@@ -26,7 +26,11 @@ from typing import Any, Dict, Optional, Set
 
 from pipeline.config import FaceSwapConfig, CONFIG
 from pipeline.events import BUS, ERROR, FRAME_READY, DETECTION, PHOTO_RESULT, STATUS_CHANGED, PIPELINE_STARTED, PIPELINE_STOPPED, WARNING
-from pipeline.api.handlers import dispatch_command, HandlerContext
+from pipeline.api.handlers import (
+    dispatch_command,
+    handle_cleanup_session,
+    HandlerContext,
+)
 from pipeline.processing.pipeline import ProcessingPipeline
 from pipeline.logging import emit_status, emit_error
 
@@ -95,6 +99,19 @@ class WebSocketAPIServer:
         # Connected WebSocket clients (set of websocket objects)
         self._clients: Set[Any] = set()
         self._clients_lock = threading.Lock()
+
+        # Erasing the session once the last client has gone for good.
+        #
+        # Not on the disconnect itself: `PipelineClient` reconnects
+        # indefinitely by design, because a pod can be slow and a laptop can
+        # sleep, so a dropped socket is usually a blip in a session that is
+        # still live. Wiping on the drop would make a flaky link unusable —
+        # the operator's face would be deleted mid-call and the swap would
+        # stop. A grace period distinguishes the blip from the departure, and
+        # a reconnect inside it cancels the sweep.
+        self._session_grace = float(os.getenv('PHANTOM_SESSION_GRACE', '120'))
+        self._session_sweep: Optional[threading.Timer] = None
+        self._sweep_lock = threading.Lock()
 
         # Frame broadcast queue — decouples pipeline thread from network I/O.
         # Pipeline thread puts encoded frames here; a dedicated sender thread
@@ -209,6 +226,8 @@ class WebSocketAPIServer:
                     emit_error(f'Client close error: {type(e).__name__}: {e}', scope='API_SERVER')
             self._clients.clear()
 
+        self._cancel_session_sweep()
+
         if self._server_thread is not None:
             self._server_thread.join(timeout=3.0)
             self._server_thread = None
@@ -236,6 +255,7 @@ class WebSocketAPIServer:
 
                 with self._clients_lock:
                     self._clients.add(websocket)
+                self._cancel_session_sweep()
 
                 emit_status(f'Client connected: {client_addr}', scope='API_SERVER')
 
@@ -257,10 +277,13 @@ class WebSocketAPIServer:
                 finally:
                     with self._clients_lock:
                         self._clients.discard(websocket)
+                        remaining = len(self._clients)
                     emit_status(
                         f'Client disconnected: {client_addr}',
                         scope='API_SERVER',
                     )
+                    if remaining == 0:
+                        self._arm_session_sweep()
 
             def process_request(connection: Any, request: Any) -> Any:
                 """Respond to plain HTTP requests (RunPod proxy health probes).
@@ -308,6 +331,61 @@ class WebSocketAPIServer:
             emit_error(f'Server loop error: {e}', exception=e, scope='API_SERVER')
 
     # ── Message handling ──────────────────────────────────────────────────────
+
+    def _arm_session_sweep(self) -> None:
+        """
+        Schedule the session erase, the last client having gone.
+
+        Does nothing when the grace period is 0, which is how a long-running
+        pipeline that several clients come and go from opts out.
+        """
+        if self._session_grace <= 0:
+            return
+
+        with self._sweep_lock:
+            if self._session_sweep is not None:
+                self._session_sweep.cancel()
+            self._session_sweep = threading.Timer(
+                self._session_grace, self._sweep_session,
+            )
+            self._session_sweep.daemon = True
+            self._session_sweep.start()
+
+    def _cancel_session_sweep(self) -> None:
+        """Call off a scheduled erase — someone reconnected."""
+        with self._sweep_lock:
+            if self._session_sweep is not None:
+                self._session_sweep.cancel()
+                self._session_sweep = None
+
+    def _sweep_session(self) -> None:
+        """
+        Erase the session, if nobody came back inside the grace period.
+
+        The client set is re-checked here rather than trusted from when the
+        timer was armed: a reconnect races the fire, and deleting the source
+        out from under a client that is already streaming again is the one
+        outcome this must not produce.
+        """
+        with self._clients_lock:
+            if self._clients:
+                return
+
+        with self._sweep_lock:
+            self._session_sweep = None
+
+        try:
+            handle_cleanup_session(self.config, self.pipeline)
+            emit_status(
+                f'No client for {self._session_grace:.0f}s — session erased',
+                scope='API_SERVER',
+            )
+        except Exception as e:
+            emit_error(
+                f'Session sweep failed: {type(e).__name__}: {e}',
+                exception=e,
+                scope='API_SERVER',
+            )
 
     def _handle_text_message(self, websocket: Any, message: str) -> None:
         """

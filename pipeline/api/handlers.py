@@ -2010,12 +2010,36 @@ def handle_create_embedding(config: FaceSwapConfig, paths: List[str]) -> Respons
         )
 
 
-def handle_cleanup_session(config: FaceSwapConfig) -> ResponseMessage:
+def handle_cleanup_session(
+    config: FaceSwapConfig,
+    pipeline: Optional[ProcessingPipeline] = None,
+) -> ResponseMessage:
     """
-    Clean up current session (clear source, temp files, etc.).
+    Erase the session: the operator's face, and everything made from it.
+
+    Everything transient the pipeline holds lives under `_upload_dir()` — the
+    source photos, uploaded target photos and videos, a template job's output
+    directory, the `_swapped` files written beside each target, and a render
+    relocated there because the requested output directory was on another
+    machine. One tree, so one delete covers all of it.
+
+    That is deliberate rather than incidental, and it is what makes this
+    honest on a rented pod: the machine is handed to someone else afterwards,
+    so a face left in `/workspace/tmp` outlives the customer who uploaded it.
+
+    Files are only half of it. `pipeline.forget_session()` drops what was
+    *built* from them — the averaged embedding, the cached per-image faces and
+    the compositor's smoothed pixels — which a delete on disk does not touch.
+
+    Note what is deliberately **not** removed: an output the operator asked for
+    by path, on a pipeline running on their own machine. `handle_set_output`
+    only relocates into the upload tree when the requested directory does not
+    exist here; when it does, the render is a file they chose the location of,
+    and deleting it would be destroying the thing they ran the job to get.
 
     Args:
         config: FaceSwapConfig
+        pipeline: Pipeline whose in-memory identity should be dropped, if any
 
     Returns:
         ResponseMessage with success status
@@ -2023,6 +2047,19 @@ def handle_cleanup_session(config: FaceSwapConfig) -> ResponseMessage:
     config.set('source_path', None)
     config.set('source_paths', [])
     config.set('embedding_ready', False)
+    # Targets name files inside the tree about to be deleted, so leaving them
+    # set would point a later job at paths that no longer resolve.
+    config.set('target_path', None)
+    config.set('target_paths', [])
+    config.set('target_face_points', [])
+    config.set('output_dir', None)
+    _clear_template(config)
+
+    # Partial video uploads hold an open handle to a file under the tree.
+    # Closing them first, rather than deleting the directory out from under a
+    # writer that will go on writing to a detached inode.
+    for upload_id in list(_VIDEO_UPLOADS):
+        _discard_video_upload(upload_id)
 
     # Remove any uploaded temp files. Resolved once: `_upload_dir()` creates
     # the directory it returns, so calling it inside the `isdir` test made the
@@ -2032,6 +2069,9 @@ def handle_cleanup_session(config: FaceSwapConfig) -> ResponseMessage:
     uploads = _upload_dir()
     if os.path.isdir(uploads):
         shutil.rmtree(uploads, ignore_errors=True)
+
+    if pipeline is not None:
+        pipeline.forget_session()
 
     emit_status('Session cleaned up', scope='API')
 
@@ -2223,7 +2263,7 @@ def dispatch_command(
             return handle_create_embedding(config, data.get('paths', []))
 
         elif command_type == 'cleanup_session':
-            return handle_cleanup_session(config)
+            return handle_cleanup_session(config, ctx.pipeline)
 
         elif command_type == 'get_state':
             return handle_get_state(config, ctx.pipeline)
