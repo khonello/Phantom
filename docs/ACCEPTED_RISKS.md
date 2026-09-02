@@ -97,22 +97,28 @@ it fixes*, so the first recovery is always manual.
 python runpod/orchestrator.py run "git -C /workspace/Phantom remote get-url origin"
 ```
 
-**Recovery**, for a repository that is readable anonymously:
+**Recovery.** Retry first — it is transient, and `startup.sh` now retries three
+times over ~20s on its own. If it persists, authenticate: an authenticated pull
+is not subject to the anonymous rate limit, whether or not the repository needs
+a token to be *read*.
 
 ```bash
-python runpod/orchestrator.py run   "git -C /workspace/Phantom remote set-url origin https://github.com/khonello/Phantom.git"
+python runpod/orchestrator.py run "git -C /workspace/Phantom remote set-url origin https://<token>@github.com/khonello/Phantom.git"
 ```
 
-If the repository is private, the URL needs a token
-(`https://<token>@github.com/...`), and then the token is on the volume for
-every future pod to read — the trade recorded below. Either way, deleting the
-checkout and redeploying also works, since `RUNPOD_REPO_URL` is read from the
-orchestrator's own `.env` at deploy time and the clone step only runs when the
+Set `RUNPOD_REPO_URL` in `.env` to the same value, or any pod that re-clones
+goes straight back to being anonymous. Both `start` and `resume` run the clone
+step, so this is not only a first-deploy concern. The token then lives in
+`.git/config` on the volume for every future pod to read — the trade recorded
+below.
+
+Deleting the checkout and redeploying also works, and picks up whatever
+`RUNPOD_REPO_URL` currently says, since the clone step only runs when the
 directory is absent:
 
 ```bash
 python runpod/orchestrator.py run "rm -rf /workspace/Phantom"
-python runpod/orchestrator.py start
+python runpod/orchestrator.py resume
 ```
 
 The venv, models and templates live elsewhere on the volume, so that costs one
