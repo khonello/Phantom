@@ -112,11 +112,25 @@ if [ -d "${PHANTOM_DIR}/.git" ]; then
 
     # And bound it, because a half-open connection to the remote hangs a fetch
     # rather than erroring. Two minutes is far more than this pull ever needs.
-    set +e
-    _GIT_OUTPUT=$(timeout 120 git -C "${PHANTOM_DIR}" pull --ff-only 2>&1)
-    _GIT_STATUS=$?
-    set -e
-    echo "${_GIT_OUTPUT}"
+    # Retried, because the failure this actually hits is transient. GitHub
+    # refuses *anonymous* traffic from shared datacenter addresses under load
+    # and answers 401, so a pod can pull fine for days and then not, with
+    # nothing changed at either end — it cleared on its own once, and returned.
+    # Three attempts over ~20s costs nothing on the happy path and rides
+    # straight through the version of this that resolves by itself.
+    _GIT_STATUS=1
+    for _GIT_TRY in 1 2 3; do
+        set +e
+        _GIT_OUTPUT=$(timeout 120 git -C "${PHANTOM_DIR}" pull --ff-only 2>&1)
+        _GIT_STATUS=$?
+        set -e
+        echo "${_GIT_OUTPUT}"
+        [ ${_GIT_STATUS} -eq 0 ] && break
+        if [ ${_GIT_TRY} -lt 3 ]; then
+            echo "  pull attempt ${_GIT_TRY} failed (exit ${_GIT_STATUS}) — retrying..."
+            sleep $((_GIT_TRY * 5))
+        fi
+    done
 
     if [ ${_GIT_STATUS} -ne 0 ]; then
         # This used to be one swallowed WARNING, and that is why a stale pod is
@@ -138,26 +152,42 @@ if [ -d "${PHANTOM_DIR}/.git" ]; then
         echo "Branch:      $(git -C "${PHANTOM_DIR}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
         echo "Remote:      $(git -C "${PHANTOM_DIR}" remote get-url origin 2>/dev/null | sed 's#//[^@]*@#//***@#' || echo unknown)"
         echo ""
-        _GIT_DIRTY=$(git -C "${PHANTOM_DIR}" status --porcelain 2>/dev/null | head -20)
-        if [ -n "${_GIT_DIRTY}" ]; then
-            echo "The working tree is NOT clean. --ff-only refuses to overwrite"
-            echo "local changes, and this is the usual reason a pod stops taking"
-            echo "updates while a fresh GPU changes nothing — the checkout lives"
-            echo "on the network volume, so it outlives the pod."
+        # Only *tracked* modifications block a fast-forward. Untracked files do
+        # not, and reporting them as the cause sends the reader after the wrong
+        # thing — which it did, pointing at a stray directory while the real
+        # answer was sitting in the 401 above.
+        _GIT_MODIFIED=$(git -C "${PHANTOM_DIR}" status --porcelain --untracked-files=no 2>/dev/null | head -20)
+        if [ -n "${_GIT_MODIFIED}" ]; then
+            echo "Tracked files are modified, and --ff-only will not overwrite"
+            echo "them. The checkout is on the network volume, so this outlives"
+            echo "the pod and a fresh GPU changes nothing:"
             echo ""
-            echo "${_GIT_DIRTY}"
+            echo "${_GIT_MODIFIED}"
             echo ""
             echo "To discard them and take the remote's version:"
             echo "  python runpod/orchestrator.py run \\"
-            echo "    \"git -C ${PHANTOM_DIR} reset --hard && git -C ${PHANTOM_DIR} clean -fd\""
+            echo "    \"git -C ${PHANTOM_DIR} reset --hard\""
         fi
-        echo ""
-        echo "If that says 'could not read Username', the remote above is one"
-        echo "GitHub will not serve anonymously — private, renamed, or wrong."
-        echo "It answers 401 rather than 404, which is why git asks instead of"
-        echo "failing. Point origin at a URL that resolves:"
-        echo "  python runpod/orchestrator.py run \\"
-        echo "    \"git -C ${PHANTOM_DIR} remote set-url origin <url>\""
+
+        case "${_GIT_OUTPUT}" in
+            *401*|*"could not read Username"*|*"Authentication failed"*)
+                echo "This is an authentication failure, and the remote above is"
+                echo "the thing to look at rather than the working tree."
+                echo ""
+                echo "If that repository is public, GitHub is refusing this pod"
+                echo "*anonymously* — shared datacenter addresses get rate"
+                echo "limited, which is why it can work for days and then not."
+                echo "An authenticated pull is not subject to that limit, so the"
+                echo "fix is the same either way: give the URL a token."
+                echo ""
+                echo "  python runpod/orchestrator.py run \\"
+                echo "    \"git -C ${PHANTOM_DIR} remote set-url origin \\"
+                echo "     https://<token>@github.com/<owner>/<repo>.git\""
+                echo ""
+                echo "Set RUNPOD_REPO_URL in .env to the same, so a future pod"
+                echo "clones with it rather than rediscovering this."
+                ;;
+        esac
         echo ""
         echo "Booting anyway would run code that is not the code you pushed."
         echo "Set PHANTOM_ALLOW_STALE=1 to continue regardless."
