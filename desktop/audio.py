@@ -30,10 +30,14 @@ if TYPE_CHECKING:
 # PCM chunk: (capture_ts_ns, pcm_data as float32 numpy array)
 AudioChunk = Tuple[int, npt.NDArray[Any]]
 
-# Default audio parameters
-DEFAULT_SAMPLE_RATE = 44100
+# Default audio parameters.
+#
+# 48 kHz rather than 44.1: this is a fallback for when a device will not say
+# what it wants, and virtual cables overwhelmingly want 48. `resolve_sample_rate`
+# asks the device first, and should almost always answer instead of this.
+DEFAULT_SAMPLE_RATE = 48000
 DEFAULT_CHANNELS = 1
-DEFAULT_BLOCK_SIZE = 1024  # ~23ms at 44100 Hz
+DEFAULT_BLOCK_SIZE = 1024  # ~21ms at 48000 Hz
 DEFAULT_BUFFER_SECONDS = 10  # ring buffer capacity
 
 # Fixed playout delay, in nanoseconds. Every frame and every audio sample is
@@ -132,6 +136,97 @@ def find_virtual_output() -> Optional[int]:
             matches.sort()
             return matches[0][1]
     return None
+
+
+def device_sample_rate(index: Optional[int]) -> Optional[int]:
+    """
+    The rate a device says it wants, or None if it will not say.
+
+    Args:
+        index: sounddevice device index, or None for the system default
+
+    Returns:
+        Integer sample rate, or None when it cannot be read
+    """
+    try:
+        import sounddevice as sd
+        rate = sd.query_devices(index).get('default_samplerate')
+        return int(rate) if rate else None
+    except Exception:
+        return None
+
+
+def resolve_sample_rate(
+    output_device: Optional[int],
+    input_device: Optional[int] = None,
+) -> int:
+    """
+    The rate to run the whole audio path at, taken from the output device.
+
+    **The output device decides, because it is the one with no alternative.**
+    It is chosen automatically and for a reason — `find_virtual_output` picks
+    the lowest-latency instance of the cable, which on Windows is the WASAPI
+    one — and WASAPI in shared mode will not resample: ask it for a rate its
+    endpoint is not configured for and the stream simply refuses to open. The
+    microphone is the system's, usually happy at either rate, and is the side
+    that can bend.
+
+    That asymmetry is what this exists for. The rate used to be a constant, and
+    the constant was 44.1 kHz while VB-CABLE's endpoint was configured at 48 —
+    so playback could not start at all. Changing the constant to 48000 fixes
+    that machine and breaks the next one whose cable is set to 44.1, because
+    the endpoint's rate is a dropdown in the Windows sound control panel and
+    nothing about it is ours to assume. Asking is the fix; the constant is only
+    the fallback for a device that reports nothing.
+
+    Worth recording why this surfaced when it did: MME and DirectSound resample
+    silently, so before the low-latency selection landed, the mismatch was
+    being papered over by the same slow path that cost 88ms. The faster device
+    did not introduce this — it stopped hiding it.
+
+    Args:
+        output_device: Where audio is played; the rate is taken from here
+        input_device: Checked against that rate, and warned about if it
+                      disagrees. None means the system default input
+
+    Returns:
+        Sample rate in Hz, falling back to `DEFAULT_SAMPLE_RATE`
+    """
+    import sys
+
+    rate = device_sample_rate(output_device)
+    if rate is None:
+        print(
+            '[AUDIO] {} did not report a sample rate — using {} Hz'.format(
+                describe_device(output_device), DEFAULT_SAMPLE_RATE),
+            file=sys.stderr,
+        )
+        return DEFAULT_SAMPLE_RATE
+
+    # Probe the microphone rather than discovering the problem when the stream
+    # fails to open, which is silent for the rest of the session.
+    try:
+        import sounddevice as sd
+        sd.check_input_settings(
+            device=input_device, samplerate=rate, channels=DEFAULT_CHANNELS,
+            dtype='float32',
+        )
+    except Exception:
+        # Both are named, and so is the fix, because nothing downstream can
+        # resolve this: the capture and playback ends of one ring buffer cannot
+        # run at two rates without resampling, which this does not do. Playing
+        # 48 kHz samples out of a 44.1 kHz endpoint is a pitch shift and a
+        # steady drift, so the mismatch is reported rather than absorbed.
+        print(
+            '[AUDIO] {} wants {} Hz but the microphone ({}) will not open at '
+            'that rate. Audio may not start. Set both devices to the same '
+            'rate in the system sound settings.'.format(
+                describe_device(output_device), rate,
+                describe_device(input_device)),
+            file=sys.stderr,
+        )
+
+    return rate
 
 
 def describe_device(index: Optional[int]) -> str:
@@ -338,7 +433,21 @@ class AudioCapture:
             self._running = True
         except Exception as e:
             import sys
-            print(f'[AUDIO] Failed to start audio capture: {e}', file=sys.stderr)
+            # Name the rate we asked for and the rate the device wants. Without
+            # both, this is "audio does not work" and the next step is guessing
+            # at devices — which is exactly how the 44.1/48 mismatch came to
+            # cost a debugging session on a machine it should have explained
+            # itself on.
+            wanted = device_sample_rate(self.device)
+            print(
+                '[AUDIO] Failed to start audio capture at {} Hz on {}: {}{}'
+                .format(
+                    self.sample_rate, describe_device(self.device), e,
+                    '' if wanted in (None, self.sample_rate)
+                    else ' — the device reports {} Hz'.format(wanted),
+                ),
+                file=sys.stderr,
+            )
             self._stream = None
 
     def stop(self) -> None:
@@ -1035,8 +1144,16 @@ class AudioPlayback:
             self._stream.start()
             self._running = True
         except Exception as e:
-            import sys
-            print(f'[AUDIO] Failed to start audio playback: {e}', file=sys.stderr)
+            wanted = device_sample_rate(self.device)
+            print(
+                '[AUDIO] Failed to start audio playback at {} Hz on {}: {}{}'
+                .format(
+                    self.sample_rate, describe_device(self.device), e,
+                    '' if wanted in (None, self.sample_rate)
+                    else ' — the device reports {} Hz'.format(wanted),
+                ),
+                file=sys.stderr,
+            )
             self._stream = None
 
     def stop(self) -> None:

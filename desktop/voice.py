@@ -13,6 +13,10 @@ from typing import Any, Dict, Optional, Tuple
 import numpy as np
 import numpy.typing as npt
 
+# `audio` imports this module only under TYPE_CHECKING, so this direction is
+# safe at runtime — and it is what keeps one rate rather than two.
+from desktop.audio import DEFAULT_SAMPLE_RATE
+
 
 # Preset: (pitch_shift_semitones, formant_shift_ratio)
 # pitch_shift > 0 = higher pitch, formant_shift > 1.0 = higher formants
@@ -34,7 +38,22 @@ class VoiceTransformer:
     capture callback runs on a single dedicated thread.
     """
 
-    def __init__(self, sample_rate: int = 44100) -> None:
+    def __init__(self, sample_rate: int = DEFAULT_SAMPLE_RATE) -> None:
+        """
+        Args:
+            sample_rate: Rate of the PCM this will be handed. **Must be the
+                rate audio is actually captured at**, which is the device's,
+                not this default — pass `resolve_sample_rate`'s answer.
+
+                It carried its own literal 44100 before, and `Bridge`
+                constructed it with no argument, so it was the one place the
+                rate was not shared. Praat is told this number
+                (`parselmouth.Sound(..., sampling_frequency=...)`), so getting
+                it wrong does not fail: it reads every pitch off by the ratio,
+                which biases detection against the fixed 75 Hz floor below and
+                degrades the transform on low voices rather than reporting
+                anything.
+        """
         self._sample_rate = sample_rate
         self._preset: Optional[str] = None
         self._pitch_semitones: float = 0.0

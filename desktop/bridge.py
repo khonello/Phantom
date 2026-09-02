@@ -31,7 +31,13 @@ from desktop import auth
 from desktop import effects as overlay_effects
 from desktop import filters as look_filters
 from desktop.controller import PipelineClient
-from desktop.audio import AudioCapture, AudioPlayback, JitterBuffer
+from desktop.audio import (
+    AudioCapture,
+    AudioPlayback,
+    JitterBuffer,
+    find_virtual_output,
+    resolve_sample_rate,
+)
 from desktop.voice import VoiceTransformer
 
 _PANEL_MAX_W = 800
@@ -381,11 +387,23 @@ class Bridge(QObject):
         # Set when pipeline is running — webcam thread sends frames via WebSocket
         self._ws_push_active = threading.Event()
 
+        # One sample rate for the whole audio path, taken from the device that
+        # cannot bend.
+        #
+        # The virtual cable is resolved here rather than inside
+        # `AudioPlayback.start`, because the rate has to be known *before*
+        # capture is constructed: the two ends share a ring buffer, and a ring
+        # buffer filled at one rate and drained at another is a pitch shift
+        # plus a drift. Picking the device twice would also risk picking two
+        # different ones.
+        self._audio_device = find_virtual_output()
+        self._sample_rate = resolve_sample_rate(self._audio_device)
+
         # Voice transformer (CPU-based pitch/formant shifting)
-        self._voice_transformer = VoiceTransformer()
+        self._voice_transformer = VoiceTransformer(sample_rate=self._sample_rate)
 
         # Audio capture (local mic, never sent to GPU)
-        self._audio_capture = AudioCapture()
+        self._audio_capture = AudioCapture(sample_rate=self._sample_rate)
         self._audio_capture.set_voice_transformer(self._voice_transformer)
 
         # Jitter buffer: holds processed frames until their playout time
@@ -396,7 +414,9 @@ class Bridge(QObject):
         self._audio_playback = AudioPlayback(
             self._audio_capture.ring_buffer,
             self._jitter_buffer,
+            sample_rate=self._sample_rate,
             audio_capture=self._audio_capture,
+            device=self._audio_device,
         )
 
         # Virtual camera output
