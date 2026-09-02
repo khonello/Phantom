@@ -43,3 +43,8 @@ sweep*.json
 /*.mkv
 /*.mov
 /*.avi
+
+# Disc images built by tools/build_iso.py. A snapshot of the tree, so it is
+# derived from the repository rather than part of it — and it may carry .env,
+# which holds a live API key.
+*.iso
