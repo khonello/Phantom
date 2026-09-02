@@ -109,6 +109,33 @@ microphone with no delay at all. **The delay makes the desync worse, not
 better.** It is the one configuration that is worse than having no audio
 handling at all.
 
+### Both devices must agree on a sample rate
+
+The app takes its rate from the **cable**, not from a constant, because the
+cable is the one that cannot bend: the lowest-latency instance of it is the
+WASAPI one, and WASAPI will not resample. Your microphone then has to open at
+that same rate.
+
+Almost always it does, and there is nothing to configure. When it does not, the
+app says so at startup rather than producing silence:
+
+```
+[AUDIO] CABLE Input (VB-Audio Virtual Cable) wants 48000 Hz but the microphone
+(Microphone Array) will not open at that rate. Audio may not start. Set both
+devices to the same rate in the system sound settings.
+```
+
+The fix is in Windows, not in the app: **Sound → Recording / Playback → the
+device → Properties → Advanced → Default Format.** Set the microphone and
+`CABLE Input` to the same rate — 48000 Hz for both is the safe pair — and
+restart the app.
+
+It is not repaired automatically on purpose. Capture and playback share one
+buffer, so running them at different rates would shift the pitch of your voice
+*and* drift it further out of sync with the video every second it ran. Saying so
+is better than doing that quietly. See
+[ACCEPTED_RISKS.md](ACCEPTED_RISKS.md).
+
 ### Monitoring yourself
 
 Sending your voice into a cable means you stop hearing it, which is normal — you
@@ -225,6 +252,12 @@ the output path, and copying it beside itself would be noise.
 7. `pip install -r requirements-orchestrator.txt` if this machine will also
    manage pods or run the measurement tools
 8. Conferencing app: camera → OBS Virtual Camera, microphone → CABLE Output
+   (speaker stays on your headphones — pointing it at `CABLE Input` is a loop)
+9. Microphone and `CABLE Input` set to the **same sample rate** (1.2). The app
+   reports a mismatch at startup and will not start audio
+10. **Rehearse it** — Part 6 — before the first real call. A local recording is
+    the only check that shows video and audio together, the way a participant
+    gets them
 9. Copy `.env` across — **it is gitignored**, so it does not arrive with a
    `git clone`, and it holds the API key and `RUNPOD_POD_ID`
 
@@ -302,3 +335,60 @@ Two lines to check after setting up a new machine:
 - **`held=`** — climbing steadily means the playout delay is too tight for the
   link. It raises itself and says so, but a high number is the signal that the
   network, not the app, is the problem.
+
+---
+
+## Rehearsing before a real call
+
+You can prove the whole chain alone, without a second person. Do this once on
+every new machine — it takes about two minutes and it is the only way to see
+what a participant actually gets.
+
+**1. Point the conferencing app at the two virtual devices.**
+
+In Zoom, **Settings → Video → Camera → OBS Virtual Camera**, and **Settings →
+Audio → Microphone → CABLE Output (VB-Audio Virtual Cable)**.
+
+Note which end of the cable each one is. The app *plays into* `CABLE Input`;
+Zoom *records from* `CABLE Output`. They are two ends of the same pipe, and
+swapping them gives you a meeting with no audio and no error.
+
+**Leave Zoom's Speaker as your headphones or speakers.** Setting it to `CABLE
+Input` feeds the call's audio back into the pipe the app is already writing to,
+which is a loop.
+
+**2. Check video in the self-preview.** With Phantom running and a source set,
+the Zoom video preview shows the swapped face. That is the whole video path
+confirmed — camera, pod, virtual camera — with nobody else present.
+
+**3. Check audio on the input meter.** Still in **Settings → Audio**, speak and
+watch the input level bar for `CABLE Output`.
+
+It should move — **about half a second after you speak.** That lag is the
+expected signature, not a fault: audio is deliberately held to
+`DEFAULT_PLAYOUT_DELAY_NS` (550ms) so it lands with video that took a round trip
+to the pod. A meter that responds *instantly* is the thing to worry about, since
+it means Zoom is on your real microphone and the call will hear you ahead of
+your own face.
+
+A meter that never moves means the chain is broken upstream — check the
+`[AUDIO]` lines in the console first, and the `out=` line described above.
+
+**4. Record yourself and watch it back.** Start a meeting alone (**New
+Meeting**), record locally, talk for thirty seconds, stop, and play the file.
+
+This is the only check that shows video and audio *together*, as a participant
+receives them, and it is what catches lip-sync being off — which neither the
+preview nor the level meter can tell you, because each shows one stream in
+isolation.
+
+### You will not hear yourself, and that is correct
+
+Your voice goes into the cable, so it stops coming out of your speakers. That is
+normal — you do not usually hear your own microphone.
+
+Do not solve this by monitoring the delayed audio. What you would hear is your
+own voice ~550ms late, and speaking over a delayed copy of yourself is markedly
+harder than speaking into silence; broadcasters treat it as a fault condition.
+If you want to confirm the audio sounds right, use the recording in step 4
+rather than live monitoring.

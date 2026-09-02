@@ -90,16 +90,17 @@ doing now — it is a GitHub settings change, not code.
 
 ### 🟡 Uploads share one directory on the pod
 
-`_UPLOAD_DIR = '/tmp/phantom_uploads'`. Target photos get a per-job
-`mkdtemp` subdirectory — added because two photos with the same camera filename
-would otherwise overwrite each other — but **sources do not**, so an uploaded
-source overwrites any earlier one of the same name.
+Sources and targets each get a per-upload `mkdtemp` subdirectory now, and names
+are made unique within it, so two photos with the same camera filename no longer
+overwrite each other. What remains is that **every session shares one root**
+(`<temp>/uploads`), and `cleanup_session` empties the whole thing.
 
-**Why accepted:** one pod serves one operator at a time. It becomes real the
-moment that is not true.
+**Why accepted:** one pod serves one operator at a time, so there is nothing to
+isolate from. It becomes real the moment that is not true — at which point the
+shared root also means one operator's cleanup deletes another's uploads.
 
 **Closes when:** the pod serves more than one session, at which point uploads
-need per-session isolation and a lifetime.
+need per-session isolation and a lifetime of their own.
 
 ### 🟡 Source uploads have no size cap
 
@@ -174,6 +175,39 @@ output path, so it works end to end.
 a 10 MB PNG behaves the same way.
 
 **Closes when:** the re-encode renames to match what it produced.
+
+### 🟡 A microphone and a virtual cable fixed at different rates cannot both be used
+
+The audio path takes its sample rate from the **output** device, because that is
+the one with no alternative: `find_virtual_output` picks the lowest-latency
+instance of the cable, which on Windows is the WASAPI one, and WASAPI in shared
+mode will not resample. The microphone is the system's and usually opens at
+whatever it is asked for. When it will not — a mic locked to 44.1 kHz against a
+cable locked to 48 — the desktop says so at startup, naming both devices, both
+rates and the fix, and audio does not start.
+
+It is not repaired, and that is deliberate, because the two ends share one ring
+buffer. Filling it at one rate and draining it at another produces two faults
+that compound:
+
+- **A pitch shift.** Reading 48000 samples a second out of audio recorded at
+  44100 plays everything about 8.8% fast — roughly a tone and a half up. Ugly,
+  but at least stable.
+- **A drift with no bound.** It consumes ~3,900 more samples per second than
+  arrive, so the playout cursor walks steadily away from the fixed 550ms target
+  and audio separates from video without limit. The fixed-delay design has no
+  mechanism to pull it back; not having one is the point of it being fixed.
+
+**Why accepted:** both devices are settable to a common rate from the Windows
+sound control panel in about fifteen seconds, and the message says so. The
+alternative is a resampler on the sync-critical audio callback, which has to be
+cheap enough for that thread *and* rate-tracking, since two clocks drift against
+each other even when they agree nominally. That is real machinery to carry
+speculatively, on the one path where a mistake is continuously audible.
+
+**Closes when:** a machine turns up whose two devices genuinely cannot be set to
+the same rate. `AudioCapture._drift_samples` already measures the clock
+difference this would have to correct; nothing acts on it yet.
 
 ### 🟡 Nothing locks the detector against concurrent use
 
