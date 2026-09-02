@@ -753,6 +753,25 @@ Capture settings live in `PRESETS` and are read by both the pipeline's own
 `VideoCapture` loop and the desktop's webcam thread, so local and push mode
 cannot diverge. Changing quality restarts the capture device to apply them.
 
+**The frame rate is enforced on the send, not on the camera.** A camera is
+free to ignore `CAP_PROP_FPS` and Windows Media Foundation does — asked for 20
+it reports 20 and delivers 30 — so the uplink was carrying half again as many
+JPEGs as the preset's own budget assumes, on the one leg of the path that is
+asymmetric. `desktop/pacing.py` chooses which captured frames to send;
+capture itself runs at whatever the device gives, which keeps the local preview
+smooth and costs one comparison per frame.
+
+The target is a target, not a ratio: the camera's real rate is measured, and
+frames are dropped only while it is actually overshooting. A camera already
+delivering 20 has no spare frames, so nothing is discarded — which is also what
+keeps ordinary jitter from bleeding frames off a nominally-correct camera.
+
+Setting the rate on the device was measured and rejected. DirectShow *does*
+honour the request, by snapping to its nearest mode — 15fps on the test camera
+— so asking for 20 delivered less than asking for nothing. The pacer's schedule
+advances by whole intervals for the same reason: `now - last_sent >= interval`
+aliases a 30fps camera down to 15 rather than 20.
+
 Presets deliberately **do not** set `enhance`: it has an explicit toggle in the
 desktop header, and a preset must not silently undo something the operator just
 clicked. `color_correction` is left alone for a different reason — it is on and

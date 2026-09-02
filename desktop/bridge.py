@@ -38,6 +38,7 @@ from desktop.audio import (
     find_virtual_output,
     resolve_sample_rate,
 )
+from desktop.pacing import FramePacer
 from desktop.voice import VoiceTransformer
 
 _PANEL_MAX_W = 800
@@ -2982,6 +2983,13 @@ class Bridge(QObject):
             self._configure_capture(cap, w, h, fps)
 
             encode_params = [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality]
+            # Send at the preset's rate, capture at whatever the camera gives.
+            # The camera ignores the rate it is asked for on Windows — 20
+            # requested, 30 delivered — and every extra frame is uplink
+            # bandwidth on the one leg that is asymmetric, where saturation
+            # reads as latency rather than as loss. See desktop/pacing.py for
+            # why this is not `now - last >= interval`.
+            pacer = FramePacer(fps)
             failures = 0
             reported = False
 
@@ -2998,7 +3006,7 @@ class Bridge(QObject):
                     # layer, so grading before the swap would have the
                     # compositor matching the face to an already-graded frame
                     # and then grading it again.
-                    if self._ws_push_active.is_set():
+                    if self._ws_push_active.is_set() and pacer.due(capture_ts):
                         _, jpeg = cv2.imencode('.jpg', frame, encode_params)
                         header = struct.pack('<q', capture_ts)
                         payload = header + jpeg.tobytes()
