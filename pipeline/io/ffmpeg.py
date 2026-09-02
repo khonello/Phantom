@@ -23,8 +23,6 @@ import urllib.request
 from pathlib import Path
 from typing import List, Optional
 
-from tqdm import tqdm
-
 from pipeline.config import FaceSwapConfig
 from pipeline.logging import emit_status, emit_warning
 
@@ -609,6 +607,16 @@ def conditional_download(download_directory_path: str, urls: List[str]) -> None:
         download_directory_path: Directory to save downloaded files
         urls: List of URLs to download
     """
+    # Imported here rather than at module scope. This is the only thing in the
+    # file that wants a progress bar, and `desktop/bridge.py` imports this
+    # module for `is_image`, `is_video` and `probe_duration` — so a top-level
+    # import made tqdm a hard, import-time requirement of the *desktop*, which
+    # never downloads anything and never shows a progress bar. It was missing
+    # from desktop/requirements.txt for the good reason that nobody thinks of
+    # the GUI as needing it, and the app would not start on a machine that
+    # installed only what that file lists.
+    from tqdm import tqdm
+
     if not os.path.exists(download_directory_path):
         os.makedirs(download_directory_path)
 

@@ -2875,46 +2875,97 @@ class Bridge(QObject):
             int(preset['jpeg_quality']),
         )
 
+    # Consecutive uplink iterations that raised before the operator is told.
+    # One is a hiccup; a run of them means the camera or the encode is broken
+    # and the far end is looking at a frozen face.
+    _WEBCAM_FAIL_LIMIT = 30
+
     def _run_webcam(self, webcam_index: int) -> None:
+        """
+        Capture, encode and send the operator's camera, until told to stop.
+
+        **Every iteration is wrapped, because this thread is the uplink.** It
+        used to run bare, so a single exception anywhere in the body — the JPEG
+        encode, a filter, the Qt buffer write — ended the thread for good. The
+        pod then received nothing, produced nothing, and the desktop's jitter
+        buffer went on repeating the last frame it had, which is a frozen
+        swapped face that looks exactly like a guard holding. Nothing was
+        logged where anyone would see it: a release build hides the console, so
+        even the interpreter's own thread traceback went nowhere, and the only
+        recovery was stopping and starting the stream, which builds a new
+        thread.
+
+        Reported after a run of failures rather than the first, and once:
+        `cap.read()` returning a bad frame for a moment is ordinary, and a
+        message per frame at 20fps is not a message.
+        """
         cap = cv2.VideoCapture(webcam_index)
         if not cap.isOpened():
+            self._set_status(
+                'could not open camera {}'.format(webcam_index), error=True)
             return
 
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        try:
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-        # Apply capture settings for the current quality preset
-        w, h, fps, jpeg_quality = self._capture_settings()
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-        cap.set(cv2.CAP_PROP_FPS, fps)
+            # Apply capture settings for the current quality preset
+            w, h, fps, jpeg_quality = self._capture_settings()
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+            cap.set(cv2.CAP_PROP_FPS, fps)
 
-        encode_params = [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality]
+            encode_params = [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality]
+            failures = 0
+            reported = False
 
-        while not self._webcam_stop.is_set():
-            ret, frame = cap.read()
-            if not ret:
-                time.sleep(0.05)
-                continue
+            while not self._webcam_stop.is_set():
+                try:
+                    ret, frame = cap.read()
+                    if not ret:
+                        time.sleep(0.05)
+                        continue
 
-            capture_ts = time.perf_counter_ns()
+                    capture_ts = time.perf_counter_ns()
 
-            # Upstream gets the **raw** frame. A filter is the last layer, so
-            # grading before the swap would have the compositor matching the
-            # face to an already-graded frame and then grading it again.
-            if self._ws_push_active.is_set():
-                _, jpeg = cv2.imencode('.jpg', frame, encode_params)
-                header = struct.pack('<q', capture_ts)
-                payload = header + jpeg.tobytes()
-                self._uplink_bytes += len(payload)
-                self._uplink_frames += 1
-                self._client.send_frame(payload)
+                    # Upstream gets the **raw** frame. A filter is the last
+                    # layer, so grading before the swap would have the
+                    # compositor matching the face to an already-graded frame
+                    # and then grading it again.
+                    if self._ws_push_active.is_set():
+                        _, jpeg = cv2.imencode('.jpg', frame, encode_params)
+                        header = struct.pack('<q', capture_ts)
+                        payload = header + jpeg.tobytes()
+                        self._uplink_bytes += len(payload)
+                        self._uplink_frames += 1
+                        self._client.send_frame(payload)
 
-            # The local preview does get it, so a look can be auditioned before
-            # any pipeline is running — which is when someone would be choosing
-            # one.
-            webcam_buffer.update_from_numpy(self._decorate(frame))
+                    # The local preview does get it, so a look can be
+                    # auditioned before any pipeline is running — which is when
+                    # someone would be choosing one.
+                    webcam_buffer.update_from_numpy(self._decorate(frame))
 
-        cap.release()
+                    failures = 0
+                    reported = False
+                except Exception as e:
+                    failures += 1
+                    print(
+                        '[BRIDGE] webcam uplink error ({}): {}: {}'.format(
+                            failures, type(e).__name__, e),
+                        file=sys.stderr,
+                    )
+                    if failures >= self._WEBCAM_FAIL_LIMIT and not reported:
+                        reported = True
+                        self._set_status(
+                            'camera uplink failing — the far end may be frozen',
+                            error=True,
+                        )
+                    time.sleep(0.05)
+        finally:
+            # In a `finally` because it was previously skipped on any
+            # exception, leaking the device: the next start then opened a
+            # second handle on a camera the first was still holding, which on
+            # Windows can simply fail.
+            cap.release()
 
     # ── Virtual camera output ─────────────────────────────────────────
 
@@ -2937,6 +2988,11 @@ class Bridge(QObject):
             self._vcam_thread.join(timeout=3)
         self._vcam_thread = None
         self._vcam_stop = None
+
+    # Consecutive failed sends before the virtual camera is given up on. A
+    # device that is genuinely gone should not be retried forever, but the
+    # threshold is high because closing it is the more dangerous outcome.
+    _VCAM_FAIL_LIMIT = 60
 
     def _run_vcam(self, stop_event: threading.Event) -> None:
         try:
@@ -2976,6 +3032,15 @@ class Bridge(QObject):
                 # that sets the backend and it has no auto option, so the name
                 # here could only ever echo the selection already on screen.
                 self._set_status('virtual camera active')
+                # A failed `send` must not end this loop. Leaving it releases
+                # the device, and a conferencing app responds to a camera that
+                # disappears by selecting the next one — which is the
+                # operator's real webcam. That is the exact exposure the whole
+                # design exists to prevent, so a transient error is retried
+                # rather than allowed to close the device, and only a sustained
+                # run of them gives up.
+                sends_failed = 0
+
                 while not stop_event.is_set():
                     try:
                         held = self._vcam_queue.get(timeout=0.1)
@@ -2987,8 +3052,20 @@ class Bridge(QObject):
                         if held is None:
                             continue
 
-                    cam.send(held)
-                    cam.sleep_until_next_frame()
+                    try:
+                        cam.send(held)
+                        cam.sleep_until_next_frame()
+                        sends_failed = 0
+                    except Exception as e:
+                        sends_failed += 1
+                        print(
+                            '[BRIDGE] virtual camera send failed ({}): {}: {}'
+                            .format(sends_failed, type(e).__name__, e),
+                            file=sys.stderr,
+                        )
+                        if sends_failed >= self._VCAM_FAIL_LIMIT:
+                            raise
+                        time.sleep(0.05)
         except Exception as e:
             self._set_status(f'virtual camera error: {e}', error=True)
         finally:
