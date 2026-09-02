@@ -84,9 +84,39 @@ would otherwise prompt.
 the repo private is still the right call; this is the cost of that, not an
 argument against it.
 
+**What it does when the token goes stale**, which has now happened once: the
+pull stops being able to authenticate and git falls back to *asking*. There is
+no terminal to ask on, so it blocks on stdin rather than failing, and the boot
+stops dead under `Pulling latest changes...` — the orchestrator prints
+`[still running...]` every 30 seconds until the 1800s command timeout. A fresh
+GPU changes nothing, because the checkout and its stored URL are on the volume,
+not the pod.
+
+`startup.sh` now sets `GIT_TERMINAL_PROMPT=0` and bounds the pull with
+`timeout 120`, so a dead token fails in seconds and says so instead of hanging
+for half an hour. Note the ordering trap that creates: the fix lives in
+`startup.sh`, which reaches the pod *through the pull it is fixing*, so the
+first recovery has to be manual.
+
+**Recovery:** delete the checkout and let it re-clone. The clone URL is read
+from the orchestrator's own `.env` at deploy time and the clone step only runs
+when the directory is absent, so a fresh token in `.env` is picked up with no
+surgery on the pod's git config:
+
+```bash
+python runpod/orchestrator.py run "rm -rf /workspace/Phantom"
+python runpod/orchestrator.py start
+```
+
+The venv, models and templates live elsewhere on the volume
+(`/workspace/venv`, `/workspace/models`, `/workspace/templates`), so this costs
+one clone and nothing else.
+
 **Closes when:** the token is a fine-grained PAT scoped to this one repository
 with read-only contents access, so extracting it grants nothing else. Worth
-doing now — it is a GitHub settings change, not code.
+doing now — it is a GitHub settings change, not code. Note that fine-grained
+PATs **expire**, so whatever is chosen, the failure above is the one to expect
+and the reason it now fails loudly.
 
 ### 🟡 Uploads share one directory on the pod
 

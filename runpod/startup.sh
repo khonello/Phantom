@@ -101,7 +101,67 @@ _phase "git-pull"
 if [ -d "${PHANTOM_DIR}/.git" ]; then
     echo "Pulling latest changes..."
     _GIT_BEFORE=$(git -C "${PHANTOM_DIR}" rev-parse HEAD 2>/dev/null || echo none)
-    git -C "${PHANTOM_DIR}" pull --ff-only 2>&1 || echo "WARNING: git pull failed — using existing code."
+
+    # Never let git ask a question. There is no terminal to answer on, so a
+    # remote that wants credentials — an expired token in the clone URL is the
+    # usual way — does not fail, it *blocks*, forever, at exactly this line.
+    # From outside that is indistinguishable from a slow boot.
+    export GIT_TERMINAL_PROMPT=0
+    export GIT_ASKPASS=/bin/true
+    export GIT_SSH_COMMAND="ssh -o BatchMode=yes -o StrictHostKeyChecking=no"
+
+    # And bound it, because a half-open connection to the remote hangs a fetch
+    # rather than erroring. Two minutes is far more than this pull ever needs.
+    set +e
+    _GIT_OUTPUT=$(timeout 120 git -C "${PHANTOM_DIR}" pull --ff-only 2>&1)
+    _GIT_STATUS=$?
+    set -e
+    echo "${_GIT_OUTPUT}"
+
+    if [ ${_GIT_STATUS} -ne 0 ]; then
+        # This used to be one swallowed WARNING, and that is why a stale pod is
+        # hard to recognise: the boot continues, the pipeline starts, everything
+        # looks healthy, and it is running code from before the fix that is
+        # being tested. The operator sees changes "not arriving" and suspects
+        # the change rather than the deploy.
+        echo ""
+        echo "=============================================================="
+        if [ ${_GIT_STATUS} -eq 124 ]; then
+            echo "ERROR: git pull timed out after 120s."
+            echo "The remote accepted the connection and then stopped talking,"
+            echo "or it wanted credentials this script refuses to supply."
+        else
+            echo "ERROR: git pull failed (exit ${_GIT_STATUS})."
+        fi
+        echo ""
+        echo "Local HEAD:  $(git -C "${PHANTOM_DIR}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+        echo "Branch:      $(git -C "${PHANTOM_DIR}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+        echo "Remote:      $(git -C "${PHANTOM_DIR}" remote get-url origin 2>/dev/null | sed 's#//[^@]*@#//***@#' || echo unknown)"
+        echo ""
+        _GIT_DIRTY=$(git -C "${PHANTOM_DIR}" status --porcelain 2>/dev/null | head -20)
+        if [ -n "${_GIT_DIRTY}" ]; then
+            echo "The working tree is NOT clean. --ff-only refuses to overwrite"
+            echo "local changes, and this is the usual reason a pod stops taking"
+            echo "updates while a fresh GPU changes nothing — the checkout lives"
+            echo "on the network volume, so it outlives the pod."
+            echo ""
+            echo "${_GIT_DIRTY}"
+            echo ""
+            echo "To discard them and take the remote's version:"
+            echo "  python runpod/orchestrator.py run \\"
+            echo "    \"git -C ${PHANTOM_DIR} reset --hard && git -C ${PHANTOM_DIR} clean -fd\""
+        fi
+        echo ""
+        echo "Booting anyway would run code that is not the code you pushed."
+        echo "Set PHANTOM_ALLOW_STALE=1 to continue regardless."
+        echo "=============================================================="
+
+        if [ -z "${PHANTOM_ALLOW_STALE:-}" ]; then
+            exit 1
+        fi
+        echo "PHANTOM_ALLOW_STALE set — continuing with the existing checkout."
+    fi
+
     _GIT_AFTER=$(git -C "${PHANTOM_DIR}" rev-parse HEAD 2>/dev/null || echo none)
 
     if [ "${_GIT_BEFORE}" != "${_GIT_AFTER}" ]; then
