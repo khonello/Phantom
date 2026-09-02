@@ -405,8 +405,11 @@ def test_escalation_moves_the_delay_video_reads(monkeypatch):
 # ── Calibrate once, then freeze ────────────────────────────────────────
 
 
-def _calibrated(monkeypatch, rtt_ns=200 * _MS, frames=60):
-    """A buffer fed `frames` frames at a steady round trip."""
+def _calibrated(monkeypatch, rtt_ns=200 * _MS, frames=120):
+    """A buffer fed `frames` frames at a steady round trip.
+
+    Enough to clear the warm-up discard and then fill a whole window.
+    """
     clock = {'now': 0}
     monkeypatch.setattr('desktop.audio.time.perf_counter_ns',
                         lambda: clock['now'])
@@ -435,7 +438,7 @@ def test_calibration_commits_once_and_then_holds(monkeypatch):
     assert buf.target_delay_ns == 325 * _MS
     assert buf.target_delay_ns < DEFAULT_PLAYOUT_DELAY_NS
 
-    for i in range(61, 1061):
+    for i in range(121, 1121):
         clock['now'] = 200 * _MS + i * 50 * _MS
         buf.push(clock['now'] - 200 * _MS, b'f')
 
@@ -448,7 +451,7 @@ def test_calibration_moves_the_epoch_once(monkeypatch):
     epoch = buf.delay_epoch
     assert epoch > 0
 
-    for i in range(61, 400):
+    for i in range(121, 460):
         clock['now'] = 200 * _MS + i * 50 * _MS
         buf.push(clock['now'] - 200 * _MS, b'f')
 
@@ -487,3 +490,142 @@ def test_a_pinned_delay_is_never_calibrated(monkeypatch):
     assert not buf.calibrated
     assert buf.target_delay_ns == 400 * _MS
     assert buf.delay_epoch == 0
+
+
+# ── What calibration must refuse to believe ────────────────────────────
+
+
+def test_warm_up_round_trips_do_not_set_the_delay(monkeypatch):
+    """
+    The first stream after a pipeline start pays model warm-up — tens of
+    seconds — and those frames come back carrying round trips of exactly that
+    size. Calibrating on them put D straight onto the ceiling, and a delay the
+    buffer cannot hold is a picture that stops moving. It happened on the first
+    real run.
+    """
+    clock = {'now': 0}
+    monkeypatch.setattr('desktop.audio.time.perf_counter_ns',
+                        lambda: clock['now'])
+    buf = JitterBuffer()
+
+    for i in range(1, 31):                      # warm-up: 20s round trips
+        clock['now'] = 30_000 * _MS + i * _MS
+        buf.push(clock['now'] - 20_000 * _MS, b'f')
+    for i in range(1, 200):                     # then a steady 150ms link
+        clock['now'] = 60_000 * _MS + i * 50 * _MS
+        buf.push(clock['now'] - 150 * _MS, b'f')
+
+    assert buf.calibrated
+    assert buf.target_delay_ns == 275 * _MS, (
+        'calibrated on the model load rather than the link'
+    )
+
+
+def test_an_unsettled_link_keeps_the_provisional_delay(monkeypatch):
+    """
+    A tail far above the middle describes a regime change, not a link. Better
+    to hold the conservative provisional and let escalation raise it on real
+    starvation than to freeze a number onto an artefact.
+    """
+    clock = {'now': 0}
+    monkeypatch.setattr('desktop.audio.time.perf_counter_ns',
+                        lambda: clock['now'])
+    buf = JitterBuffer()
+
+    for i in range(1, 1000):
+        clock['now'] = 100_000 * _MS + i * 50 * _MS
+        rtt = 1_500 * _MS if i % 5 == 0 else 100 * _MS
+        buf.push(clock['now'] - rtt, b'f')
+
+    assert buf.calibrated, 'it must give up rather than retry forever'
+    assert buf.target_delay_ns == DEFAULT_PLAYOUT_DELAY_NS
+    assert buf.delay_epoch == 0
+
+
+# ── A quiet slot is not a starving one ─────────────────────────────────
+
+
+def test_a_stream_slower_than_the_display_tick_never_escalates(monkeypatch):
+    """
+    The runaway this pins.
+
+    The display ticks at 30/s while `optimal` streams at 20fps, so a third of
+    all slots have no new frame due — on a perfect link, forever. Escalation
+    counted those as evidence the link needed headroom, which was harmless only
+    for as long as video ignored the number it raised. Pointing video at it sent
+    D to the 2s ceiling and froze the picture.
+
+    Frames are waiting in the buffer at every one of those slots. That is D
+    being generous, and raising it is precisely backwards.
+    """
+    clock = {'now': 0}
+    monkeypatch.setattr('desktop.audio.time.perf_counter_ns',
+                        lambda: clock['now'])
+
+    start = 1_000 * _MS
+    tick, frame, rtt = 33 * _MS, 50 * _MS, 100 * _MS
+    buf = JitterBuffer(fixed_delay_ns=200 * _MS, calibrate=False)
+
+    sent = 0
+    for i in range(900):                         # ~30s, three whole windows
+        clock['now'] = start + i * tick
+        while start + sent * frame + rtt <= clock['now']:
+            buf.push(start + sent * frame, b'f')
+            sent += 1
+        buf.next_for_slot()
+
+    stats = buf.sync_stats()
+    assert stats['repeats'] > 0, 'the mismatch this is about did not happen'
+    assert stats['escalations'] == 0, 'a healthy 20fps stream escalated'
+    assert buf.target_delay_ns == 200 * _MS
+
+
+def test_a_dead_stream_does_not_escalate(monkeypatch):
+    """
+    Nothing arrived, so there is nothing a bigger buffer would have held.
+    Stepping D for a dead pipeline only delays the picture that comes back.
+    """
+    clock = {'now': 200 * _MS}
+    monkeypatch.setattr('desktop.audio.time.perf_counter_ns',
+                        lambda: clock['now'])
+
+    buf = _buf_with([(1, b'a')], now=0)
+    buf.next_for_slot()
+    buf._pushes = 0                              # the push above is spent
+    for _ in range(900):
+        buf.next_for_slot()
+
+    assert buf.sync_stats()['escalations'] == 0
+
+
+# ── A delay the buffer cannot hold ─────────────────────────────────────
+
+
+def test_a_full_buffer_shows_the_oldest_rather_than_freezing(monkeypatch):
+    """
+    Once the buffer is full the next push evicts the frame at the front before
+    it reaches its deadline — and the one after that. That is a picture which
+    never moves again. Early by a fraction of D beats frozen, and it is counted
+    so the cause is not read as a network fault.
+    """
+    clock = {'now': 10_000 * _MS}
+    monkeypatch.setattr('desktop.audio.time.perf_counter_ns',
+                        lambda: clock['now'])
+
+    buf = JitterBuffer(fixed_delay_ns=2_000 * _MS, calibrate=False)
+    for i in range(JitterBuffer.MAX_FRAMES + 20):
+        buf.push(clock['now'] - 500 * _MS + i, b'f')
+
+    assert buf.next_for_slot() is not None, 'a full buffer froze the picture'
+    assert buf.sync_stats()['forced'] > 0
+
+
+def test_the_buffer_outlasts_the_escalation_ceiling():
+    """
+    D holds `(D - rtt) * fps` frames in flight, so a buffer smaller than that
+    evicts frames before they are ever shown. 60 was exactly 2s at 30fps — the
+    escalation ceiling, with no headroom at all.
+    """
+    fps = 30
+    ceiling_s = 2.0
+    assert JitterBuffer.MAX_FRAMES > ceiling_s * fps

@@ -334,9 +334,38 @@ that is easy to get wrong:
 
 Repeats are counted and shown in the badge as `N held`. One is invisible; a
 sustained rate is a frozen face while audio continues, which reads as a broken
-swap rather than a slow link — so **>20% of slots over ~10s steps the delay up
-by 100ms, once, and says so**. That is the only place playout adapts, and it
-adapts on evidence rather than per frame.
+swap rather than a slow link.
+
+**But a repeat is not the evidence to step D on, and using it was a runaway.**
+The display ticks at 30/s while `optimal` streams at 20fps, so a third of all
+slots have no new frame due — on a perfect link, forever — and half of them at
+`fast`. The escalation condition was therefore permanently true. That was
+invisible for as long as `_fixed_delay_ns` was a number only audio read;
+pointing video at it sent D to the 2s ceiling in a couple of minutes and froze
+the picture.
+
+The signal is **starvation**: a slot with nothing eligible *and nothing
+waiting*, meaning frames are arriving already past their deadline, which is the
+one thing more headroom fixes. A slot with frames waiting is D being generous,
+and raising it is precisely backwards. So **>20% of slots starving over ~10s,
+while frames are actually arriving, steps the delay up by 100ms, once, and says
+so**. That is the only place playout adapts, and it adapts on evidence rather
+than per frame.
+
+Two capacity facts belong with it. D holds `(D - rtt) * fps` frames in flight,
+so `MAX_FRAMES` has to exceed the escalation ceiling times the frame rate — 60
+was exactly 2s at 30fps and therefore no headroom at all; it is 120. And when
+the buffer is full anyway, `pop_eligible` releases the frame at the front
+rather than letting the next push evict it unseen, because that eviction
+repeats and the picture never moves again. Early by a fraction of D beats
+frozen, and `forced` counts it so the cause is not read as a network fault.
+
+**Calibration does not believe the warm-up.** The first stream after a pipeline
+start pays model load — tens of seconds — and those frames come back carrying
+round trips of exactly that size. `_CALIBRATE_SKIP` discards them, and the
+window that follows has to look settled (p95 within 2x p50, and under a second)
+before it is committed. Five unsettled windows and it keeps the conservative
+provisional and says so, leaving the correction to escalation.
 
 ### Session gotchas worth not rediscovering
 

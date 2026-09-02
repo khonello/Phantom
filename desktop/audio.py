@@ -75,17 +75,43 @@ DEFAULT_PLAYOUT_DELAY_NS = 550_000_000
 # tick and the virtual camera's own queue, neither of which is RTT, so a
 # calibrated delay below ~100ms would freeze the picture to save latency
 # nothing can perceive.
+# **The warm-up frames describe the model load, not the link.** The first
+# stream after a pipeline start pays tens of seconds of model warm-up, and those
+# frames come back carrying round trips of exactly that size. Calibrating on
+# them puts D straight onto the ceiling and freezes the picture — which is what
+# it did the first time this ran. They are discarded, and the window that
+# follows has to look settled before it is believed.
+_CALIBRATE_SKIP = 30                 # frames discarded before measuring
 _CALIBRATE_SAMPLES = 60              # a full RTT window, ~3s at 20fps
 _CALIBRATE_MARGIN_NS = 80_000_000    # headroom above p95, so slots stay fed
 _CALIBRATE_SPREAD_FLOOR_NS = 50_000_000   # one frame interval at 20fps
 _CALIBRATE_FLOOR_NS = 100_000_000
+# A window whose tail is more than this much worse than its middle is not a
+# link, it is a regime change — a warm-up ending, a reconnect, a stall. And a
+# round trip beyond `_CALIBRATE_MAX_NS` is not something to calibrate *to*;
+# escalation exists for links genuinely that bad, and it steps on evidence.
+_CALIBRATE_SPREAD_RATIO = 2.0
+_CALIBRATE_MAX_NS = 1_000_000_000
+_CALIBRATE_ATTEMPTS = 5              # then keep the provisional and say so
 _DELAY_QUANTUM_NS = 25_000_000       # a delay reported to 1ms invites tuning it
 
 # Raising the delay is a visible step, so it happens on evidence and rarely:
-# only when repeats have been sustained, meaning the link genuinely needs more
-# headroom than D allows.
+# only when slots have been **starving** — frames arriving already past their
+# deadline, which is the one thing more headroom fixes.
+#
+# It used to count *repeats*, and that was structurally always true. The
+# display ticks at 30/s while the stream runs at the preset's rate — 20fps at
+# `optimal`, 15 at `fast` — so a third to a half of all slots have no new frame
+# due, on a perfect link, forever. The condition never stopped being met.
+#
+# That was invisible while `_fixed_delay_ns` was a number only audio read.
+# Pointing video at it turned a permanently-true condition into a runaway: D
+# climbed 100ms every ten seconds to the 2s ceiling, and the picture froze.
+#
+# A slot with frames waiting in the buffer is not starving — it is D being
+# generous, and raising it is precisely backwards.
 _ESCALATE_AFTER_SLOTS = 300        # ~10s at 30fps
-_ESCALATE_REPEAT_RATIO = 0.20
+_ESCALATE_STARVED_RATIO = 0.20
 _ESCALATE_STEP_NS = 100_000_000
 _ESCALATE_CEILING_NS = 2_000_000_000
 
@@ -733,7 +759,11 @@ class JitterBuffer:
     round-trip latencies.
     """
 
-    MAX_FRAMES: int = 60  # ~2 seconds at 30 fps
+    # Has to exceed what D holds in flight: `(D - rtt) * fps` frames are
+    # waiting to age into their deadline at any moment, and a frame evicted
+    # before it gets there is one the operator never sees. 60 was 2s at 30fps,
+    # exactly the escalation ceiling and therefore no headroom at all.
+    MAX_FRAMES: int = 120  # ~4 seconds at 30 fps
 
     def __init__(
         self,
@@ -771,8 +801,18 @@ class JitterBuffer:
         self._slots = 0
         self._repeats = 0
         self._repeats_total = 0
+        # Slots with nothing to show *and nothing waiting*. The repeat count
+        # includes every slot the stream simply had no new frame for, which on
+        # a 20fps stream against a 30fps tick is a third of them on a perfect
+        # link — so it is the badge's number, not the escalator's.
+        self._starved = 0
+        self._pushes = 0
+        self._forced = 0
         self._late_dropped = 0
         self._escalations = 0
+        self._calibrate_seen = 0
+        self._calibrate_next = _CALIBRATE_SKIP + _CALIBRATE_SAMPLES
+        self._calibrate_attempts = 0
 
     def push(self, capture_ts: int, jpeg_bytes: bytes) -> None:
         """Enqueue a processed frame. Called from the WS receive thread.
@@ -782,6 +822,7 @@ class JitterBuffer:
             jpeg_bytes: JPEG-encoded processed frame
         """
         arrival_ts = time.perf_counter_ns()
+        self._pushes += 1
         self._rtt.record(capture_ts, arrival_ts)
         self._maybe_calibrate()
         self._buf.append((capture_ts, jpeg_bytes))
@@ -810,6 +851,13 @@ class JitterBuffer:
         target = self.target_delay_ns
         result: Optional[Tuple[int, bytes]] = None
 
+        # The buffer is full, so the next push evicts the frame at the front
+        # before it reaches its deadline — and the one after that, and so on.
+        # That is a picture which never moves again, from a delay the buffer
+        # cannot hold. Showing it early is wrong by less than a frozen face is,
+        # and it is counted so the cause is not mistaken for a network fault.
+        forced = len(self._buf) >= self.MAX_FRAMES
+
         while self._buf:
             capture_ts, jpeg = self._buf[0]
             # Legacy frame without timestamp — display immediately
@@ -819,6 +867,10 @@ class JitterBuffer:
             age = now - capture_ts
             if age >= target:
                 result = self._buf.popleft()
+            elif forced and result is None:
+                self._forced += 1
+                result = self._buf.popleft()
+                break
             else:
                 break
 
@@ -885,6 +937,13 @@ class JitterBuffer:
         """
         if not self._calibrate or self._calibrated:
             return
+
+        self._calibrate_seen += 1
+        # Discard the warm-up, then look once per window rather than per frame.
+        if self._calibrate_seen < self._calibrate_next:
+            return
+        self._calibrate_next = self._calibrate_seen + _CALIBRATE_SAMPLES
+
         samples = self._rtt._samples
         if len(samples) < _CALIBRATE_SAMPLES:
             return
@@ -892,10 +951,30 @@ class JitterBuffer:
         arr = np.array(samples, dtype=np.float64)
         p50 = float(np.median(arr))
         p95 = float(np.percentile(arr, 95))
+
+        # Refuse a window that is not describing a steady link. A tail far
+        # above the middle means the window straddles a change — model warm-up
+        # ending is the usual one — and its p95 describes the thing that ended
+        # rather than the thing that continues.
+        if p95 > p50 * _CALIBRATE_SPREAD_RATIO or p95 > _CALIBRATE_MAX_NS:
+            self._calibrate_attempts += 1
+            if self._calibrate_attempts < _CALIBRATE_ATTEMPTS:
+                return
+            self._calibrated = True
+            print(
+                '[SYNC] playout delay left at {:.0f}ms — the round trip never '
+                'settled (p50 {:.0f} / p95 {:.0f}ms). Escalation will raise it '
+                'if slots actually starve.'.format(
+                    self._fixed_delay_ns / 1_000_000,
+                    p50 / 1_000_000, p95 / 1_000_000),
+                file=sys.stderr,
+            )
+            return
+
         spread = max(float(np.std(arr)), float(_CALIBRATE_SPREAD_FLOOR_NS))
         raw = p95 + spread + _CALIBRATE_MARGIN_NS
         quantised = int(round(raw / _DELAY_QUANTUM_NS)) * _DELAY_QUANTUM_NS
-        delay = max(_CALIBRATE_FLOOR_NS, min(self._rtt.CEILING_NS, quantised))
+        delay = max(_CALIBRATE_FLOOR_NS, min(_CALIBRATE_MAX_NS, quantised))
 
         self._calibrated = True
         if delay == self._fixed_delay_ns:
@@ -942,9 +1021,16 @@ class JitterBuffer:
         eligible = self.pop_eligible()
         if eligible is not None:
             self._last_shown = eligible
-        elif self._last_shown is not None:
-            self._repeats += 1
-            self._repeats_total += 1
+        else:
+            # Nothing eligible. Whether that is a fault depends entirely on
+            # whether anything was *waiting*: an empty buffer means frames are
+            # arriving already past their deadline, which more headroom fixes,
+            # and a full one means D is generous, which it does not.
+            if not self._buf:
+                self._starved += 1
+            if self._last_shown is not None:
+                self._repeats += 1
+                self._repeats_total += 1
 
         # Measured on the frame actually presented, repeats included: a held
         # frame really is getting older on screen, and pretending otherwise
@@ -968,11 +1054,19 @@ class JitterBuffer:
         if self._fixed_delay_ns <= 0 or self._slots < _ESCALATE_AFTER_SLOTS:
             return
 
-        ratio = self._repeats / float(self._slots)
+        ratio = self._starved / float(self._slots)
+        arriving = self._pushes > 0
         self._slots = 0
         self._repeats = 0
+        self._starved = 0
+        self._pushes = 0
 
-        if ratio < _ESCALATE_REPEAT_RATIO:
+        # Nothing arrived at all, so there is nothing a bigger buffer would
+        # have held. A dead pipeline is not a slow link, and stepping D for it
+        # only delays the picture that does eventually come back.
+        if not arriving:
+            return
+        if ratio < _ESCALATE_STARVED_RATIO:
             return
         if self._fixed_delay_ns >= _ESCALATE_CEILING_NS:
             return
@@ -982,9 +1076,10 @@ class JitterBuffer:
         self._escalations += 1
         self._delay_epoch += 1
         print(
-            '[SYNC] {:.0f}% of slots repeated — raising playout delay to '
-            '{:.0f}ms. The link needs more headroom than the current delay '
-            'allows.'.format(ratio * 100, self._fixed_delay_ns / 1_000_000),
+            '[SYNC] {:.0f}% of slots starved — raising playout delay to '
+            '{:.0f}ms. Frames are arriving past their deadline, so the link '
+            'needs more headroom than the current delay allows.'.format(
+                ratio * 100, self._fixed_delay_ns / 1_000_000),
             file=sys.stderr,
         )
 
@@ -1000,6 +1095,11 @@ class JitterBuffer:
         self._last_video_age_ns = 0
         self._slots = 0
         self._repeats = 0
+        self._starved = 0
+        self._pushes = 0
+        self._calibrate_seen = 0
+        self._calibrate_next = _CALIBRATE_SKIP + _CALIBRATE_SAMPLES
+        self._calibrate_attempts = 0
         # A new session is a new link, so D is measured again rather than
         # inheriting the last one's answer. The epoch moves with it: audio may
         # still be running — `clear()` is called on reconnect — and has to be
@@ -1063,6 +1163,9 @@ class JitterBuffer:
             'fixed_delay': self._fixed_delay_ns > 0,
             'repeats': self._repeats_total,
             'escalations': self._escalations,
+            # A frame shown before its deadline because the buffer was about to
+            # evict it. Non-zero means D is larger than the buffer can hold.
+            'forced': self._forced,
         }
 
 

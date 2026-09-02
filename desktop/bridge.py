@@ -2638,6 +2638,13 @@ class Bridge(QObject):
         skew_ms = self._av_skew_ms(stats, audio)
         uplink_mbps, uplink_fps = self._uplink_rate()
 
+        # Non-zero means D is larger than the buffer can hold: frames are being
+        # shown before their deadline to stop them being evicted unseen. That
+        # is a frozen picture averted, not a slow link, and it reads as neither
+        # unless it is named.
+        forced = ('forced={} '.format(stats['forced']) if stats['forced']
+                  else '')
+
         if stats['rtt_samples'] > 0:
             print(
                 f'[SYNC] delay={stats["target_delay_ms"]}ms'
@@ -2645,6 +2652,7 @@ class Bridge(QObject):
                 f'rtt={stats["rtt_p50_ms"]}/{stats["rtt_p95_ms"]}ms '
                 f'buf={stats["buffer_depth"]} '
                 f'held={stats["repeats"]} '
+                f'{forced}'
                 f'up={uplink_mbps:.1f}Mbps/{uplink_fps:.0f}fps',
                 file=sys.stderr,
             )
