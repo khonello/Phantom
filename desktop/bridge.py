@@ -2880,6 +2880,77 @@ class Bridge(QObject):
     # and the far end is looking at a frozen face.
     _WEBCAM_FAIL_LIMIT = 30
 
+    @staticmethod
+    def _configure_capture(cap: Any, width: int, height: int, fps: int) -> None:
+        """
+        Apply the preset to an open capture, setting only what has to change.
+
+        Every `set` on Windows Media Foundation renegotiates the device format,
+        and each one costs about 1.7 seconds. Measured at 640x360, from
+        `VideoCapture(0)` to the first frame:
+
+            four sets, unconditional (what this was)   7.4s
+            skipping the fps set                       5.6s
+            skipping fps and anything already correct  3.9s
+
+        All three produce the same 640x360 at the same sustained 30fps, so the
+        3.5 seconds the camera used to take before showing anything bought
+        nothing at all. This is the largest part of the wait after launching the
+        app — the open itself is only ~1.9s of it.
+
+        **The fps set is skipped on MSMF because MSMF ignores it.** Asked for
+        20 it reports 20 and delivers 30, which is the camera's own default, so
+        paying 1.7s for it buys a number that is not true. Backends that honour
+        it still get it — the check is the backend's name rather than the
+        platform, since that is the thing the behaviour belongs to.
+
+        Note what that means and is not fixed here: capture already runs at the
+        camera's rate rather than the preset's, so `optimal` sends about 30
+        frames a second upstream where its own table says 20.
+
+        Args:
+            cap: An open `cv2.VideoCapture`
+            width: Preset capture width
+            height: Preset capture height
+            fps: Preset capture frame rate
+        """
+        for prop, wanted in (
+            (cv2.CAP_PROP_FRAME_WIDTH, width),
+            (cv2.CAP_PROP_FRAME_HEIGHT, height),
+        ):
+            try:
+                if int(cap.get(prop) or 0) != wanted:
+                    cap.set(prop, wanted)
+            except Exception:
+                cap.set(prop, wanted)
+
+        try:
+            backend = cap.getBackendName()
+        except Exception:
+            backend = ''
+        if backend != 'MSMF':
+            try:
+                if int(cap.get(cv2.CAP_PROP_FPS) or 0) != fps:
+                    cap.set(cv2.CAP_PROP_FPS, fps)
+            except Exception:
+                cap.set(cv2.CAP_PROP_FPS, fps)
+
+        # Say so when the camera landed somewhere else. Skipping a set that
+        # already matched is only safe if the result is still what was asked
+        # for, and a camera that snaps to its own nearest mode would otherwise
+        # upload a different resolution than the preset claims, silently.
+        try:
+            got_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+            got_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+            if (got_w, got_h) != (width, height):
+                print(
+                    '[BRIDGE] camera gave {}x{} for a requested {}x{}'.format(
+                        got_w, got_h, width, height),
+                    file=sys.stderr,
+                )
+        except Exception:
+            pass
+
     def _run_webcam(self, webcam_index: int) -> None:
         """
         Capture, encode and send the operator's camera, until told to stop.
@@ -2907,12 +2978,8 @@ class Bridge(QObject):
 
         try:
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
-            # Apply capture settings for the current quality preset
             w, h, fps, jpeg_quality = self._capture_settings()
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-            cap.set(cv2.CAP_PROP_FPS, fps)
+            self._configure_capture(cap, w, h, fps)
 
             encode_params = [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality]
             failures = 0

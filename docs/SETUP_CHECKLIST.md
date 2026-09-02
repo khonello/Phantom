@@ -43,9 +43,25 @@ conferencing app selects that device as its webcam.
 1. Install [OBS Studio](https://obsproject.com/).
 2. Open it once and press **Start Virtual Camera**, then close it. This
    registers the device with the system; OBS does not need to stay running.
-3. In the conferencing app, set **Camera → OBS Virtual Camera**.
+3. In the conferencing app, select that device as the camera. In Zoom:
+   **Settings → Video → Camera → OBS Virtual Camera**. See
+   [the Zoom settings table](#zoom-in-one-place) for both halves together.
 
 The badge in the bottom-left of the viewport shows whether the device is open.
+
+**The preview takes a few seconds to appear**, and that is the camera opening,
+not the app hanging. OpenCV's Windows backend renegotiates the device format on
+every property it is asked to change, at about 1.7 seconds each — measured from
+`VideoCapture(0)` to the first frame at 640x360:
+
+| | to first frame |
+|---|---|
+| setting resolution and frame rate unconditionally | 7.4s |
+| skipping the frame-rate set, which MSMF ignores | 5.6s |
+| also skipping anything already correct — what it does now | 3.9s |
+
+All three give the same 640x360 at the same 30fps. It runs on a worker thread,
+so the window and everything else are usable while it happens.
 
 **The camera is deliberately always on** — opened when the app opens, released
 only when it closes. It is not tied to a session or a mode. An open device
@@ -80,7 +96,17 @@ the conferencing app can select as a microphone.
    [AUDIO] Playing to virtual output: CABLE Input (VB-Audio Virtual Cable)
    ```
 
-3. In the conferencing app, set **Microphone → CABLE Output**.
+3. In the conferencing app, select the *other* end of the cable as the
+   microphone. In Zoom: **Settings → Audio → Microphone → CABLE Output
+   (VB-Audio Virtual Cable)**.
+
+   Which end matters. The app **plays into `CABLE Input`**; the conferencing app
+   **records from `CABLE Output`**. They are the two ends of one pipe, and
+   swapping them gives a call with no audio and no error message.
+
+4. Leave the conferencing app's **speaker** on your headphones or speakers.
+   Pointing it at `CABLE Input` feeds the call's audio back into the pipe the
+   desktop is already writing to, which is a loop.
 
 Windows lists the same cable once per audio API, and the difference is large: on
 one machine the same device measured **90ms on MME, 120ms on DirectSound and
@@ -338,24 +364,41 @@ Two lines to check after setting up a new machine:
 
 ---
 
+## Zoom in one place
+
+Everything the conferencing app needs, both halves together. The wording is
+Zoom's; every app has the same three settings under different names.
+
+| Zoom setting | Set it to | Why |
+|---|---|---|
+| **Settings → Video → Camera** | `OBS Virtual Camera` | Where the swapped video comes out (1.1) |
+| **Settings → Audio → Microphone** | `CABLE Output (VB-Audio Virtual Cable)` | Where your delayed voice comes out (1.2) |
+| **Settings → Audio → Speaker** | your headphones — **not** `CABLE Input` | Pointing it at the cable loops the call's audio back into the pipe |
+
+Two things about the microphone row that catch people:
+
+- **`CABLE Output`, not `CABLE Input`.** The desktop plays *into* `CABLE
+  Input`; Zoom records *from* `CABLE Output`. Two ends of one pipe. Choosing
+  the wrong one gives a call with no audio and nothing reported.
+- **Both devices must agree on a sample rate.** The app takes its rate from the
+  cable and needs the microphone to open at the same one. It says so at startup
+  if they disagree — see 1.2.
+
+Optional, and only if audio sounds processed: Zoom applies its own noise
+suppression to whatever it is given, and it is being given an already-clean
+recording. **Settings → Audio → Audio Profile → Original sound for musicians**
+turns that off. Try it if voices sound gated or thin; leave it alone otherwise.
+
+---
+
 ## Rehearsing before a real call
 
 You can prove the whole chain alone, without a second person. Do this once on
 every new machine — it takes about two minutes and it is the only way to see
 what a participant actually gets.
 
-**1. Point the conferencing app at the two virtual devices.**
-
-In Zoom, **Settings → Video → Camera → OBS Virtual Camera**, and **Settings →
-Audio → Microphone → CABLE Output (VB-Audio Virtual Cable)**.
-
-Note which end of the cable each one is. The app *plays into* `CABLE Input`;
-Zoom *records from* `CABLE Output`. They are two ends of the same pipe, and
-swapping them gives you a meeting with no audio and no error.
-
-**Leave Zoom's Speaker as your headphones or speakers.** Setting it to `CABLE
-Input` feeds the call's audio back into the pipe the app is already writing to,
-which is a loop.
+**1. Point the conferencing app at the two virtual devices** — the three
+settings in [the table above](#zoom-in-one-place).
 
 **2. Check video in the self-preview.** With Phantom running and a source set,
 the Zoom video preview shows the swapped face. That is the whole video path
