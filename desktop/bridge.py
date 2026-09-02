@@ -430,6 +430,19 @@ class Bridge(QObject):
         self._client.on_event = self._on_ws_event
         self._client.on_connected = self._on_ws_connected
 
+        # Catch up on a connection that happened before those were assigned.
+        #
+        # `PipelineClient` starts its receiver thread inside its own
+        # `__init__`, which runs before `Bridge` is even constructed, and this
+        # constructor does a lot before reaching this line. A socket that comes
+        # up in that window calls `on_connected` while it is still `None`, and
+        # the client only re-announces on a *change* — so the window is not
+        # transient: the header reads "connecting" indefinitely against a live
+        # connection, uploads succeed because the socket is genuinely fine, and
+        # START refuses on a flag that has never been told. It corrects itself
+        # only on the next disconnect, whenever that happens to be.
+        self._on_ws_connected(self._client.connected)
+
         # Single timer drives all frame updates on the main thread (~30fps)
         self._frame_timer = QTimer(self)
         self._frame_timer.timeout.connect(self._poll_frames)

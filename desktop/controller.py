@@ -146,6 +146,19 @@ class PipelineClient:
 
     # ── Connection management ────────────────────────────────────────────────
 
+    @property
+    def connected(self) -> bool:
+        """
+        Whether the socket is up right now.
+
+        Exists because `on_connected` fires on *transitions* only, and the
+        receiver thread starts inside `__init__` — before any caller has had a
+        chance to attach a listener. A connection established in that window
+        fires into `None` and is never re-announced, so a listener that arrives
+        late has no way to learn the truth except by asking.
+        """
+        return self._connected
+
     def expect_disconnect(self) -> None:
         """
         Stop reconnecting: the pod is gone because it was meant to be.
@@ -187,7 +200,15 @@ class PipelineClient:
             try:
                 with ws_connect(
                     self._ws_url,
-                    open_timeout=30,
+                    # Short, because this is a *retry* loop and the timeout is
+                    # dead air. A pod that is still booting does not refuse the
+                    # connection — the RunPod proxy accepts it and holds — so
+                    # every attempt before the pipeline is listening costs the
+                    # full timeout, and the desktop can sit disconnected for
+                    # that long after the pipeline actually comes up. Ten
+                    # seconds is still ~28 round trips at the 350ms RTT this
+                    # deployment actually runs at.
+                    open_timeout=10,
                     max_size=64 * 1024 * 1024,
                     ping_interval=30,
                     ping_timeout=120,  # generous timeout for high-latency / saturated links

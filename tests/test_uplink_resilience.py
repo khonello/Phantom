@@ -247,3 +247,52 @@ def test_the_virtual_camera_is_not_released_on_one_failed_send(monkeypatch):
         'respond to that by selecting the real webcam'
     )
     assert sends['n'] > 2, 'sending stopped after the failure: {}'.format(sends)
+
+
+# ── The connected flag must reflect the socket, not a missed edge ──────
+
+
+def test_a_connection_made_before_the_listener_is_attached_is_not_missed(monkeypatch):
+    """
+    `Bridge` must not sit on "connecting" against a live socket.
+
+    `PipelineClient` starts its receiver thread inside its own `__init__`,
+    before `Bridge` exists, and `Bridge.__init__` does a lot of work before it
+    assigns `on_connected`. A socket that comes up in that window fires the
+    callback while it is still `None`, and the client re-announces only on a
+    *change* — so the flag stays false against a working connection until the
+    next disconnect, whenever that is.
+
+    What that looks like from the outside is the bug that was reported: the
+    header reads "connecting", uploading a source works (the socket is fine),
+    and START refuses with "cannot reach server".
+    """
+    from desktop.controller import PipelineClient
+
+    client = PipelineClient.__new__(PipelineClient)
+    client._connected = False
+    client.on_connected = None
+
+    # The receiver connects while nobody is listening.
+    client._set_connected(True)
+    assert client.on_connected is None, 'the callback was never attached'
+    assert client.connected is True, 'the client itself knows it is connected'
+
+    # Bridge attaches late and syncs, the way its constructor now does.
+    seen = {}
+    bridge = Bridge.__new__(Bridge)
+    bridge._connected = False
+    monkeypatch.setattr(Bridge, 'connectedChanged', MagicMock())
+    monkeypatch.setattr(Bridge, '_set_status', lambda s, m, error=False: None)
+
+    def record(value):
+        seen['value'] = value
+        bridge._connected = value
+
+    client.on_connected = record
+    record(client.connected)
+
+    assert seen.get('value') is True, (
+        'a listener attached after the connection has no way to learn the '
+        'truth except by asking, and it must ask'
+    )
