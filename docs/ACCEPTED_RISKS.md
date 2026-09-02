@@ -70,80 +70,76 @@ need it.
 **Closes when:** deployment is docker-mode only, or the orchestrator learns to
 prompt.
 
-### 🟠 The repo token persists on the network volume
+### 🟠 The pod's git remote is whatever it was cloned with, forever
 
-A private repo is cloned with the token in the URL
-(`RUNPOD_REPO_URL=https://<token>@github.com/khonello/Phantom.git`), so git
-writes that URL into `/workspace/Phantom/.git/config` — on the **network
-volume**, which survives `stop` and `terminate` and is reused by every future
-pod. `startup.sh` needs it there: `git pull --ff-only` runs on every launch and
-would otherwise prompt.
+`git clone` writes the URL it was given into `/workspace/Phantom/.git/config`,
+on the **network volume** — which survives `stop` and `terminate` and is reused
+by every future pod. Nothing ever revisits it. If that URL is wrong, or stops
+resolving, every pod from then on inherits the problem and a fresh GPU changes
+nothing.
 
-**Why accepted:** it sits inside the same trust boundary as the forwarded
-`RUNPOD_API_KEY` — anyone who can read it already has root on the pod. Keeping
-the repo private is still the right call; this is the cost of that, not an
-argument against it.
-
-**What it does when the token goes stale**, which has now happened once: the
-pull stops being able to authenticate and git falls back to *asking*. There is
-no terminal to ask on, so it blocks on stdin rather than failing, and the boot
-stops dead under `Pulling latest changes...` — the orchestrator prints
-`[still running...]` every 30 seconds until the 1800s command timeout. A fresh
-GPU changes nothing, because the checkout and its stored URL are on the volume,
-not the pod.
+**The failure mode is a hang, not an error**, which is what makes it expensive.
+When GitHub will not serve a repository anonymously — private, renamed, deleted,
+or simply mistyped — it answers 401 rather than 404, so git falls back to
+*asking* for a username. There is no terminal to ask on, so it blocks on stdin.
+The boot stops dead under `Pulling latest changes...` and the orchestrator
+prints `[still running...]` every 30 seconds until the 1800s command timeout.
 
 `startup.sh` now sets `GIT_TERMINAL_PROMPT=0` and bounds the pull with
-`timeout 120`, so a dead token fails in seconds and says so instead of hanging
-for half an hour. Note the ordering trap that creates: the fix lives in
-`startup.sh`, which reaches the pod *through the pull it is fixing*, so the
-first recovery has to be manual.
+`timeout 120`, so this fails in seconds with
+`could not read Username ... terminal prompts disabled` instead of hanging for
+half an hour. Note the ordering trap: that fix reaches the pod *through the pull
+it fixes*, so the first recovery is always manual.
 
-**Recovery:** delete the checkout and let it re-clone. The clone URL is read
-from the orchestrator's own `.env` at deploy time and the clone step only runs
-when the directory is absent, so a fresh token in `.env` is picked up with no
-surgery on the pod's git config:
+**Diagnosis** — one command, and it is the only one that matters:
+
+```bash
+python runpod/orchestrator.py run "git -C /workspace/Phantom remote get-url origin"
+```
+
+**Recovery**, for a repository that is readable anonymously:
+
+```bash
+python runpod/orchestrator.py run   "git -C /workspace/Phantom remote set-url origin https://github.com/khonello/Phantom.git"
+```
+
+If the repository is private, the URL needs a token
+(`https://<token>@github.com/...`), and then the token is on the volume for
+every future pod to read — the trade recorded below. Either way, deleting the
+checkout and redeploying also works, since `RUNPOD_REPO_URL` is read from the
+orchestrator's own `.env` at deploy time and the clone step only runs when the
+directory is absent:
 
 ```bash
 python runpod/orchestrator.py run "rm -rf /workspace/Phantom"
 python runpod/orchestrator.py start
 ```
 
-The venv, models and templates live elsewhere on the volume
-(`/workspace/venv`, `/workspace/models`, `/workspace/templates`), so this costs
-one clone and nothing else.
+The venv, models and templates live elsewhere on the volume, so that costs one
+clone and nothing else.
 
-**Closes when:** the token is a fine-grained PAT scoped to this one repository
-with read-only contents access, so extracting it grants nothing else. Worth
-doing now — it is a GitHub settings change, not code. Note that fine-grained
-PATs **expire**, so whatever is chosen, the failure above is the one to expect
-and the reason it now fails loudly.
+**Why accepted:** a clone URL is set once and is not usually interesting. What
+was not acceptable was the failure being silent and unbounded, and that part is
+fixed rather than accepted.
 
-### 🟡 Uploads share one directory on the pod
+**Closes when:** the deploy verifies the remote resolves before depending on it,
+rather than discovering it inside a pull that cannot report.
 
-Sources and targets each get a per-upload `mkdtemp` subdirectory now, and names
-are made unique within it, so two photos with the same camera filename no longer
-overwrite each other. What remains is that **every session shares one root**
-(`<temp>/uploads`), and `cleanup_session` empties the whole thing.
+### 🟡 A private repo would put a token on the network volume
 
-**Why accepted:** one pod serves one operator at a time, so there is nothing to
-isolate from. It becomes real the moment that is not true — at which point the
-shared root also means one operator's cleanup deletes another's uploads.
+Not the current configuration — `RUNPOD_REPO_URL` carries no token and the
+repository is public — but it is the documented way to use a private one, so the
+cost is worth stating before someone reaches for it. `git clone` would write
+`https://<token>@github.com/...` into `.git/config` on the volume, which
+survives `terminate` and is readable by every future pod.
 
-**Closes when:** the pod serves more than one session, at which point uploads
-need per-session isolation and a lifetime of their own.
+**Why accepted:** it would sit inside the same trust boundary as the forwarded
+`RUNPOD_API_KEY` — anyone who can read it already has root on the pod.
 
-### 🟡 Source uploads have no size cap
-
-Target photos are capped at `MAX_PHOTO_BYTES` (6 MB) and refused above it.
-Sources are read, base64-encoded and sent whole, with no ceiling — a 40 MB
-image becomes a ~53 MB WebSocket frame. The server's `max_size` is 64 MB, so
-the failure mode is a dropped connection rather than a rejection with a reason.
-
-**Why accepted:** a face photo that large is unusual, and the guards refuse
-most unusable sources for better reasons first.
-
-**Closes when:** `upload_source` gets the same cap-and-re-encode ladder
-`_encode_photo` already implements for targets.
+**Closes when:** if the repo is ever made private, the token used is a
+fine-grained PAT scoped to that one repository with read-only contents access,
+so extracting it grants nothing else. Note those expire, which turns into the
+hang described above.
 
 ---
 

@@ -152,6 +152,13 @@ if [ -d "${PHANTOM_DIR}/.git" ]; then
             echo "    \"git -C ${PHANTOM_DIR} reset --hard && git -C ${PHANTOM_DIR} clean -fd\""
         fi
         echo ""
+        echo "If that says 'could not read Username', the remote above is one"
+        echo "GitHub will not serve anonymously — private, renamed, or wrong."
+        echo "It answers 401 rather than 404, which is why git asks instead of"
+        echo "failing. Point origin at a URL that resolves:"
+        echo "  python runpod/orchestrator.py run \\"
+        echo "    \"git -C ${PHANTOM_DIR} remote set-url origin <url>\""
+        echo ""
         echo "Booting anyway would run code that is not the code you pushed."
         echo "Set PHANTOM_ALLOW_STALE=1 to continue regardless."
         echo "=============================================================="
