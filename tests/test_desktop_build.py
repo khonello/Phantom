@@ -103,6 +103,30 @@ check('QtQuick.Effects is among them',
       'QtQuick.Effects' in imported,
       'MultiEffect blurs the window behind the one-face notice')
 
+# ── Nothing uses a module main.qml does not import ────────────────────
+# An unresolved attached property is not a warning, it is a *load* error:
+# `main.qml` produces no root object and the app exits -1 saying nothing —
+# the same silent failure the bundled-file checks above exist for.
+#
+# This shipped once. `ToolTip.visible` was added to the output-path row with no
+# `import QtQuick.Controls` anywhere in the project, and the desktop stopped
+# starting at all — found on a machine other than the one it was written on,
+# which is the shape of this bug: it depends on nothing but the import list, so
+# it reproduces everywhere equally and gets noticed somewhere else.
+_CONTROLS_ONLY = (
+    'ToolTip', 'ScrollBar', 'ScrollView', 'Popup', 'Menu', 'MenuItem',
+    'Button', 'ComboBox', 'CheckBox', 'RadioButton', 'Slider', 'SpinBox',
+    'TextField', 'TextArea', 'Dialog', 'Label', 'Switch', 'TabBar',
+)
+_controls_used = [
+    _type for _type in _CONTROLS_ONLY
+    # Attached use (`ToolTip.visible:`) and declaration (`Button {`).
+    if re.search(r'^\s*(?:{0}\.\w+\s*:|{0}\s*\{{)'.format(_type), qml, re.MULTILINE)
+]
+check('every QtQuick.Controls type main.qml uses is covered by its import',
+      not _controls_used or 'QtQuick.Controls' in imported,
+      'used without the import: {}'.format(_controls_used))
+
 # ── The build command still says what the docstring says ──────────────
 print('\nBuild command')
 

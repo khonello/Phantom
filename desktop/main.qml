@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Window
 import QtQuick.Layouts
+import QtQuick.Controls
 import QtQuick.Effects
 import Phantom 1.0
 
@@ -210,1089 +211,1199 @@ Window {
                     width: 1; color: "#14142a"
                 }
 
-                ColumnLayout {
-                    anchors { fill: parent; margins: root.sidebarPadding
-                              bottomMargin: root.sidebarPadding }
-                    spacing: 0
+                // The sidebar scrolls rather than clipping.
+                //
+                // Its content is taller than the window on a short screen, and
+                // the action button — START, or PROCESS — sits at the *bottom*
+                // of the column, so it is the first thing to go. The app then
+                // looks like it has no way to start a job, and the only remedy
+                // was to resize the window, which is not a discoverable one.
+                Flickable {
+                    id: sidebarScroll
+                    anchors { fill: parent; margins: root.sidebarPadding }
+                    contentWidth: width
+                    contentHeight: sidebarColumn.height
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+                    flickDeceleration: 6000
 
-                    // ── Mode switcher ─────────────────────────────────────
-                    // The job within the selected media tab. Both tabs have two.
-                    Rectangle {
-                        Layout.fillWidth: true; height: root.tabPaneHeight; radius: 8
-                        color: "#0a0a14"
-                        border.color: "#14142a"; border.width: 1
-                        Layout.bottomMargin: 20
+                    ColumnLayout {
+                        id: sidebarColumn
+                        width: sidebarScroll.width
+                        // Fills the viewport when the content is shorter than
+                        // it, and grows past it when it is not. That first case
+                        // is what keeps this invisible on a tall window: the
+                        // panes below use `Layout.fillHeight` with a spring
+                        // spacer to pin their button to the bottom, and a column
+                        // sized to its own content would collapse both and float
+                        // the button up under the settings.
+                        height: Math.max(implicitHeight, sidebarScroll.height)
+                        spacing: 0
 
-                        Row {
-                            anchors { fill: parent; margins: 3 }
-                            spacing: 2
+                        // ── Mode switcher ─────────────────────────────────────
+                        // The job within the selected media tab. Both tabs have two.
+                        Rectangle {
+                            Layout.fillWidth: true; height: root.tabPaneHeight; radius: 8
+                            color: "#0a0a14"
+                            border.color: "#14142a"; border.width: 1
+                            Layout.bottomMargin: 20
 
-                            Repeater {
-                                // Video: "RENDER", not "BATCH" - batch reads as
-                                // *many*, and this is one video processed offline
-                                // rather than streamed.
-                                //
-                                // Image: the face is yours either way; what differs
-                                // is whose picture it goes into. UPLOAD is one you
-                                // bring, TEMPLATES is one we ship.
-                                model: bridge.mediaTab === "video"
-                                       ? [
-                                           { id: "realtime", label: "LIVE"   },
-                                           { id: "video",    label: "RENDER" },
-                                         ]
-                                       : [
-                                           { id: "image",    label: "UPLOAD"    },
-                                           { id: "template", label: "TEMPLATES" },
-                                         ]
+                            Row {
+                                anchors { fill: parent; margins: 3 }
+                                spacing: 2
 
-                                Rectangle {
-                                    width: (parent.width - 2) / 2; height: parent.height; radius: 6
-                                    property bool isActive: bridge.currentMode === modelData.id
-                                    color: isActive ? "#1a1a30" : (mh.containsMouse ? "#111120" : "transparent")
-                                    border.color: isActive ? "#2e2e55" : "transparent"
-                                    border.width: 1
-                                    Behavior on color { ColorAnimation { duration: 120 } }
+                                Repeater {
+                                    // Video: "RENDER", not "BATCH" - batch reads as
+                                    // *many*, and this is one video processed offline
+                                    // rather than streamed.
+                                    //
+                                    // Image: the face is yours either way; what differs
+                                    // is whose picture it goes into. UPLOAD is one you
+                                    // bring, TEMPLATES is one we ship.
+                                    model: bridge.mediaTab === "video"
+                                           ? [
+                                               { id: "realtime", label: "LIVE"   },
+                                               { id: "video",    label: "RENDER" },
+                                             ]
+                                           : [
+                                               { id: "image",    label: "UPLOAD"    },
+                                               { id: "template", label: "TEMPLATES" },
+                                             ]
 
-                                    Text {
-                                        anchors.centerIn: parent
-                                        text: modelData.label
-                                        color: isActive ? "#c4b5fd" : "#334155"
-                                        font.pixelSize: 9; font.letterSpacing: 1.5; font.weight: Font.Medium
+                                    Rectangle {
+                                        width: (parent.width - 2) / 2; height: parent.height; radius: 6
+                                        property bool isActive: bridge.currentMode === modelData.id
+                                        color: isActive ? "#1a1a30" : (mh.containsMouse ? "#111120" : "transparent")
+                                        border.color: isActive ? "#2e2e55" : "transparent"
+                                        border.width: 1
                                         Behavior on color { ColorAnimation { duration: 120 } }
-                                    }
 
-                                    HoverHandler { id: mh }
-                                    MouseArea {
-                                        anchors.fill: parent
-                                        onClicked: bridge.setMode(modelData.id)
-                                        cursorShape: Qt.PointingHandCursor
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // ── Face source ───────────────────────────────────────
-                    Text {
-                        text: "FACE SOURCE"
-                        color: "#252545"; font.pixelSize: 8; font.letterSpacing: 1.5
-                        Layout.bottomMargin: 8
-                    }
-
-                    // ── Select button (no source set, or embedding in progress) ──
-                    Rectangle {
-                        id: faceBtn
-                        Layout.fillWidth: true; height: 38; radius: 8
-                        visible: !bridge.sourceSet || bridge.embeddingPending
-                        color: faceHover.containsMouse && !bridge.embeddingPending ? "#1a1a2e" : "#12121e"
-                        border.color: faceHover.containsMouse && !bridge.embeddingPending ? "#2e2e50" : "#1e1e35"
-                        border.width: 1
-                        Behavior on color      { ColorAnimation { duration: 130 } }
-                        Behavior on border.color { ColorAnimation { duration: 130 } }
-
-                        Row {
-                            anchors.centerIn: parent; spacing: 8
-
-                            Rectangle {
-                                width: 20; height: 20; radius: 10
-                                color: bridge.embeddingPending ? "#1a1a2e" : "#1a0a35"
-                                anchors.verticalCenter: parent.verticalCenter
-                                Text {
-                                    anchors.centerIn: parent
-                                    text: bridge.embeddingPending ? "·" : "+"
-                                    color: bridge.embeddingPending ? "#475569" : "#8b5cf6"
-                                    font.pixelSize: bridge.embeddingPending ? 22 : 17
-                                }
-                            }
-                            Text {
-                                text: bridge.embeddingPending ? "processing…" : "Select Source Images"
-                                color: bridge.embeddingPending ? "#475569" : "#a78bfa"
-                                font.pixelSize: 12; anchors.verticalCenter: parent.verticalCenter
-                            }
-                        }
-
-                        HoverHandler { id: faceHover }
-                        MouseArea {
-                            anchors.fill: parent; enabled: !bridge.embeddingPending
-                            onClicked: bridge.selectFaceImages()
-                            cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                        }
-                    }
-
-                    // ── Thumbnail card (source set, not processing) ────────
-                    Rectangle {
-                        id: faceThumbnailCard
-                        Layout.fillWidth: true; height: 76; radius: 8
-                        visible: bridge.sourceSet && !bridge.embeddingPending
-                        color: "#12121e"
-                        border.color: "#2a1a45"; border.width: 1
-                        clip: true
-
-                        Image {
-                            anchors.fill: parent
-                            source: bridge.sourceThumbnail !== ""
-                                    ? "file:///" + bridge.sourceThumbnail
-                                    : ""
-                            fillMode: Image.PreserveAspectCrop
-                            smooth: true
-                        }
-
-                        // bottom label bar
-                        Rectangle {
-                            anchors { bottom: parent.bottom; left: parent.left; right: parent.right }
-                            height: 26
-                            color: "#d009090e"
-
-                            Text {
-                                anchors { left: parent.left; leftMargin: 10; verticalCenter: parent.verticalCenter }
-                                text: bridge.sourceLabel
-                                color: "#c4b5fd"; font.pixelSize: 10
-                                elide: Text.ElideMiddle
-                                width: parent.width - 20
-                            }
-                        }
-
-                        // × reset button (top-right)
-                        Rectangle {
-                            anchors { top: parent.top; right: parent.right; topMargin: 6; rightMargin: 6 }
-                            width: 22; height: 22; radius: 5
-                            color: resetHover.containsMouse ? "#3b1d6e" : "#1a0a35"
-                            border.color: resetHover.containsMouse ? "#6d28d9" : "#2d1a45"
-                            border.width: 1
-                            Behavior on color { ColorAnimation { duration: 120 } }
-
-                            Text {
-                                anchors.centerIn: parent
-                                text: "×"; color: "#a78bfa"; font.pixelSize: 13
-                            }
-
-                            HoverHandler { id: resetHover }
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: bridge.resetSource()
-                            }
-                        }
-                    }
-
-                    // ── Divider ───────────────────────────────────────────
-                    Rectangle {
-                        Layout.fillWidth: true; height: 1; color: "#14142a"
-                        Layout.topMargin: 20; Layout.bottomMargin: 20
-                    }
-
-                    // ══ REALTIME CONTROLS ══════════════════════════════════
-                    // visible only in LIVE mode
-                    Item {
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
-                        visible: bridge.currentMode === "realtime"
-
-                        ColumnLayout {
-                            anchors { fill: parent }
-                            spacing: 0
-
-                            // ── Webcam ────────────────────────────────────────────
-                            Text {
-                                text: "WEBCAM INDEX"
-                                color: "#252545"; font.pixelSize: 8; font.letterSpacing: 1.5
-                                Layout.bottomMargin: 8
-                            }
-
-                            Rectangle {
-                                Layout.fillWidth: true; height: 38; radius: 8
-                                color: "#12121e"
-                                border.color: wcInput.activeFocus ? "#3a3a60" : "#1e1e35"
-                                border.width: 1
-                                Behavior on border.color { ColorAnimation { duration: 150 } }
-
-                                TextInput {
-                                    id: wcInput
-                                    anchors { fill: parent; leftMargin: 14; rightMargin: 14 }
-                                    verticalAlignment: TextInput.AlignVCenter
-                                    text: "0"; color: "#e2e8f0"; font.pixelSize: 13
-                                    onEditingFinished: bridge.setWebcamIndex(text)
-                                    validator: IntValidator { bottom: 0; top: 9 }
-                                }
-                            }
-
-                            // ── Quality ───────────────────────────────────────────
-                            Text {
-                                text: "QUALITY"
-                                color: "#252545"; font.pixelSize: 8; font.letterSpacing: 1.5
-                                Layout.topMargin: 16; Layout.bottomMargin: 8
-                            }
-
-                            Rectangle {
-                                id: qualBox
-                                Layout.fillWidth: true; height: 38; radius: 8
-                                color: qualHover.containsMouse ? "#1a1a2e" : "#12121e"
-                                border.color: qualBox.open ? "#3a3a60" : "#1e1e35"
-                                border.width: 1
-                                z: open ? 10 : 0
-                                Behavior on color { ColorAnimation { duration: 130 } }
-
-                                property var opts: ["fast", "optimal", "production"]
-                                property int sel: 1
-                                property bool open: false
-
-                                Row {
-                                    anchors { fill: parent; leftMargin: 14; rightMargin: 10 }
-                                    Text {
-                                        text: qualBox.opts[qualBox.sel]
-                                        color: "#cbd5e1"; font.pixelSize: 12
-                                        width: parent.width - 20
-                                        anchors.verticalCenter: parent.verticalCenter
-                                    }
-                                    Text { text: "⌄"; color: "#334155"; font.pixelSize: 10; anchors.verticalCenter: parent.verticalCenter }
-                                }
-
-                                HoverHandler { id: qualHover }
-                                MouseArea {
-                                    anchors.fill: parent
-                                    onClicked: qualBox.open = !qualBox.open
-                                    cursorShape: Qt.PointingHandCursor
-                                }
-
-                                Rectangle {
-                                    visible: qualBox.open
-                                    anchors.top: parent.bottom; anchors.topMargin: 4
-                                    anchors.left: parent.left
-                                    width: parent.width
-                                    height: qualBox.opts.length * 32 + 10
-                                    radius: 8; color: "#12121e"
-                                    border.color: "#252545"; border.width: 1
-
-                                    Column {
-                                        anchors { fill: parent; margins: 5 }
-                                        spacing: 2
-
-                                        Repeater {
-                                            model: qualBox.opts
-                                            Rectangle {
-                                                width: parent.width; height: 30; radius: 5
-                                                color: qualBox.sel === index ? "#1e1e38"
-                                                     : (rh.containsMouse ? "#171730" : "transparent")
-                                                HoverHandler { id: rh }
-                                                Text {
-                                                    anchors { left: parent.left; leftMargin: 10; verticalCenter: parent.verticalCenter }
-                                                    text: modelData
-                                                    color: qualBox.sel === index ? "#c4b5fd" : "#475569"
-                                                    font.pixelSize: 12
-                                                }
-                                                MouseArea {
-                                                    anchors.fill: parent
-                                                    onClicked: {
-                                                        qualBox.sel = index
-                                                        bridge.setQuality(modelData)
-                                                        qualBox.open = false
-                                                    }
-                                                    cursorShape: Qt.PointingHandCursor
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // ── Restoration ───────────────────────────────────────
-                            // Strength, not a switch. The header once had an
-                            // ENHANCE toggle and it was removed because "off"
-                            // was never "less plastic" - it was no restoration
-                            // at all. As the bottom of a list, off reads as one
-                            // end of a range, which is what it is.
-                            //
-                            // "auto" follows the swap model's own profile, so
-                            // the operator's choice and the model cannot fight.
-                            Text {
-                                text: "RESTORATION"
-                                color: "#252545"; font.pixelSize: 8; font.letterSpacing: 1.5
-                                Layout.topMargin: 16; Layout.bottomMargin: 8
-                            }
-
-                            Rectangle {
-                                id: restBox
-                                Layout.fillWidth: true; height: 38; radius: 8
-                                color: restHover.containsMouse ? "#1a1a2e" : "#12121e"
-                                border.color: restBox.open ? "#3a3a60" : "#1e1e35"
-                                border.width: 1
-                                z: open ? 10 : 0
-                                Behavior on color { ColorAnimation { duration: 130 } }
-
-                                property var opts: ["auto", "off", "subtle", "balanced", "full"]
-                                property bool open: false
-                                property int sel: Math.max(0, opts.indexOf(bridge.restoration))
-
-                                Row {
-                                    anchors { fill: parent; leftMargin: 14; rightMargin: 10 }
-                                    Text {
-                                        text: restBox.opts[restBox.sel]
-                                        color: "#cbd5e1"; font.pixelSize: 12
-                                        width: parent.width - 20
-                                        anchors.verticalCenter: parent.verticalCenter
-                                    }
-                                    Text { text: "⌄"; color: "#334155"; font.pixelSize: 10; anchors.verticalCenter: parent.verticalCenter }
-                                }
-
-                                HoverHandler { id: restHover }
-                                MouseArea {
-                                    anchors.fill: parent
-                                    onClicked: restBox.open = !restBox.open
-                                    cursorShape: Qt.PointingHandCursor
-                                }
-
-                                Rectangle {
-                                    visible: restBox.open
-                                    anchors.top: parent.bottom; anchors.topMargin: 4
-                                    anchors.left: parent.left
-                                    width: parent.width
-                                    height: restBox.opts.length * 32 + 10
-                                    radius: 8; color: "#12121e"
-                                    border.color: "#252545"; border.width: 1
-
-                                    Column {
-                                        anchors { fill: parent; margins: 5 }
-                                        spacing: 2
-
-                                        Repeater {
-                                            model: restBox.opts
-                                            Rectangle {
-                                                width: parent.width; height: 30; radius: 5
-                                                color: restBox.sel === index ? "#1e1e38"
-                                                     : (rrh.containsMouse ? "#171730" : "transparent")
-                                                HoverHandler { id: rrh }
-                                                Text {
-                                                    anchors { left: parent.left; leftMargin: 10; verticalCenter: parent.verticalCenter }
-                                                    text: modelData
-                                                    color: restBox.sel === index ? "#c4b5fd" : "#475569"
-                                                    font.pixelSize: 12
-                                                }
-                                                MouseArea {
-                                                    anchors.fill: parent
-                                                    onClicked: {
-                                                        restBox.sel = index
-                                                        bridge.setRestoration(modelData)
-                                                        restBox.open = false
-                                                    }
-                                                    cursorShape: Qt.PointingHandCursor
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // ── Voice ─────────────────────────────────────────────
-                            Text {
-                                text: "VOICE"
-                                color: "#252545"; font.pixelSize: 8; font.letterSpacing: 1.5
-                                Layout.topMargin: 16; Layout.bottomMargin: 8
-                            }
-
-                            Rectangle {
-                                id: voiceBox
-                                Layout.fillWidth: true; height: 38; radius: 8
-                                color: voiceHover.containsMouse ? "#1a1a2e" : "#12121e"
-                                border.color: voiceBox.open ? "#3a3a60" : "#1e1e35"
-                                border.width: 1
-                                z: open ? 10 : 0
-                                Behavior on color { ColorAnimation { duration: 130 } }
-
-                                property var opts: ["none", "female", "male", "child", "deep"]
-                                property var labels: ["None", "Female", "Male", "Child", "Deep"]
-                                property int sel: 0
-                                property bool open: false
-
-                                Row {
-                                    anchors { fill: parent; leftMargin: 14; rightMargin: 10 }
-                                    Text {
-                                        text: voiceBox.labels[voiceBox.sel]
-                                        color: "#cbd5e1"; font.pixelSize: 12
-                                        width: parent.width - 20
-                                        anchors.verticalCenter: parent.verticalCenter
-                                    }
-                                    Text { text: "⌄"; color: "#334155"; font.pixelSize: 10; anchors.verticalCenter: parent.verticalCenter }
-                                }
-
-                                HoverHandler { id: voiceHover }
-                                MouseArea {
-                                    anchors.fill: parent
-                                    onClicked: voiceBox.open = !voiceBox.open
-                                    cursorShape: Qt.PointingHandCursor
-                                }
-
-                                Rectangle {
-                                    visible: voiceBox.open
-                                    anchors.top: parent.bottom; anchors.topMargin: 4
-                                    anchors.left: parent.left
-                                    width: parent.width
-                                    height: voiceBox.opts.length * 32 + 10
-                                    radius: 8; color: "#12121e"
-                                    border.color: "#252545"; border.width: 1
-
-                                    Column {
-                                        anchors { fill: parent; margins: 5 }
-                                        spacing: 2
-
-                                        Repeater {
-                                            model: voiceBox.labels
-                                            Rectangle {
-                                                width: parent.width; height: 30; radius: 5
-                                                color: voiceBox.sel === index ? "#1e1e38"
-                                                     : (vh.containsMouse ? "#171730" : "transparent")
-                                                HoverHandler { id: vh }
-                                                Text {
-                                                    anchors { left: parent.left; leftMargin: 10; verticalCenter: parent.verticalCenter }
-                                                    text: modelData
-                                                    color: voiceBox.sel === index ? "#c4b5fd" : "#475569"
-                                                    font.pixelSize: 12
-                                                }
-                                                MouseArea {
-                                                    anchors.fill: parent
-                                                    onClicked: {
-                                                        voiceBox.sel = index
-                                                        bridge.setVoiceTemplate(voiceBox.opts[index])
-                                                        voiceBox.open = false
-                                                    }
-                                                    cursorShape: Qt.PointingHandCursor
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // ── Platform ──────────────────────────────────────────
-                            Text {
-                                text: "PLATFORM"
-                                color: "#252545"; font.pixelSize: 8; font.letterSpacing: 1.5
-                                Layout.topMargin: 16; Layout.bottomMargin: 8
-                            }
-
-                            Rectangle {
-                                id: platBox
-                                Layout.fillWidth: true; height: 38; radius: 8
-                                color: platHover.containsMouse ? "#1a1a2e" : "#12121e"
-                                border.color: platBox.open ? "#3a3a60" : "#1e1e35"
-                                border.width: 1
-                                z: open ? 10 : 0
-                                Behavior on color { ColorAnimation { duration: 130 } }
-
-                                property var opts: ["obs", "unitycapture"]
-                                property var labels: ["OBS Virtual Camera", "Unity Capture"]
-                                property int sel: 0
-                                property bool open: false
-
-                                Row {
-                                    anchors { fill: parent; leftMargin: 14; rightMargin: 10 }
-                                    Text {
-                                        text: platBox.labels[platBox.sel]
-                                        color: "#cbd5e1"; font.pixelSize: 12
-                                        width: parent.width - 20
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        elide: Text.ElideRight
-                                    }
-                                    Text { text: "⌄"; color: "#334155"; font.pixelSize: 10; anchors.verticalCenter: parent.verticalCenter }
-                                }
-
-                                HoverHandler { id: platHover }
-                                MouseArea {
-                                    anchors.fill: parent
-                                    onClicked: platBox.open = !platBox.open
-                                    cursorShape: Qt.PointingHandCursor
-                                }
-
-                                Rectangle {
-                                    visible: platBox.open
-                                    anchors.top: parent.bottom; anchors.topMargin: 4
-                                    anchors.left: parent.left
-                                    width: parent.width
-                                    height: platBox.opts.length * 32 + 10
-                                    radius: 8; color: "#12121e"
-                                    border.color: "#252545"; border.width: 1
-
-                                    Column {
-                                        anchors { fill: parent; margins: 5 }
-                                        spacing: 2
-
-                                        Repeater {
-                                            model: platBox.labels
-                                            Rectangle {
-                                                width: parent.width; height: 30; radius: 5
-                                                color: platBox.sel === index ? "#1e1e38"
-                                                     : (ph.containsMouse ? "#171730" : "transparent")
-                                                HoverHandler { id: ph }
-                                                Text {
-                                                    anchors { left: parent.left; leftMargin: 10; verticalCenter: parent.verticalCenter }
-                                                    text: modelData
-                                                    color: platBox.sel === index ? "#c4b5fd" : "#475569"
-                                                    font.pixelSize: 12
-                                                }
-                                                MouseArea {
-                                                    anchors.fill: parent
-                                                    onClicked: {
-                                                        platBox.sel = index
-                                                        bridge.setPlatform(platBox.opts[index])
-                                                        platBox.open = false
-                                                    }
-                                                    cursorShape: Qt.PointingHandCursor
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // ── Spacer ────────────────────────────────────────────
-                            Item { Layout.fillHeight: true }
-
-                            // ── Action buttons ────────────────────────────────────
-                            Rectangle {
-                                Layout.fillWidth: true; height: 1; color: "#14142a"
-                                Layout.bottomMargin: 20
-                            }
-
-                            // START ↔ STOP
-                            Rectangle {
-                                id: startStopBtn
-                                Layout.fillWidth: true; height: 42; radius: 9
-
-                                property bool canStart: !bridge.pipelineRunning && !bridge.embeddingPending
-
-                                gradient: Gradient {
-                                    orientation: Gradient.Horizontal
-                                    GradientStop {
-                                        position: 0.0
-                                        color: bridge.pipelineRunning ? "#7f1d1d"
-                                             : (startStopBtn.canStart ? "#7c3aed" : "#181828")
-                                        Behavior on color { ColorAnimation { duration: 300 } }
-                                    }
-                                    GradientStop {
-                                        position: 1.0
-                                        color: bridge.pipelineRunning ? "#b91c1c"
-                                             : (startStopBtn.canStart ? "#2563eb" : "#181828")
-                                        Behavior on color { ColorAnimation { duration: 300 } }
-                                    }
-                                }
-
-                                Row {
-                                    anchors.centerIn: parent; spacing: 8
-
-                                    Rectangle {
-                                        width: 6; height: 6
-                                        radius: bridge.pipelineRunning ? 1 : 3
-                                        color: "white"
-                                        opacity: (startStopBtn.canStart || bridge.pipelineRunning) ? 1.0 : 0.15
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        Behavior on radius  { NumberAnimation { duration: 250 } }
-                                        Behavior on opacity { NumberAnimation { duration: 300 } }
-                                    }
-                                    Text {
-                                        text: bridge.pipelineRunning ? "STOP" : "START"
-                                        color: (startStopBtn.canStart || bridge.pipelineRunning) ? "white" : "#2a2a45"
-                                        font.pixelSize: 12; font.letterSpacing: 1.5; font.weight: Font.Medium
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        Behavior on color { ColorAnimation { duration: 300 } }
-                                    }
-                                }
-
-                                MouseArea {
-                                    anchors.fill: parent
-                                    enabled: startStopBtn.canStart || bridge.pipelineRunning
-                                    onClicked: bridge.pipelineRunning ? bridge.stopPipeline() : bridge.startPipeline()
-                                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                }
-                            }
-
-                        }
-                    }
-
-                    // ══ BATCH CONTROLS ═════════════════════════════════════
-                    // visible in VIDEO and IMAGE modes
-                    Item {
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
-                        visible: bridge.currentMode !== "realtime"
-
-                        ColumnLayout {
-                            anchors { fill: parent }
-                            spacing: 0
-
-                            // ── Target file ───────────────────────────────
-                            Text {
-                                text: bridge.currentMode === "video"
-                                      ? "TARGET VIDEO"
-                                      : bridge.currentMode === "template"
-                                      ? "CHOOSE A SCENE"
-                                      : "TARGET PHOTOS (MAX " + bridge.maxPhotoTargets + ")"
-                                color: "#252545"; font.pixelSize: 8; font.letterSpacing: 1.5
-                                Layout.bottomMargin: 8
-                            }
-
-                            // Select target button
-                            Rectangle {
-                                Layout.fillWidth: true; height: 38; radius: 8
-                                // Templates are picked from the gallery below,
-                                // not from the filesystem.
-                                visible: !bridge.targetSet && bridge.currentMode !== "template"
-                                color: tgtHover.containsMouse ? "#1a1a2e" : "#12121e"
-                                border.color: tgtHover.containsMouse ? "#2e2e50" : "#1e1e35"
-                                border.width: 1
-                                Behavior on color      { ColorAnimation { duration: 130 } }
-                                Behavior on border.color { ColorAnimation { duration: 130 } }
-
-                                Row {
-                                    anchors.centerIn: parent; spacing: 8
-                                    Rectangle {
-                                        width: 20; height: 20; radius: 10; color: "#0a1a35"
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        Text { anchors.centerIn: parent; text: "+"; color: "#3b82f6"; font.pixelSize: 17 }
-                                    }
-                                    Text {
-                                        text: bridge.currentMode === "video" ? "Select Video" : "Select Photos"
-                                        color: "#60a5fa"; font.pixelSize: 12
-                                        anchors.verticalCenter: parent.verticalCenter
-                                    }
-                                }
-
-                                HoverHandler { id: tgtHover }
-                                MouseArea {
-                                    anchors.fill: parent
-                                    onClicked: bridge.selectTargetFile()
-                                    cursorShape: Qt.PointingHandCursor
-                                }
-                            }
-
-                            // Target thumbnail card (video only — photo mode
-                            // shows a tile per chosen image instead)
-                            Rectangle {
-                                Layout.fillWidth: true; height: 68; radius: 8
-                                visible: bridge.targetSet && bridge.currentMode === "video"
-                                color: "#12121e"
-                                border.color: "#1a2a45"; border.width: 1
-                                clip: true
-
-                                // Image thumbnail (shown for image mode or if thumbnail available)
-                                Image {
-                                    anchors.fill: parent
-                                    source: bridge.targetThumbnail === ""
-                                            ? ""
-                                            : (bridge.targetThumbnail.indexOf("data:") === 0
-                                               ? bridge.targetThumbnail
-                                               : "file:///" + bridge.targetThumbnail)
-                                    fillMode: Image.PreserveAspectCrop
-                                    smooth: true
-                                    visible: bridge.targetThumbnail !== ""
-                                }
-
-                                // Video icon placeholder
-                                Column {
-                                    anchors.centerIn: parent; spacing: 4
-                                    visible: bridge.targetThumbnail === ""
-                                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: "▶"; color: "#3b82f6"; font.pixelSize: 20 }
-                                }
-
-                                // bottom label
-                                Rectangle {
-                                    anchors { bottom: parent.bottom; left: parent.left; right: parent.right }
-                                    height: 24; color: "#d009090e"
-                                    Text {
-                                        anchors { left: parent.left; leftMargin: 10; verticalCenter: parent.verticalCenter }
-                                        text: bridge.targetLabel
-                                        color: "#93c5fd"; font.pixelSize: 10
-                                        elide: Text.ElideMiddle
-                                        width: parent.width - 36
-                                    }
-                                }
-
-                                // × change button
-                                Rectangle {
-                                    anchors { top: parent.top; right: parent.right; topMargin: 5; rightMargin: 5 }
-                                    width: 22; height: 22; radius: 5
-                                    color: tgtResetHover.containsMouse ? "#1d2c4e" : "#0a1428"
-                                    border.color: tgtResetHover.containsMouse ? "#2563eb" : "#1a2a45"
-                                    border.width: 1
-                                    Behavior on color { ColorAnimation { duration: 120 } }
-                                    Text { anchors.centerIn: parent; text: "×"; color: "#60a5fa"; font.pixelSize: 13 }
-                                    HoverHandler { id: tgtResetHover }
-                                    MouseArea {
-                                        anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                        onClicked: bridge.selectTargetFile()
-                                    }
-                                }
-                            }
-
-                            // ── Chosen photos ─────────────────────────────
-                            // One tile per target, each carrying its own outcome:
-                            // a job where two of four are skipped has no single
-                            // verdict to show.
-                            Flow {
-                                Layout.fillWidth: true
-                                visible: bridge.currentMode === "image" && bridge.photoTargets.length > 0
-                                spacing: 6
-
-                                Repeater {
-                                    model: bridge.photoTargets
-
-                                    Rectangle {
-                                        width: 74; height: 74; radius: 8
-                                        color: "#12121e"
-                                        clip: true
-                                        border.width: 1
-                                        border.color: {
-                                            var r = bridge.photoResults[index]
-                                            if (!r) return "#1a2a45"
-                                            return r.ok ? "#14532d" : "#4c1d24"
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: modelData.label
+                                            color: isActive ? "#c4b5fd" : "#334155"
+                                            font.pixelSize: 9; font.letterSpacing: 1.5; font.weight: Font.Medium
+                                            Behavior on color { ColorAnimation { duration: 120 } }
                                         }
 
-                                        Image {
-                                            anchors.fill: parent
-                                            source: "file:///" + modelData
-                                            fillMode: Image.PreserveAspectCrop
-                                            smooth: true
-                                            asynchronous: true
-                                        }
-
-                                        // Outcome badge — absent while pending
-                                        Rectangle {
-                                            anchors { top: parent.top; left: parent.left; topMargin: 4; leftMargin: 4 }
-                                            width: 16; height: 16; radius: 8
-                                            visible: bridge.photoResults[index] !== undefined
-                                            color: {
-                                                var r = bridge.photoResults[index]
-                                                if (!r) return "transparent"
-                                                return r.ok ? "#14532d" : "#4c1d24"
-                                            }
-                                            Text {
-                                                anchors.centerIn: parent
-                                                text: {
-                                                    var r = bridge.photoResults[index]
-                                                    if (!r) return ""
-                                                    return r.ok ? "\u2713" : "\u2715"
-                                                }
-                                                color: {
-                                                    var r = bridge.photoResults[index]
-                                                    if (!r) return "transparent"
-                                                    return r.ok ? "#86efac" : "#fca5a5"
-                                                }
-                                                font.pixelSize: 10
-                                            }
-                                        }
-
-                                        // Skip reason, so a refusal says why
-                                        Rectangle {
-                                            anchors { bottom: parent.bottom; left: parent.left; right: parent.right }
-                                            height: 18
-                                            visible: {
-                                                var r = bridge.photoResults[index]
-                                                return r !== undefined && !r.ok
-                                            }
-                                            color: "#d0090909"
-                                            Text {
-                                                anchors { fill: parent; leftMargin: 4; rightMargin: 4 }
-                                                verticalAlignment: Text.AlignVCenter
-                                                text: {
-                                                    var r = bridge.photoResults[index]
-                                                    return r ? r.reason : ""
-                                                }
-                                                color: "#fca5a5"; font.pixelSize: 7
-                                                elide: Text.ElideRight
-                                            }
-                                        }
-
-                                        // Needs a face chosen. Said before the
-                                        // job runs, not after: this is the one
-                                        // refusal the operator can still fix.
-                                        Rectangle {
-                                            anchors { bottom: parent.bottom; left: parent.left; right: parent.right }
-                                            height: 18
-                                            visible: bridge.photoNeedsFace[index] === true
-                                                     && bridge.photoResults[index] === undefined
-                                            color: "#d0180f02"
-                                            Text {
-                                                anchors { fill: parent; leftMargin: 4; rightMargin: 4 }
-                                                verticalAlignment: Text.AlignVCenter
-                                                text: "choose a face"
-                                                color: "#fbbf24"; font.pixelSize: 7
-                                                elide: Text.ElideRight
-                                            }
-                                        }
-
-                                        // × remove, before the job runs
-                                        Rectangle {
-                                            anchors { top: parent.top; right: parent.right; topMargin: 4; rightMargin: 4 }
-                                            width: 16; height: 16; radius: 4
-                                            visible: !bridge.batchRunning
-                                            color: rmHover.containsMouse ? "#1d2c4e" : "#c00a1428"
-                                            Text { anchors.centerIn: parent; text: "×"; color: "#60a5fa"; font.pixelSize: 11 }
-                                            HoverHandler { id: rmHover }
-                                            MouseArea {
-                                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                                onClicked: bridge.removePhotoTarget(index)
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // ── Template gallery ──────────────────────────
-                            // The scenes we ship. Selecting one sets it as the
-                            // target; the source face is whatever was uploaded.
-                            Flow {
-                                Layout.fillWidth: true
-                                visible: bridge.currentMode === "template"
-                                         && bridge.templates.length > 0
-                                spacing: 6
-
-                                Repeater {
-                                    model: bridge.templates
-
-                                    Rectangle {
-                                        width: 74; height: 74; radius: 8
-                                        color: "#12121e"
-                                        clip: true
-                                        border.width: 1
-                                        border.color: bridge.selectedTemplate === modelData.id
-                                                      ? "#2e2e55" : "#1a2a45"
-
-                                        Image {
-                                            anchors.fill: parent
-                                            source: modelData.thumbnail !== ""
-                                                    ? "file:///" + modelData.thumbnail
-                                                    : ""
-                                            fillMode: Image.PreserveAspectCrop
-                                            smooth: true
-                                            asynchronous: true
-                                            opacity: bridge.selectedTemplate === modelData.id ? 1.0 : 0.65
-                                            Behavior on opacity { NumberAnimation { duration: 120 } }
-                                        }
-
-                                        // Name, so a scene without a thumbnail is
-                                        // still identifiable
-                                        Rectangle {
-                                            anchors { bottom: parent.bottom; left: parent.left; right: parent.right }
-                                            height: 16; color: "#d009090e"
-                                            Text {
-                                                anchors { fill: parent; leftMargin: 4; rightMargin: 4 }
-                                                verticalAlignment: Text.AlignVCenter
-                                                text: modelData.name
-                                                color: "#93c5fd"; font.pixelSize: 7
-                                                elide: Text.ElideRight
-                                            }
-                                        }
-
-                                        Rectangle {
-                                            anchors { top: parent.top; left: parent.left; topMargin: 4; leftMargin: 4 }
-                                            width: 16; height: 16; radius: 8
-                                            visible: bridge.selectedTemplate === modelData.id
-                                            color: "#1a1a30"
-                                            Text {
-                                                anchors.centerIn: parent
-                                                text: "\u2713"; color: "#c4b5fd"; font.pixelSize: 10
-                                            }
-                                        }
-
+                                        HoverHandler { id: mh }
                                         MouseArea {
                                             anchors.fill: parent
-                                            enabled: !bridge.batchRunning
-                                            onClicked: bridge.selectTemplate(modelData.id)
+                                            onClicked: bridge.setMode(modelData.id)
                                             cursorShape: Qt.PointingHandCursor
                                         }
                                     }
                                 }
                             }
+                        }
 
-                            // Empty library, or one still loading
-                            Rectangle {
-                                Layout.fillWidth: true; height: 60; radius: 8
-                                visible: bridge.currentMode === "template"
-                                         && bridge.templates.length === 0
-                                color: "#0d0d18"
-                                border.color: "#14142a"; border.width: 1
-                                Column {
-                                    anchors.centerIn: parent; spacing: 6
+                        // ── Face source ───────────────────────────────────────
+                        Text {
+                            text: "FACE SOURCE"
+                            color: "#252545"; font.pixelSize: 8; font.letterSpacing: 1.5
+                            Layout.bottomMargin: 8
+                        }
+
+                        // ── Select button (no source set, or embedding in progress) ──
+                        Rectangle {
+                            id: faceBtn
+                            Layout.fillWidth: true; height: 38; radius: 8
+                            visible: !bridge.sourceSet || bridge.embeddingPending
+                            color: faceHover.containsMouse && !bridge.embeddingPending ? "#1a1a2e" : "#12121e"
+                            border.color: faceHover.containsMouse && !bridge.embeddingPending ? "#2e2e50" : "#1e1e35"
+                            border.width: 1
+                            Behavior on color      { ColorAnimation { duration: 130 } }
+                            Behavior on border.color { ColorAnimation { duration: 130 } }
+
+                            Row {
+                                anchors.centerIn: parent; spacing: 8
+
+                                Rectangle {
+                                    width: 20; height: 20; radius: 10
+                                    color: bridge.embeddingPending ? "#1a1a2e" : "#1a0a35"
+                                    anchors.verticalCenter: parent.verticalCenter
                                     Text {
-                                        anchors.horizontalCenter: parent.horizontalCenter
-                                        text: "no scenes available"
-                                        color: "#334155"; font.pixelSize: 11
+                                        anchors.centerIn: parent
+                                        text: bridge.embeddingPending ? "·" : "+"
+                                        color: bridge.embeddingPending ? "#475569" : "#8b5cf6"
+                                        font.pixelSize: bridge.embeddingPending ? 22 : 17
                                     }
-                                    Text {
-                                        anchors.horizontalCenter: parent.horizontalCenter
-                                        text: "retry"
-                                        color: "#60a5fa"; font.pixelSize: 10
-                                        MouseArea {
-                                            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                            onClicked: bridge.loadTemplates()
-                                        }
-                                    }
+                                }
+                                Text {
+                                    text: bridge.embeddingPending ? "processing…" : "Select Source Images"
+                                    color: bridge.embeddingPending ? "#475569" : "#a78bfa"
+                                    font.pixelSize: 12; anchors.verticalCenter: parent.verticalCenter
                                 }
                             }
 
-                            // Add more, while under the cap
+                            HoverHandler { id: faceHover }
+                            MouseArea {
+                                anchors.fill: parent; enabled: !bridge.embeddingPending
+                                onClicked: bridge.selectFaceImages()
+                                cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                            }
+                        }
+
+                        // ── Thumbnail card (source set, not processing) ────────
+                        Rectangle {
+                            id: faceThumbnailCard
+                            Layout.fillWidth: true; height: 76; radius: 8
+                            visible: bridge.sourceSet && !bridge.embeddingPending
+                            color: "#12121e"
+                            border.color: "#2a1a45"; border.width: 1
+                            clip: true
+
+                            Image {
+                                anchors.fill: parent
+                                source: bridge.sourceThumbnail !== ""
+                                        ? "file:///" + bridge.sourceThumbnail
+                                        : ""
+                                fillMode: Image.PreserveAspectCrop
+                                smooth: true
+                            }
+
+                            // Clicking the card re-opens the picker.
+                            //
+                            // Replacing a source used to mean pressing × first,
+                            // and × is not a replace: `resetSource` stops a
+                            // running pipeline and wipes the upload directory on
+                            // the server. Uploading already replaces cleanly on
+                            // its own — `source_paths` is swapped wholesale and
+                            // the temporal state goes with it — so this works
+                            // mid-call, without dropping the session, and × is
+                            // left meaning what it says.
                             Rectangle {
-                                Layout.fillWidth: true; height: 30; radius: 8
-                                Layout.topMargin: 6
-                                visible: bridge.currentMode === "image"
-                                         && bridge.photoTargets.length > 0
-                                         && bridge.photoTargets.length < bridge.maxPhotoTargets
-                                         && !bridge.batchRunning
-                                color: addHover.containsMouse ? "#1a1a2e" : "#12121e"
-                                border.color: "#1e1e35"; border.width: 1
+                                anchors.fill: parent
+                                color: "#cc09090e"
+                                visible: replaceArea.containsMouse && !bridge.embeddingPending
                                 Text {
                                     anchors.centerIn: parent
-                                    text: "Choose photos again"
-                                    color: "#60a5fa"; font.pixelSize: 10
-                                }
-                                HoverHandler { id: addHover }
-                                MouseArea {
-                                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                    onClicked: bridge.selectPhotoTargets()
+                                    text: "Replace"
+                                    color: "#a78bfa"; font.pixelSize: 12
                                 }
                             }
 
-                            // ── Output path ───────────────────────────────
-                            // Photo mode derives one output per photo, beside the
-                            // original, so there is nothing to choose here.
-                            Text {
-                                text: "OUTPUT PATH"
-                                visible: bridge.currentMode === "video"
-                                color: "#252545"; font.pixelSize: 8; font.letterSpacing: 1.5
-                                Layout.topMargin: 16; Layout.bottomMargin: 8
+                            MouseArea {
+                                id: replaceArea
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                enabled: !bridge.embeddingPending
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: bridge.selectFaceImages()
                             }
 
+                            // bottom label bar
                             Rectangle {
-                                Layout.fillWidth: true; height: 38; radius: 8
-                                visible: bridge.currentMode === "video"
-                                color: outHover.containsMouse ? "#1a1a2e" : "#12121e"
-                                border.color: bridge.outputPath !== "" ? "#1e2e1e" : "#1e1e35"
+                                anchors { bottom: parent.bottom; left: parent.left; right: parent.right }
+                                height: 26
+                                color: "#d009090e"
+
+                                Text {
+                                    anchors { left: parent.left; leftMargin: 10; verticalCenter: parent.verticalCenter }
+                                    text: bridge.sourceLabel
+                                    color: "#c4b5fd"; font.pixelSize: 10
+                                    elide: Text.ElideMiddle
+                                    width: parent.width - 20
+                                }
+                            }
+
+                            // × reset button (top-right)
+                            Rectangle {
+                                anchors { top: parent.top; right: parent.right; topMargin: 6; rightMargin: 6 }
+                                width: 22; height: 22; radius: 5
+                                color: resetHover.containsMouse ? "#3b1d6e" : "#1a0a35"
+                                border.color: resetHover.containsMouse ? "#6d28d9" : "#2d1a45"
                                 border.width: 1
-                                Behavior on color { ColorAnimation { duration: 130 } }
+                                Behavior on color { ColorAnimation { duration: 120 } }
 
-                                Row {
-                                    anchors { fill: parent; leftMargin: 10; rightMargin: 10 }
-                                    spacing: 6
-                                    Text {
-                                        text: bridge.outputPath !== "" ? bridge.outputPath.split("/").pop() : "auto"
-                                        color: bridge.outputPath !== "" ? "#86efac" : "#334155"
-                                        // The folder is the half that answers
-                                        // "where did it go" — the render lands
-                                        // beside the chosen target, which is
-                                        // not necessarily where the operator
-                                        // was looking.
-                                        ToolTip.visible: outPathHover.hovered && bridge.outputPath !== ""
-                                        ToolTip.text: bridge.outputPath
-                                        HoverHandler { id: outPathHover }
-                                        font.pixelSize: 11
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        elide: Text.ElideLeft
-                                        width: parent.width - 20
-                                    }
-                                    Text {
-                                        text: "⌄"; color: "#334155"; font.pixelSize: 10
-                                        anchors.verticalCenter: parent.verticalCenter
-                                    }
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "×"; color: "#a78bfa"; font.pixelSize: 13
                                 }
 
-                                HoverHandler { id: outHover }
-                                MouseArea {
-                                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                    onClicked: bridge.selectOutputPath()
-                                }
-                            }
-
-                            // ── Spacer ────────────────────────────────────
-                            Item { Layout.fillHeight: true }
-
-                            // ── Action buttons ────────────────────────────
-                            Rectangle {
-                                Layout.fillWidth: true; height: 1; color: "#14142a"
-                                Layout.bottomMargin: 20
-                            }
-
-                            // PROCESS ↔ STOP button
-                            Rectangle {
-                                id: batchBtn
-                                Layout.fillWidth: true; height: 42; radius: 9
-
-                                property bool canProcess: !bridge.batchRunning
-                                                          && bridge.sourceSet
-                                                          && bridge.targetSet
-                                                          && !bridge.embeddingPending
-
-                                gradient: Gradient {
-                                    orientation: Gradient.Horizontal
-                                    GradientStop {
-                                        position: 0.0
-                                        color: bridge.batchRunning ? "#7f1d1d"
-                                             : (batchBtn.canProcess ? "#1d4ed8" : "#181828")
-                                        Behavior on color { ColorAnimation { duration: 300 } }
-                                    }
-                                    GradientStop {
-                                        position: 1.0
-                                        color: bridge.batchRunning ? "#b91c1c"
-                                             : (batchBtn.canProcess ? "#0ea5e9" : "#181828")
-                                        Behavior on color { ColorAnimation { duration: 300 } }
-                                    }
-                                }
-
-                                Row {
-                                    anchors.centerIn: parent; spacing: 8
-
-                                    Rectangle {
-                                        width: 6; height: 6
-                                        radius: bridge.batchRunning ? 1 : 3
-                                        color: "white"
-                                        opacity: (batchBtn.canProcess || bridge.batchRunning) ? 1.0 : 0.15
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        Behavior on radius  { NumberAnimation { duration: 250 } }
-                                        Behavior on opacity { NumberAnimation { duration: 300 } }
-                                    }
-                                    Text {
-                                        text: bridge.batchRunning ? "STOP" : "PROCESS"
-                                        color: (batchBtn.canProcess || bridge.batchRunning) ? "white" : "#2a2a45"
-                                        font.pixelSize: 12; font.letterSpacing: 1.5; font.weight: Font.Medium
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        Behavior on color { ColorAnimation { duration: 300 } }
-                                    }
-                                }
-
+                                HoverHandler { id: resetHover }
                                 MouseArea {
                                     anchors.fill: parent
-                                    enabled: batchBtn.canProcess || bridge.batchRunning
-                                    onClicked: bridge.batchRunning ? bridge.stopBatch() : bridge.startBatch()
-                                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                }
-                            }
-
-                            // OPEN OUTPUT button (after complete)
-                            Rectangle {
-                                Layout.fillWidth: true; height: 36; radius: 8
-                                Layout.topMargin: 8
-                                visible: bridge.batchComplete
-                                color: openHover.containsMouse ? "#0a2218" : "#081810"
-                                border.color: openHover.containsMouse ? "#10b981" : "#0d3020"
-                                border.width: 1
-                                Behavior on color       { ColorAnimation { duration: 180 } }
-                                Behavior on border.color { ColorAnimation { duration: 180 } }
-
-                                Row {
-                                    anchors.centerIn: parent; spacing: 7
-                                    Text { text: "↗"; color: "#10b981"; font.pixelSize: 12; anchors.verticalCenter: parent.verticalCenter }
-                                    Text {
-                                        text: "OPEN OUTPUT"
-                                        color: "#10b981"
-                                        font.pixelSize: 11; font.letterSpacing: 1.5
-                                        anchors.verticalCenter: parent.verticalCenter
-                                    }
-                                }
-
-                                HoverHandler { id: openHover }
-                                MouseArea {
-                                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                    onClicked: bridge.openOutputFolder()
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: bridge.resetSource()
                                 }
                             }
                         }
+
+                        // ── Divider ───────────────────────────────────────────
+                        Rectangle {
+                            Layout.fillWidth: true; height: 1; color: "#14142a"
+                            Layout.topMargin: 20; Layout.bottomMargin: 20
+                        }
+
+                        // ══ REALTIME CONTROLS ══════════════════════════════════
+                        // visible only in LIVE mode
+                        Item {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            visible: bridge.currentMode === "realtime"
+
+                            ColumnLayout {
+                                anchors { fill: parent }
+                                spacing: 0
+
+                                // ── Webcam ────────────────────────────────────────────
+                                Text {
+                                    text: "WEBCAM INDEX"
+                                    color: "#252545"; font.pixelSize: 8; font.letterSpacing: 1.5
+                                    Layout.bottomMargin: 8
+                                }
+
+                                Rectangle {
+                                    Layout.fillWidth: true; height: 38; radius: 8
+                                    color: "#12121e"
+                                    border.color: wcInput.activeFocus ? "#3a3a60" : "#1e1e35"
+                                    border.width: 1
+                                    Behavior on border.color { ColorAnimation { duration: 150 } }
+
+                                    TextInput {
+                                        id: wcInput
+                                        anchors { fill: parent; leftMargin: 14; rightMargin: 14 }
+                                        verticalAlignment: TextInput.AlignVCenter
+                                        text: "0"; color: "#e2e8f0"; font.pixelSize: 13
+                                        onEditingFinished: bridge.setWebcamIndex(text)
+                                        validator: IntValidator { bottom: 0; top: 9 }
+                                    }
+                                }
+
+                                // ── Quality ───────────────────────────────────────────
+                                Text {
+                                    text: "QUALITY"
+                                    color: "#252545"; font.pixelSize: 8; font.letterSpacing: 1.5
+                                    Layout.topMargin: 16; Layout.bottomMargin: 8
+                                }
+
+                                Rectangle {
+                                    id: qualBox
+                                    Layout.fillWidth: true; height: 38; radius: 8
+                                    color: qualHover.containsMouse ? "#1a1a2e" : "#12121e"
+                                    border.color: qualBox.open ? "#3a3a60" : "#1e1e35"
+                                    border.width: 1
+                                    z: open ? 10 : 0
+                                    Behavior on color { ColorAnimation { duration: 130 } }
+
+                                    property var opts: ["fast", "optimal", "production"]
+                                    property int sel: 1
+                                    property bool open: false
+
+                                    Row {
+                                        anchors { fill: parent; leftMargin: 14; rightMargin: 10 }
+                                        Text {
+                                            text: qualBox.opts[qualBox.sel]
+                                            color: "#cbd5e1"; font.pixelSize: 12
+                                            width: parent.width - 20
+                                            anchors.verticalCenter: parent.verticalCenter
+                                        }
+                                        Text { text: "⌄"; color: "#334155"; font.pixelSize: 10; anchors.verticalCenter: parent.verticalCenter }
+                                    }
+
+                                    HoverHandler { id: qualHover }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        onClicked: qualBox.open = !qualBox.open
+                                        cursorShape: Qt.PointingHandCursor
+                                    }
+
+                                    Rectangle {
+                                        visible: qualBox.open
+                                        anchors.top: parent.bottom; anchors.topMargin: 4
+                                        anchors.left: parent.left
+                                        width: parent.width
+                                        height: qualBox.opts.length * 32 + 10
+                                        radius: 8; color: "#12121e"
+                                        border.color: "#252545"; border.width: 1
+
+                                        Column {
+                                            anchors { fill: parent; margins: 5 }
+                                            spacing: 2
+
+                                            Repeater {
+                                                model: qualBox.opts
+                                                Rectangle {
+                                                    width: parent.width; height: 30; radius: 5
+                                                    color: qualBox.sel === index ? "#1e1e38"
+                                                         : (rh.containsMouse ? "#171730" : "transparent")
+                                                    HoverHandler { id: rh }
+                                                    Text {
+                                                        anchors { left: parent.left; leftMargin: 10; verticalCenter: parent.verticalCenter }
+                                                        text: modelData
+                                                        color: qualBox.sel === index ? "#c4b5fd" : "#475569"
+                                                        font.pixelSize: 12
+                                                    }
+                                                    MouseArea {
+                                                        anchors.fill: parent
+                                                        onClicked: {
+                                                            qualBox.sel = index
+                                                            bridge.setQuality(modelData)
+                                                            qualBox.open = false
+                                                        }
+                                                        cursorShape: Qt.PointingHandCursor
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // ── Restoration ───────────────────────────────────────
+                                // Strength, not a switch. The header once had an
+                                // ENHANCE toggle and it was removed because "off"
+                                // was never "less plastic" - it was no restoration
+                                // at all. As the bottom of a list, off reads as one
+                                // end of a range, which is what it is.
+                                //
+                                // "auto" follows the swap model's own profile, so
+                                // the operator's choice and the model cannot fight.
+                                Text {
+                                    text: "RESTORATION"
+                                    color: "#252545"; font.pixelSize: 8; font.letterSpacing: 1.5
+                                    Layout.topMargin: 16; Layout.bottomMargin: 8
+                                }
+
+                                Rectangle {
+                                    id: restBox
+                                    Layout.fillWidth: true; height: 38; radius: 8
+                                    color: restHover.containsMouse ? "#1a1a2e" : "#12121e"
+                                    border.color: restBox.open ? "#3a3a60" : "#1e1e35"
+                                    border.width: 1
+                                    z: open ? 10 : 0
+                                    Behavior on color { ColorAnimation { duration: 130 } }
+
+                                    property var opts: ["auto", "off", "subtle", "balanced", "full"]
+                                    property bool open: false
+                                    property int sel: Math.max(0, opts.indexOf(bridge.restoration))
+
+                                    Row {
+                                        anchors { fill: parent; leftMargin: 14; rightMargin: 10 }
+                                        Text {
+                                            text: restBox.opts[restBox.sel]
+                                            color: "#cbd5e1"; font.pixelSize: 12
+                                            width: parent.width - 20
+                                            anchors.verticalCenter: parent.verticalCenter
+                                        }
+                                        Text { text: "⌄"; color: "#334155"; font.pixelSize: 10; anchors.verticalCenter: parent.verticalCenter }
+                                    }
+
+                                    HoverHandler { id: restHover }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        onClicked: restBox.open = !restBox.open
+                                        cursorShape: Qt.PointingHandCursor
+                                    }
+
+                                    Rectangle {
+                                        visible: restBox.open
+                                        anchors.top: parent.bottom; anchors.topMargin: 4
+                                        anchors.left: parent.left
+                                        width: parent.width
+                                        height: restBox.opts.length * 32 + 10
+                                        radius: 8; color: "#12121e"
+                                        border.color: "#252545"; border.width: 1
+
+                                        Column {
+                                            anchors { fill: parent; margins: 5 }
+                                            spacing: 2
+
+                                            Repeater {
+                                                model: restBox.opts
+                                                Rectangle {
+                                                    width: parent.width; height: 30; radius: 5
+                                                    color: restBox.sel === index ? "#1e1e38"
+                                                         : (rrh.containsMouse ? "#171730" : "transparent")
+                                                    HoverHandler { id: rrh }
+                                                    Text {
+                                                        anchors { left: parent.left; leftMargin: 10; verticalCenter: parent.verticalCenter }
+                                                        text: modelData
+                                                        color: restBox.sel === index ? "#c4b5fd" : "#475569"
+                                                        font.pixelSize: 12
+                                                    }
+                                                    MouseArea {
+                                                        anchors.fill: parent
+                                                        onClicked: {
+                                                            restBox.sel = index
+                                                            bridge.setRestoration(modelData)
+                                                            restBox.open = false
+                                                        }
+                                                        cursorShape: Qt.PointingHandCursor
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // ── Voice ─────────────────────────────────────────────
+                                Text {
+                                    text: "VOICE"
+                                    color: "#252545"; font.pixelSize: 8; font.letterSpacing: 1.5
+                                    Layout.topMargin: 16; Layout.bottomMargin: 8
+                                }
+
+                                Rectangle {
+                                    id: voiceBox
+                                    Layout.fillWidth: true; height: 38; radius: 8
+                                    color: voiceHover.containsMouse ? "#1a1a2e" : "#12121e"
+                                    border.color: voiceBox.open ? "#3a3a60" : "#1e1e35"
+                                    border.width: 1
+                                    z: open ? 10 : 0
+                                    Behavior on color { ColorAnimation { duration: 130 } }
+
+                                    property var opts: ["none", "female", "male", "child", "deep"]
+                                    property var labels: ["None", "Female", "Male", "Child", "Deep"]
+                                    property int sel: 0
+                                    property bool open: false
+
+                                    Row {
+                                        anchors { fill: parent; leftMargin: 14; rightMargin: 10 }
+                                        Text {
+                                            text: voiceBox.labels[voiceBox.sel]
+                                            color: "#cbd5e1"; font.pixelSize: 12
+                                            width: parent.width - 20
+                                            anchors.verticalCenter: parent.verticalCenter
+                                        }
+                                        Text { text: "⌄"; color: "#334155"; font.pixelSize: 10; anchors.verticalCenter: parent.verticalCenter }
+                                    }
+
+                                    HoverHandler { id: voiceHover }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        onClicked: voiceBox.open = !voiceBox.open
+                                        cursorShape: Qt.PointingHandCursor
+                                    }
+
+                                    Rectangle {
+                                        visible: voiceBox.open
+                                        anchors.top: parent.bottom; anchors.topMargin: 4
+                                        anchors.left: parent.left
+                                        width: parent.width
+                                        height: voiceBox.opts.length * 32 + 10
+                                        radius: 8; color: "#12121e"
+                                        border.color: "#252545"; border.width: 1
+
+                                        Column {
+                                            anchors { fill: parent; margins: 5 }
+                                            spacing: 2
+
+                                            Repeater {
+                                                model: voiceBox.labels
+                                                Rectangle {
+                                                    width: parent.width; height: 30; radius: 5
+                                                    color: voiceBox.sel === index ? "#1e1e38"
+                                                         : (vh.containsMouse ? "#171730" : "transparent")
+                                                    HoverHandler { id: vh }
+                                                    Text {
+                                                        anchors { left: parent.left; leftMargin: 10; verticalCenter: parent.verticalCenter }
+                                                        text: modelData
+                                                        color: voiceBox.sel === index ? "#c4b5fd" : "#475569"
+                                                        font.pixelSize: 12
+                                                    }
+                                                    MouseArea {
+                                                        anchors.fill: parent
+                                                        onClicked: {
+                                                            voiceBox.sel = index
+                                                            bridge.setVoiceTemplate(voiceBox.opts[index])
+                                                            voiceBox.open = false
+                                                        }
+                                                        cursorShape: Qt.PointingHandCursor
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // ── Platform ──────────────────────────────────────────
+                                Text {
+                                    text: "PLATFORM"
+                                    color: "#252545"; font.pixelSize: 8; font.letterSpacing: 1.5
+                                    Layout.topMargin: 16; Layout.bottomMargin: 8
+                                }
+
+                                Rectangle {
+                                    id: platBox
+                                    Layout.fillWidth: true; height: 38; radius: 8
+                                    color: platHover.containsMouse ? "#1a1a2e" : "#12121e"
+                                    border.color: platBox.open ? "#3a3a60" : "#1e1e35"
+                                    border.width: 1
+                                    z: open ? 10 : 0
+                                    Behavior on color { ColorAnimation { duration: 130 } }
+
+                                    property var opts: ["obs", "unitycapture"]
+                                    property var labels: ["OBS Virtual Camera", "Unity Capture"]
+                                    property int sel: 0
+                                    property bool open: false
+
+                                    Row {
+                                        anchors { fill: parent; leftMargin: 14; rightMargin: 10 }
+                                        Text {
+                                            text: platBox.labels[platBox.sel]
+                                            color: "#cbd5e1"; font.pixelSize: 12
+                                            width: parent.width - 20
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            elide: Text.ElideRight
+                                        }
+                                        Text { text: "⌄"; color: "#334155"; font.pixelSize: 10; anchors.verticalCenter: parent.verticalCenter }
+                                    }
+
+                                    HoverHandler { id: platHover }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        onClicked: platBox.open = !platBox.open
+                                        cursorShape: Qt.PointingHandCursor
+                                    }
+
+                                    Rectangle {
+                                        visible: platBox.open
+                                        anchors.top: parent.bottom; anchors.topMargin: 4
+                                        anchors.left: parent.left
+                                        width: parent.width
+                                        height: platBox.opts.length * 32 + 10
+                                        radius: 8; color: "#12121e"
+                                        border.color: "#252545"; border.width: 1
+
+                                        Column {
+                                            anchors { fill: parent; margins: 5 }
+                                            spacing: 2
+
+                                            Repeater {
+                                                model: platBox.labels
+                                                Rectangle {
+                                                    width: parent.width; height: 30; radius: 5
+                                                    color: platBox.sel === index ? "#1e1e38"
+                                                         : (ph.containsMouse ? "#171730" : "transparent")
+                                                    HoverHandler { id: ph }
+                                                    Text {
+                                                        anchors { left: parent.left; leftMargin: 10; verticalCenter: parent.verticalCenter }
+                                                        text: modelData
+                                                        color: platBox.sel === index ? "#c4b5fd" : "#475569"
+                                                        font.pixelSize: 12
+                                                    }
+                                                    MouseArea {
+                                                        anchors.fill: parent
+                                                        onClicked: {
+                                                            platBox.sel = index
+                                                            bridge.setPlatform(platBox.opts[index])
+                                                            platBox.open = false
+                                                        }
+                                                        cursorShape: Qt.PointingHandCursor
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // ── Spacer ────────────────────────────────────────────
+                                Item { Layout.fillHeight: true }
+
+                                // ── Action buttons ────────────────────────────────────
+                                Rectangle {
+                                    Layout.fillWidth: true; height: 1; color: "#14142a"
+                                    Layout.bottomMargin: 20
+                                }
+
+                                // START ↔ STOP
+                                Rectangle {
+                                    id: startStopBtn
+                                    Layout.fillWidth: true; height: 42; radius: 9
+
+                                    property bool canStart: !bridge.pipelineRunning && !bridge.embeddingPending
+
+                                    gradient: Gradient {
+                                        orientation: Gradient.Horizontal
+                                        GradientStop {
+                                            position: 0.0
+                                            color: bridge.pipelineRunning ? "#7f1d1d"
+                                                 : (startStopBtn.canStart ? "#7c3aed" : "#181828")
+                                            Behavior on color { ColorAnimation { duration: 300 } }
+                                        }
+                                        GradientStop {
+                                            position: 1.0
+                                            color: bridge.pipelineRunning ? "#b91c1c"
+                                                 : (startStopBtn.canStart ? "#2563eb" : "#181828")
+                                            Behavior on color { ColorAnimation { duration: 300 } }
+                                        }
+                                    }
+
+                                    Row {
+                                        anchors.centerIn: parent; spacing: 8
+
+                                        Rectangle {
+                                            width: 6; height: 6
+                                            radius: bridge.pipelineRunning ? 1 : 3
+                                            color: "white"
+                                            opacity: (startStopBtn.canStart || bridge.pipelineRunning) ? 1.0 : 0.15
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            Behavior on radius  { NumberAnimation { duration: 250 } }
+                                            Behavior on opacity { NumberAnimation { duration: 300 } }
+                                        }
+                                        Text {
+                                            text: bridge.pipelineRunning ? "STOP" : "START"
+                                            color: (startStopBtn.canStart || bridge.pipelineRunning) ? "white" : "#2a2a45"
+                                            font.pixelSize: 12; font.letterSpacing: 1.5; font.weight: Font.Medium
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            Behavior on color { ColorAnimation { duration: 300 } }
+                                        }
+                                    }
+
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        enabled: startStopBtn.canStart || bridge.pipelineRunning
+                                        onClicked: bridge.pipelineRunning ? bridge.stopPipeline() : bridge.startPipeline()
+                                        cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                    }
+                                }
+
+                            }
+                        }
+
+                        // ══ BATCH CONTROLS ═════════════════════════════════════
+                        // visible in VIDEO and IMAGE modes
+                        Item {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            visible: bridge.currentMode !== "realtime"
+
+                            ColumnLayout {
+                                anchors { fill: parent }
+                                spacing: 0
+
+                                // ── Target file ───────────────────────────────
+                                Text {
+                                    text: bridge.currentMode === "video"
+                                          ? "TARGET VIDEO"
+                                          : bridge.currentMode === "template"
+                                          ? "CHOOSE A SCENE"
+                                          : "TARGET PHOTOS (MAX " + bridge.maxPhotoTargets + ")"
+                                    color: "#252545"; font.pixelSize: 8; font.letterSpacing: 1.5
+                                    Layout.bottomMargin: 8
+                                }
+
+                                // Select target button
+                                Rectangle {
+                                    Layout.fillWidth: true; height: 38; radius: 8
+                                    // Templates are picked from the gallery below,
+                                    // not from the filesystem.
+                                    visible: !bridge.targetSet && bridge.currentMode !== "template"
+                                    color: tgtHover.containsMouse ? "#1a1a2e" : "#12121e"
+                                    border.color: tgtHover.containsMouse ? "#2e2e50" : "#1e1e35"
+                                    border.width: 1
+                                    Behavior on color      { ColorAnimation { duration: 130 } }
+                                    Behavior on border.color { ColorAnimation { duration: 130 } }
+
+                                    Row {
+                                        anchors.centerIn: parent; spacing: 8
+                                        Rectangle {
+                                            width: 20; height: 20; radius: 10; color: "#0a1a35"
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            Text { anchors.centerIn: parent; text: "+"; color: "#3b82f6"; font.pixelSize: 17 }
+                                        }
+                                        Text {
+                                            text: bridge.currentMode === "video" ? "Select Video" : "Select Photos"
+                                            color: "#60a5fa"; font.pixelSize: 12
+                                            anchors.verticalCenter: parent.verticalCenter
+                                        }
+                                    }
+
+                                    HoverHandler { id: tgtHover }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        onClicked: bridge.selectTargetFile()
+                                        cursorShape: Qt.PointingHandCursor
+                                    }
+                                }
+
+                                // Target thumbnail card (video only — photo mode
+                                // shows a tile per chosen image instead)
+                                Rectangle {
+                                    Layout.fillWidth: true; height: 68; radius: 8
+                                    visible: bridge.targetSet && bridge.currentMode === "video"
+                                    color: "#12121e"
+                                    border.color: "#1a2a45"; border.width: 1
+                                    clip: true
+
+                                    // Image thumbnail (shown for image mode or if thumbnail available)
+                                    Image {
+                                        anchors.fill: parent
+                                        source: bridge.targetThumbnail === ""
+                                                ? ""
+                                                : (bridge.targetThumbnail.indexOf("data:") === 0
+                                                   ? bridge.targetThumbnail
+                                                   : "file:///" + bridge.targetThumbnail)
+                                        fillMode: Image.PreserveAspectCrop
+                                        smooth: true
+                                        visible: bridge.targetThumbnail !== ""
+                                    }
+
+                                    // Video icon placeholder
+                                    Column {
+                                        anchors.centerIn: parent; spacing: 4
+                                        visible: bridge.targetThumbnail === ""
+                                        Text { anchors.horizontalCenter: parent.horizontalCenter; text: "▶"; color: "#3b82f6"; font.pixelSize: 20 }
+                                    }
+
+                                    // bottom label
+                                    Rectangle {
+                                        anchors { bottom: parent.bottom; left: parent.left; right: parent.right }
+                                        height: 24; color: "#d009090e"
+                                        Text {
+                                            anchors { left: parent.left; leftMargin: 10; verticalCenter: parent.verticalCenter }
+                                            text: bridge.targetLabel
+                                            color: "#93c5fd"; font.pixelSize: 10
+                                            elide: Text.ElideMiddle
+                                            width: parent.width - 36
+                                        }
+                                    }
+
+                                    // × change button
+                                    Rectangle {
+                                        anchors { top: parent.top; right: parent.right; topMargin: 5; rightMargin: 5 }
+                                        width: 22; height: 22; radius: 5
+                                        color: tgtResetHover.containsMouse ? "#1d2c4e" : "#0a1428"
+                                        border.color: tgtResetHover.containsMouse ? "#2563eb" : "#1a2a45"
+                                        border.width: 1
+                                        Behavior on color { ColorAnimation { duration: 120 } }
+                                        Text { anchors.centerIn: parent; text: "×"; color: "#60a5fa"; font.pixelSize: 13 }
+                                        HoverHandler { id: tgtResetHover }
+                                        MouseArea {
+                                            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                            onClicked: bridge.selectTargetFile()
+                                        }
+                                    }
+                                }
+
+                                // ── Chosen photos ─────────────────────────────
+                                // One tile per target, each carrying its own outcome:
+                                // a job where two of four are skipped has no single
+                                // verdict to show.
+                                Flow {
+                                    Layout.fillWidth: true
+                                    visible: bridge.currentMode === "image" && bridge.photoTargets.length > 0
+                                    spacing: 6
+
+                                    Repeater {
+                                        model: bridge.photoTargets
+
+                                        Rectangle {
+                                            width: 74; height: 74; radius: 8
+                                            color: "#12121e"
+                                            clip: true
+                                            border.width: 1
+                                            border.color: {
+                                                var r = bridge.photoResults[index]
+                                                if (!r) return "#1a2a45"
+                                                return r.ok ? "#14532d" : "#4c1d24"
+                                            }
+
+                                            Image {
+                                                anchors.fill: parent
+                                                source: "file:///" + modelData
+                                                fillMode: Image.PreserveAspectCrop
+                                                smooth: true
+                                                asynchronous: true
+                                            }
+
+                                            // Outcome badge — absent while pending
+                                            Rectangle {
+                                                anchors { top: parent.top; left: parent.left; topMargin: 4; leftMargin: 4 }
+                                                width: 16; height: 16; radius: 8
+                                                visible: bridge.photoResults[index] !== undefined
+                                                color: {
+                                                    var r = bridge.photoResults[index]
+                                                    if (!r) return "transparent"
+                                                    return r.ok ? "#14532d" : "#4c1d24"
+                                                }
+                                                Text {
+                                                    anchors.centerIn: parent
+                                                    text: {
+                                                        var r = bridge.photoResults[index]
+                                                        if (!r) return ""
+                                                        return r.ok ? "\u2713" : "\u2715"
+                                                    }
+                                                    color: {
+                                                        var r = bridge.photoResults[index]
+                                                        if (!r) return "transparent"
+                                                        return r.ok ? "#86efac" : "#fca5a5"
+                                                    }
+                                                    font.pixelSize: 10
+                                                }
+                                            }
+
+                                            // Skip reason, so a refusal says why
+                                            Rectangle {
+                                                anchors { bottom: parent.bottom; left: parent.left; right: parent.right }
+                                                height: 18
+                                                visible: {
+                                                    var r = bridge.photoResults[index]
+                                                    return r !== undefined && !r.ok
+                                                }
+                                                color: "#d0090909"
+                                                Text {
+                                                    anchors { fill: parent; leftMargin: 4; rightMargin: 4 }
+                                                    verticalAlignment: Text.AlignVCenter
+                                                    text: {
+                                                        var r = bridge.photoResults[index]
+                                                        return r ? r.reason : ""
+                                                    }
+                                                    color: "#fca5a5"; font.pixelSize: 7
+                                                    elide: Text.ElideRight
+                                                }
+                                            }
+
+                                            // Needs a face chosen. Said before the
+                                            // job runs, not after: this is the one
+                                            // refusal the operator can still fix.
+                                            Rectangle {
+                                                anchors { bottom: parent.bottom; left: parent.left; right: parent.right }
+                                                height: 18
+                                                visible: bridge.photoNeedsFace[index] === true
+                                                         && bridge.photoResults[index] === undefined
+                                                color: "#d0180f02"
+                                                Text {
+                                                    anchors { fill: parent; leftMargin: 4; rightMargin: 4 }
+                                                    verticalAlignment: Text.AlignVCenter
+                                                    text: "choose a face"
+                                                    color: "#fbbf24"; font.pixelSize: 7
+                                                    elide: Text.ElideRight
+                                                }
+                                            }
+
+                                            // × remove, before the job runs
+                                            Rectangle {
+                                                anchors { top: parent.top; right: parent.right; topMargin: 4; rightMargin: 4 }
+                                                width: 16; height: 16; radius: 4
+                                                visible: !bridge.batchRunning
+                                                color: rmHover.containsMouse ? "#1d2c4e" : "#c00a1428"
+                                                Text { anchors.centerIn: parent; text: "×"; color: "#60a5fa"; font.pixelSize: 11 }
+                                                HoverHandler { id: rmHover }
+                                                MouseArea {
+                                                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                                    onClicked: bridge.removePhotoTarget(index)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // ── Template gallery ──────────────────────────
+                                // The scenes we ship. Selecting one sets it as the
+                                // target; the source face is whatever was uploaded.
+                                Flow {
+                                    Layout.fillWidth: true
+                                    visible: bridge.currentMode === "template"
+                                             && bridge.templates.length > 0
+                                    spacing: 6
+
+                                    Repeater {
+                                        model: bridge.templates
+
+                                        Rectangle {
+                                            width: 74; height: 74; radius: 8
+                                            color: "#12121e"
+                                            clip: true
+                                            border.width: 1
+                                            border.color: bridge.selectedTemplate === modelData.id
+                                                          ? "#2e2e55" : "#1a2a45"
+
+                                            Image {
+                                                anchors.fill: parent
+                                                source: modelData.thumbnail !== ""
+                                                        ? "file:///" + modelData.thumbnail
+                                                        : ""
+                                                fillMode: Image.PreserveAspectCrop
+                                                smooth: true
+                                                asynchronous: true
+                                                opacity: bridge.selectedTemplate === modelData.id ? 1.0 : 0.65
+                                                Behavior on opacity { NumberAnimation { duration: 120 } }
+                                            }
+
+                                            // Name, so a scene without a thumbnail is
+                                            // still identifiable
+                                            Rectangle {
+                                                anchors { bottom: parent.bottom; left: parent.left; right: parent.right }
+                                                height: 16; color: "#d009090e"
+                                                Text {
+                                                    anchors { fill: parent; leftMargin: 4; rightMargin: 4 }
+                                                    verticalAlignment: Text.AlignVCenter
+                                                    text: modelData.name
+                                                    color: "#93c5fd"; font.pixelSize: 7
+                                                    elide: Text.ElideRight
+                                                }
+                                            }
+
+                                            Rectangle {
+                                                anchors { top: parent.top; left: parent.left; topMargin: 4; leftMargin: 4 }
+                                                width: 16; height: 16; radius: 8
+                                                visible: bridge.selectedTemplate === modelData.id
+                                                color: "#1a1a30"
+                                                Text {
+                                                    anchors.centerIn: parent
+                                                    text: "\u2713"; color: "#c4b5fd"; font.pixelSize: 10
+                                                }
+                                            }
+
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                enabled: !bridge.batchRunning
+                                                onClicked: bridge.selectTemplate(modelData.id)
+                                                cursorShape: Qt.PointingHandCursor
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Empty library, or one still loading
+                                Rectangle {
+                                    Layout.fillWidth: true; height: 60; radius: 8
+                                    visible: bridge.currentMode === "template"
+                                             && bridge.templates.length === 0
+                                    color: "#0d0d18"
+                                    border.color: "#14142a"; border.width: 1
+                                    Column {
+                                        anchors.centerIn: parent; spacing: 6
+                                        Text {
+                                            anchors.horizontalCenter: parent.horizontalCenter
+                                            text: "no scenes available"
+                                            color: "#334155"; font.pixelSize: 11
+                                        }
+                                        Text {
+                                            anchors.horizontalCenter: parent.horizontalCenter
+                                            text: "retry"
+                                            color: "#60a5fa"; font.pixelSize: 10
+                                            MouseArea {
+                                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                                onClicked: bridge.loadTemplates()
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Add more, while under the cap
+                                Rectangle {
+                                    Layout.fillWidth: true; height: 30; radius: 8
+                                    Layout.topMargin: 6
+                                    visible: bridge.currentMode === "image"
+                                             && bridge.photoTargets.length > 0
+                                             && bridge.photoTargets.length < bridge.maxPhotoTargets
+                                             && !bridge.batchRunning
+                                    color: addHover.containsMouse ? "#1a1a2e" : "#12121e"
+                                    border.color: "#1e1e35"; border.width: 1
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: "Choose photos again"
+                                        color: "#60a5fa"; font.pixelSize: 10
+                                    }
+                                    HoverHandler { id: addHover }
+                                    MouseArea {
+                                        anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                        onClicked: bridge.selectPhotoTargets()
+                                    }
+                                }
+
+                                // ── Output path ───────────────────────────────
+                                // Photo mode derives one output per photo, beside the
+                                // original, so there is nothing to choose here.
+                                Text {
+                                    text: "OUTPUT PATH"
+                                    visible: bridge.currentMode === "video"
+                                    color: "#252545"; font.pixelSize: 8; font.letterSpacing: 1.5
+                                    Layout.topMargin: 16; Layout.bottomMargin: 8
+                                }
+
+                                Rectangle {
+                                    Layout.fillWidth: true; height: 38; radius: 8
+                                    visible: bridge.currentMode === "video"
+                                    color: outHover.containsMouse ? "#1a1a2e" : "#12121e"
+                                    border.color: bridge.outputPath !== "" ? "#1e2e1e" : "#1e1e35"
+                                    border.width: 1
+                                    Behavior on color { ColorAnimation { duration: 130 } }
+
+                                    Row {
+                                        anchors { fill: parent; leftMargin: 10; rightMargin: 10 }
+                                        spacing: 6
+                                        Text {
+                                            text: bridge.outputPath !== "" ? bridge.outputPath.split("/").pop() : "auto"
+                                            color: bridge.outputPath !== "" ? "#86efac" : "#334155"
+                                            HoverHandler { id: outPathHover }
+                                            font.pixelSize: 11
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            elide: Text.ElideLeft
+                                            width: parent.width - 20
+                                        }
+                                        Text {
+                                            text: "⌄"; color: "#334155"; font.pixelSize: 10
+                                            anchors.verticalCenter: parent.verticalCenter
+                                        }
+                                    }
+
+                                    // The folder is the half that answers "where
+                                    // did it go" — the render lands beside the
+                                    // chosen target, which is not necessarily
+                                    // where the operator was looking.
+                                    //
+                                    // Hand-drawn, like every other control here.
+                                    // This was a Controls `ToolTip` attached
+                                    // property, and nothing in the project imports
+                                    // QtQuick.Controls — an unresolved attached
+                                    // object is a *load* error, so `main.qml`
+                                    // produced no root object and the app exited
+                                    // saying nothing. Same shape as the dropdowns
+                                    // below: anchored under the row, raised z.
+                                    Rectangle {
+                                        visible: outPathHover.hovered && bridge.outputPath !== ""
+                                        anchors { top: parent.bottom; topMargin: 4
+                                                  left: parent.left; right: parent.right }
+                                        height: outPathTip.implicitHeight + 12
+                                        radius: 6; z: 20
+                                        color: "#0a0a14"
+                                        border.color: "#1e2e1e"; border.width: 1
+
+                                        Text {
+                                            id: outPathTip
+                                            anchors { fill: parent; margins: 6 }
+                                            text: bridge.outputPath
+                                            color: "#86efac"; font.pixelSize: 10
+                                            wrapMode: Text.WrapAnywhere
+                                        }
+                                    }
+
+                                    HoverHandler { id: outHover }
+                                    MouseArea {
+                                        anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                        onClicked: bridge.selectOutputPath()
+                                    }
+                                }
+
+                                // ── Spacer ────────────────────────────────────
+                                Item { Layout.fillHeight: true }
+
+                                // ── Action buttons ────────────────────────────
+                                Rectangle {
+                                    Layout.fillWidth: true; height: 1; color: "#14142a"
+                                    Layout.bottomMargin: 20
+                                }
+
+                                // PROCESS ↔ STOP button
+                                Rectangle {
+                                    id: batchBtn
+                                    Layout.fillWidth: true; height: 42; radius: 9
+
+                                    property bool canProcess: !bridge.batchRunning
+                                                              && bridge.sourceSet
+                                                              && bridge.targetSet
+                                                              && !bridge.embeddingPending
+
+                                    gradient: Gradient {
+                                        orientation: Gradient.Horizontal
+                                        GradientStop {
+                                            position: 0.0
+                                            color: bridge.batchRunning ? "#7f1d1d"
+                                                 : (batchBtn.canProcess ? "#1d4ed8" : "#181828")
+                                            Behavior on color { ColorAnimation { duration: 300 } }
+                                        }
+                                        GradientStop {
+                                            position: 1.0
+                                            color: bridge.batchRunning ? "#b91c1c"
+                                                 : (batchBtn.canProcess ? "#0ea5e9" : "#181828")
+                                            Behavior on color { ColorAnimation { duration: 300 } }
+                                        }
+                                    }
+
+                                    Row {
+                                        anchors.centerIn: parent; spacing: 8
+
+                                        Rectangle {
+                                            width: 6; height: 6
+                                            radius: bridge.batchRunning ? 1 : 3
+                                            color: "white"
+                                            opacity: (batchBtn.canProcess || bridge.batchRunning) ? 1.0 : 0.15
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            Behavior on radius  { NumberAnimation { duration: 250 } }
+                                            Behavior on opacity { NumberAnimation { duration: 300 } }
+                                        }
+                                        Text {
+                                            text: bridge.batchRunning ? "STOP" : "PROCESS"
+                                            color: (batchBtn.canProcess || bridge.batchRunning) ? "white" : "#2a2a45"
+                                            font.pixelSize: 12; font.letterSpacing: 1.5; font.weight: Font.Medium
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            Behavior on color { ColorAnimation { duration: 300 } }
+                                        }
+                                    }
+
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        enabled: batchBtn.canProcess || bridge.batchRunning
+                                        onClicked: bridge.batchRunning ? bridge.stopBatch() : bridge.startBatch()
+                                        cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                    }
+                                }
+
+                                // OPEN OUTPUT button (after complete)
+                                Rectangle {
+                                    Layout.fillWidth: true; height: 36; radius: 8
+                                    Layout.topMargin: 8
+                                    visible: bridge.batchComplete
+                                    color: openHover.containsMouse ? "#0a2218" : "#081810"
+                                    border.color: openHover.containsMouse ? "#10b981" : "#0d3020"
+                                    border.width: 1
+                                    Behavior on color       { ColorAnimation { duration: 180 } }
+                                    Behavior on border.color { ColorAnimation { duration: 180 } }
+
+                                    Row {
+                                        anchors.centerIn: parent; spacing: 7
+                                        Text { text: "↗"; color: "#10b981"; font.pixelSize: 12; anchors.verticalCenter: parent.verticalCenter }
+                                        Text {
+                                            text: "OPEN OUTPUT"
+                                            color: "#10b981"
+                                            font.pixelSize: 11; font.letterSpacing: 1.5
+                                            anchors.verticalCenter: parent.verticalCenter
+                                        }
+                                    }
+
+                                    HoverHandler { id: openHover }
+                                    MouseArea {
+                                        anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                        onClicked: bridge.openOutputFolder()
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Scroll position, drawn only while there is somewhere to
+                    // scroll. Hand-drawn rather than a Controls ScrollBar so the
+                    // sidebar costs no new QML import — the build bundles the
+                    // module list `main.qml` imports, and the two are asserted
+                    // to match in tests/test_desktop_build.py.
+                    Rectangle {
+                        id: sidebarScrollThumb
+                        // How far the content can travel. Floored at 1 so the
+                        // fraction below is never a divide by zero on the frame
+                        // where the content and the viewport are the same size.
+                        readonly property real overflow: Math.max(
+                            1, sidebarScroll.contentHeight - sidebarScroll.height)
+
+                        anchors { right: parent.right; rightMargin: -root.sidebarPadding / 2 }
+                        width: 3; radius: 1.5
+                        height: Math.max(
+                            24,
+                            sidebarScroll.height
+                            * (sidebarScroll.height / sidebarScroll.contentHeight))
+                        // A child of the flickable rides with the content, so
+                        // `contentY` is what holds it at the top of the viewport;
+                        // the second term is its position along the track.
+                        y: sidebarScroll.contentY
+                           + Math.max(0, Math.min(1, sidebarScroll.contentY / overflow))
+                             * (sidebarScroll.height - height)
+                        color: "#2d1a45"
+                        visible: sidebarScroll.contentHeight > sidebarScroll.height
+                        opacity: sidebarScroll.moving ? 1.0 : 0.45
+                        Behavior on opacity { NumberAnimation { duration: 200 } }
                     }
                 }
             }

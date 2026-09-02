@@ -69,11 +69,20 @@ _LAZY_MODULES = (
 # blurs the window behind the one-face notice, and it only arrived at Qt 6.5,
 # which is why desktop/requirements.txt sets that floor.
 #
+# QtQuick.Controls is imported even though every control in `main.qml` is drawn
+# by hand and none of its types are currently used. A `ToolTip` attached
+# property was added without it once, and an unresolved attached object is a
+# *load* error rather than a warning: the window produced no root object and the
+# app exited saying nothing, on a machine other than the one it was written on.
+# Carrying the import is cheaper than rediscovering that. It does mean the build
+# has to bundle a Controls style — see `--include-qt-plugins` below.
+#
 # `tests/test_desktop_build.py` checks this stays in step with the QML file.
 _QML_MODULES = (
     'QtQuick',
     'QtQuick.Window',
     'QtQuick.Layouts',
+    'QtQuick.Controls',
     'QtQuick.Effects',
 )
 
