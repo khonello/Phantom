@@ -272,6 +272,27 @@ class FaceCompositor:
         # that is never on when the question comes up.
         self.last_stage_ms: Dict[str, float] = {}
 
+    def clear_readings(self) -> None:
+        """
+        Drop what the last frame measured, without touching temporal state.
+
+        Called at the top of every stream frame, so a frame that never reaches
+        compositing leaves *nothing* behind rather than the previous frame's
+        numbers. Guarded frames are the case: `check_frame` refuses, the
+        compositor is never called, and the per-frame readings would otherwise
+        still be sitting there to be recorded a second time — inflating every
+        distribution by however often the guards fired, which on a real call is
+        often.
+
+        Deliberately separate from `reset()`. That one drops the smoothing
+        buffers and must not be called per frame; this one only drops
+        measurements, and must be.
+        """
+        self.last_stage_ms.clear()
+        self.last_detail_ratio = None
+        self.last_texture_headroom = None
+        self.last_texture_confidence = None
+
     def reset(self) -> None:
         """Drop temporal state (face lost, source changed, pipeline restart)."""
         self._prev_fake = None

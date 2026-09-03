@@ -565,6 +565,31 @@ check('a stage that did not run records nothing',
       compositor.last_detail_ratio is None,
       'a zero would be a claim about a frame that has no reading')
 
+# ── Stale readings ─────────────────────────────────────────────────────
+print('\nStale readings')
+
+compositor.last_detail_ratio = 1.9
+compositor.last_texture_headroom = 3.0
+compositor.last_texture_confidence = 0.5
+compositor.last_stage_ms['restore'] = 12.0
+compositor.clear_readings()
+
+check('a frame that never composites leaves nothing behind',
+      compositor.last_detail_ratio is None
+      and compositor.last_texture_headroom is None
+      and compositor.last_texture_confidence is None
+      and not compositor.last_stage_ms,
+      'the guarded path still calls _log_timing, so stale numbers would be '
+      'recorded a second time and inflate every distribution')
+
+compositor._prev_fake = np.zeros((4, 4, 3), dtype=np.uint8)
+compositor.clear_readings()
+check('clearing readings does not drop temporal state',
+      compositor._prev_fake is not None,
+      'reset() is per source change; this is per frame — conflating them '
+      'would drop the smoothing buffer thirty times a second')
+compositor._prev_fake = None
+
 # ── Mask erode ─────────────────────────────────────────────────────────
 print('\nMask erode')
 

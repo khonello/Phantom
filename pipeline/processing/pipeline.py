@@ -624,6 +624,15 @@ class ProcessingPipeline:
         """
         started = time.perf_counter()
 
+        # Anything the last frame measured goes now, before this one starts.
+        # `_log_timing` runs on every path including the guarded one, and the
+        # compositor is not called on that path — so without this, a guarded
+        # frame records the *previous* frame's stage timings and realism
+        # readings a second time, and every distribution is inflated by however
+        # often the guards fired.
+        if self._compositor is not None:
+            self._compositor.clear_readings()
+
         # Captured before anything touches it, so the pair is genuinely
         # "what the camera sent" against "what the far end sees".
         debug_input = frame.copy() if self.config.debug_frames_dir else None
