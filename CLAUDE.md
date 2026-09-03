@@ -71,7 +71,7 @@ from starting the pod through to the outstanding implementation work.
 wrong and why — including the unauthenticated WebSocket, which must close
 before a paying customer. Read it before assuming a gap is unnoticed.
 
-- Working: realtime stream, aligned-space compositing, RunPod deployment,
+- Working: realtime stream, aligned-space compositing, Vast.ai deployment,
   desktop LIVE mode, batch **image** and **video**, **photo mode** (up to four
   uploaded targets), **template targets** (bundled scenes), desktop VIDEO and
   IMAGE tabs
@@ -262,14 +262,23 @@ readout now carries the number; the cheap test is to switch to `fast`
 (480x270 q60, ~1.4 Mbps) and see whether latency falls by far more than the
 ~10ms of compute that saves. If it does, the answer is encoding, not the GPU.
 
-**And the term nothing in this repo can fix: distance.** `RUNPOD_DATACENTERS`
-is `EU-RO-1` — Romania — against an operator in West Africa. That is a physical
-floor of roughly 80-120ms round trip at best and typically worse; someone had
-already met it, since the RTT ceiling's comment reads "accommodates RunPod
-RTT". Moving to a western-European datacenter is the only lever, and network
-volumes are datacenter-local, so it costs a second volume and a re-seed of the
-models. Worth measuring the readout first — if RTT is 200ms and the buffer adds
-60, a datacenter move is the largest remaining item by a wide margin.
+**The term that dominated everything: distance — and it is what the move to
+Vast was for.** The pod was `EU-RO-1`, Romania, against an operator in West
+Africa: a physical floor of roughly 80-120ms round trip at best and typically
+worse.
+
+The obvious fix was a nearer RunPod datacenter, and it does not exist.
+Per-datacenter stock, queried directly: **EU-FR-1 carries no eligible GPU at
+all**, EU-NL-1 has a single L40S, and RunPod has fifty datacenters and **none
+in the UK**. EU-RO-1 was not inertia — it was the only European datacenter
+holding 4090s.
+
+Vast has verified 4090s in the UK at $0.31/hr, cheaper than the Romanian card
+they replace, on 885 MB/s uplinks. See [docs/VAST_MIGRATION.md](docs/VAST_MIGRATION.md).
+
+**What is still unmeasured is the RTT itself.** Everything above is a proxy for
+it. The readout exists; point it at a UK instance and read it before believing
+any of this.
 
 **The standing conclusion: stop optimising the pipeline for latency.** There is
 ~23ms of headroom under the deadline and the felt delay is dominated by terms
@@ -568,64 +577,58 @@ cover colour, detail and grain, whereas PyPI OpenCV has no CUDA build. Expect
 Do it *after* the restoration resolution question, not before: 20ms is worth
 having, 110ms is worth having first.
 
-### Refusing mediocre GPUs, and waiting instead
+### Refusing a slow card, and waiting instead
 
-Auto-discovery sorted by `_GPU_PERF` and took the fastest *available* card,
-which silently accepts a 34-ranked L4 when a 100-ranked 4090 is busy. That is
-not a hypothetical: a whole measurement session was spent on an L4 by accident,
-and the card turned out to matter more than every software lever combined.
+Auto-discovery took the fastest *available* card, which silently accepts a weak
+one when the fast one is busy. That is not hypothetical: a whole measurement
+session was spent on an L4 by accident, and the card turned out to matter more
+than every software lever combined.
 
-`start` now restricts itself to a **top tier**, and when none of it is free it
-**waits and retries the whole list every minute** rather than dropping down.
+`start` therefore applies a **speed floor** and, when nothing clears it, waits
+and retries the whole search every minute rather than dropping down.
+
+The floor is no longer a hand-typed ranking. Vast publishes **`dlperf`**, a
+measured score on every offer, so `tests/test_gpu_tier.py` and the `_GPU_PERF`
+table it pinned are both gone.
 
 | Setting | Default | Effect |
 |---|---|---|
-| `RUNPOD_MIN_GPU_PERF` | `85` | Floor in `_GPU_PERF`. The tier is 4090, H200, H100, RTX 6000 Ada, L40S |
-| `RUNPOD_GPU_WAIT` | `300` | Seconds to keep retrying before giving up |
-| `RUNPOD_GPU_FALLBACK` | *unset* | What the timeout does: unset fails, `true` accepts a slower card |
+| `VAST_MIN_DLPERF` | `90` | Measured in western Europe: RTX 6000 Ada 113, RTX 4090 97, RTX 5080 84, RTX 3090 45. So 90 is "4090 or better" |
+| `VAST_GPU_WAIT` | `300` | Seconds to keep retrying before giving up |
+| `VAST_GPU_FALLBACK` | *unset* | What the timeout does: unset fails, `true` drops the floor |
 
-Five names, and in practice three — the H-series usually breaches
-`RUNPOD_MAX_PRICE` and never reaches the floor at all.
-
-This deliberately reverses the reasoning in commit 45ba27c and in
-docs/COMPILATION.md, which argued that pinning trades "sometimes a slower card"
-for "sometimes no pod at all", and that no pod is the worse failure on a paid
-session. That argument assumed pinning meant *failing*. **A bounded wait is not
-a pin: billing starts when a pod runs, not while you are waiting for one**, so
-the wait costs nothing and the thing it avoids costs a session.
+**A bounded wait is not a pin: billing starts when an instance runs, not while
+you are waiting for one**, so the wait costs nothing and the thing it avoids
+costs a session.
 
 Four properties worth keeping:
 
-- **The whole list is retried each pass, not just what was untried.** A card
-  taken a minute ago is the most likely one to have come free, so a pass that
-  skipped it would skip the answer. `_try_deploy_pass` is split out of
-  `_deploy_new_pod` for exactly this: the pass repeats, the setup around it
-  does not.
-- **Only capacity is waited out.** A bad volume id, a dead image or a rejected
-  key fails identically every sixty seconds, and spending five minutes proving
-  that is worse than saying so immediately. `_is_capacity_error` — already
-  needed by the resume path, since it is the same API saying the same thing —
-  decides, and a single non-capacity failure ends the wait.
-- **What happens at the timeout differs by purpose**, which is why it is a
-  setting and not a constant. A measurement session should fail rather than
-  accept a slower card, since a comparison across two architectures is not a
-  comparison. A customer session should fall back, since some service beats
-  none. The default is *fail*, because that is the failure this was built for.
-- **Manual mode is exempt.** `RUNPOD_GPU_TYPES` naming cards is already a
-  statement about which are acceptable; a floor that silently removed one would
-  make the setting mean something other than what it says.
+- **The preferred host is retried on every pass**, not just the first. It is
+  the one whose disk is warm and whose address the desktop already has, so a
+  pass that skipped it after one miss would skip the answer.
+- **Only capacity is waited out.** `_is_capacity_error` decides, and a single
+  non-capacity failure ends the wait — spending five minutes proving a key is
+  rejected is worse than saying so immediately.
+- **What happens at the timeout differs by purpose.** A measurement session
+  should fail rather than accept a slower card, since a comparison across two
+  architectures is not a comparison. A customer session should fall back. The
+  default is *fail*, because that is the failure this was built for.
+- **A pinned host is exempt from the quality floors, but not from the two
+  filters about whether the software can run at all.** `compute_cap <= 900` and
+  `gpu_arch == nvidia` always apply: a Blackwell card would schedule happily
+  against a CUDA 12.1 image and fail after billing started, and every ONNX model
+  here needs CUDAExecutionProvider.
 
-A narrow tier is also what makes the TensorRT engine cache pay. Engines are
-keyed per architecture and each pays its build once; across a dozen eligible
-cards the cache rarely hits, across three or four it is warm almost always. The
-same holds for any future per-GPU tuning — a small, known set is what makes
-"optimise for this card" a sentence that means something.
+**Ordering is by distance, then price — not by speed.** That is only safe
+*because* of the floor: once everything below a 4090 is gone, the remaining
+offers differ in the two things that decide felt quality, and speed is not one
+of them. Sorting on price alone had a French host at $0.336 beating a British
+one at $0.350 — three cents to give back part of the round trip the whole
+migration exists to remove. `VAST_GEOLOCATIONS` is a **strict** priority list:
+reorder it if a nearer host is not worth its price.
 
-`gpus` lists the whole eligible field and marks the tier with `T` rather than
-hiding what `start` refuses, since "why is there no pod" has to be answerable
-from that command. Lives in `_discover_gpus`, `_resolve_gpu_candidates`,
-`_try_deploy_pass` and `_deploy_new_pod` in `runpod/orchestrator.py`;
-`tests/test_gpu_tier.py` pins the tier membership against the prose above.
+Lives in `_search_offers`, `_rank`, `_find_offer` and `_create_instance` in
+`vast/orchestrator.py`; `tests/test_offer_selection.py` pins all of it.
 
 ## Quick Commands
 
@@ -650,11 +653,11 @@ appearing to work.
 ### Running the pipeline on your own GPU
 **[docs/LOCAL_GPU_SETUP.md](docs/LOCAL_GPU_SETUP.md)** and
 `python tools/setup_local_gpu.py`. `requirements-pipeline-gpu.txt` is written
-for RunPod and is not sufficient locally: it installs torch on **macOS only**,
+for the rented instance and is not sufficient locally: it installs torch on **macOS only**,
 insightface overwrites `onnxruntime-gpu` with the CPU wheel, and cuDNN 9 lands
 in site-packages where the loader does not look. Each gap ends in a
 working-looking install running silently on CPU, which for an all-ONNX pipeline
-is seconds per frame. The script mirrors `runpod/startup.sh` and verifies at the
+is seconds per frame. The script mirrors `vast/startup.sh` and verifies at the
 end; `--check` is safe anywhere.
 
 Worth knowing why it is attractive: a local 4090 is not faster than a rented
@@ -705,10 +708,10 @@ GPU work can reach.
   speed levers; prints what was applied and what was refused. `--show` reads
   the pipeline's status instead. **`.env` reaches a pod only at creation**, so
   on a running pod this is the way to change a model rather than editing `.env`
-- **On-pod work**: `python runpod/orchestrator.py run "<command>"`, and
+- **On-instance work**: `python vast/orchestrator.py run "<command>"`, and
   `logs [n]` for the pipeline log. Only port 9000 is exposed and the SSH proxy
   drops `exec_command`, so both drive the interactive shell the deploy opens
-- **Cold start**: `python runpod/orchestrator.py start` prints a phase breakdown
+- **Cold start**: `python vast/orchestrator.py start` prints a phase breakdown
   (provision / setup / pip / model load), labelled warm or empty volume
 - **Latency budget**: reported per preset when a stream stops — p50/p95/p99 per
   stage against the frame deadline, with a HOLDS/MISSES verdict
@@ -789,7 +792,7 @@ two cannot drift.
   - Binary frames: JPEG-encoded video frames pushed to all clients
   - Health check: `{"action": "health"}` → `{"status": "healthy", "uptime": <seconds>}`
   - Heartbeat ping/pong every 30s
-  - Auto-stop timer: background thread stops pod after `RUNPOD_MAX_UPTIME` minutes
+  - Auto-stop timer: background thread stops the instance after `VAST_MAX_UPTIME` minutes
 - **pipeline/api/handlers.py**: Type-safe command handlers; `HandlerContext` dataclass (no globals)
 - **pipeline/api/schema.py**: Message types, command/event constants, quality presets
 
@@ -1733,8 +1736,8 @@ build entirely, and a single model falling back while others did not.
 raise.
 
 Both deploy paths also check at build/setup time: the Dockerfile fails the build
-if `libcudnn.so.9` will not load, and `runpod/startup.sh` exits non-zero after
-installing cuDNN if it still cannot. See runpod/TROUBLESHOOTING.md section 5b —
+if `libcudnn.so.9` will not load, and `vast/startup.sh` exits non-zero after
+installing cuDNN if it still cannot. See vast/TROUBLESHOOTING.md section 5b —
 this shipped broken once and was found by reading, not by failing.
 
 **Do not downgrade any of these three to a warning.** Stopping is the requested
@@ -1805,9 +1808,9 @@ not a faster model.
 **TensorRT engines are cached per architecture, not pinned to one.** The cache
 key is GPU, TensorRT and ORT versions, model fingerprint and precision — every
 property an engine is invalid across. Pinning to a single GPU would defeat
-`RUNPOD_DATACENTERS`, which exists because availability is the binding
-constraint; it would trade "sometimes a slower card" for "sometimes no pod at
-all", and on a paid session no pod is the worse failure. Each architecture pays
+`VAST_GEOLOCATIONS`, which exists because availability is the binding
+constraint; it would trade "sometimes a slower card" for "sometimes no instance
+at all", and on a paid session no instance is the worse failure. Each architecture pays
 its build once, ever, so the cache warms itself.
 
 `trt_gpus` bounds which cards are worth that build. Minutes of a paid hour with
@@ -1912,7 +1915,7 @@ back to the other backend or off — rather than failing.
 - flake8 checks: E3, E4, **E9**, F. E9 is not a style class — it is "could not parse this file". Without it a syntax error lints clean, which is how a broken string literal reached a paid pod session
 - Exception: `pipeline/core.py` ignores E402 (imports after code) for performance-critical initialization
 - Run before commit: `mypy pipeline desktop` and
-  `flake8 pipeline.py pipeline desktop tests tools runpod firebase`
+  `flake8 pipeline.py pipeline desktop tests tools vast firebase`
 
 ## Dependencies & Environment
 
@@ -2002,44 +2005,79 @@ back to the other backend or off — rather than failing.
 - `mypy.ini`: Type checking (strict mode)
 - `.github/workflows/ci.yml`: CI pipeline (mypy → flake8 → test)
 
-### RunPod Deployment
-- `runpod/orchestrator.py`: CLI tool for managing GPU pods (start, resume, stop, terminate, status, gpus, datacenters)
-- `runpod/startup.sh`: Pod setup script (ffmpeg, venv, pip install)
-- `runpod/TROUBLESHOOTING.md`: Detailed log of every RunPod API gotcha and fix
-- `RUNPOD_DEPLOYMENT.md`: Setup and operation guide — one-time account/volume/`.env`
-  setup, the command set, what each `start` phase does, and the full `.env`
-  reference. `tests/test_wiring.py` asserts it stays in step with the code
+### Vast.ai Deployment
+- `vast/orchestrator.py`: CLI for managing GPU instances (offers, start, resume, stop, terminate, status, logs, run, push, pull)
+- `vast/startup.sh`: Instance setup (ffmpeg, venv, pip, cuDNN, TLS certificate)
+- `vast/TROUBLESHOOTING.md`: Every Vast API trap actually hit, plus the cuDNN one that outlived the provider change
+- `VAST_DEPLOYMENT.md`: Setup and operation guide — account, keys, the loop, and
+  the full `.env` reference. `tests/test_wiring.py` asserts it stays in step
+  with the code
+- **[docs/VAST_MIGRATION.md](docs/VAST_MIGRATION.md)**: why the move happened,
+  measured against both APIs, and the four decisions it rests on
 
-## RunPod Orchestrator
+## Vast.ai Orchestrator
 
 ### Commands
 ```bash
-python runpod/orchestrator.py start        # deploy fresh pod → setup → pipeline → update .env
-python runpod/orchestrator.py resume       # resume stopped pod (RUNPOD_POD_ID)
-python runpod/orchestrator.py stop         # pause pod (volume preserved)
-python runpod/orchestrator.py terminate    # delete pod (network volume survives)
-python runpod/orchestrator.py status       # show pod state + URL
-python runpod/orchestrator.py gpus         # list GPUs with VRAM, pricing, eligibility
-python runpod/orchestrator.py datacenters  # list all datacenters
+python vast/orchestrator.py offers      # what is rentable, and why anything was refused
+python vast/orchestrator.py start       # rent → ssh → startup.sh → pipeline → update .env
+python vast/orchestrator.py resume      # start the stopped instance (VAST_INSTANCE_ID)
+python vast/orchestrator.py stop        # stop it (disk survives, storage keeps billing)
+python vast/orchestrator.py terminate   # destroy it (disk and models go too)
+python vast/orchestrator.py status      # state, GPU, location, cost, uplink, address
+python vast/orchestrator.py logs [n]    # tail the pipeline log
+python vast/orchestrator.py run "cmd"   # one command on the instance, inside the venv
+python vast/orchestrator.py push <local> [remote]
+python vast/orchestrator.py pull <remote> [local]
 ```
 
 ### How It Works
-- `start` always creates a new pod; `resume` resumes an existing one
-- **Multi-datacenter fallback**: `RUNPOD_DATACENTERS=DC1:vol1,DC2:vol2` — tries all GPUs in DC1 first, falls back to DC2 with its paired volume. Network volumes are datacenter-local, so each datacenter needs its own volume.
-- Legacy single-datacenter config (`RUNPOD_DATACENTER_ID` + `RUNPOD_NETWORK_VOLUME_ID`) still works as fallback
-- **GPU auto-discovery**: By default, queries RunPod API for GPUs matching `RUNPOD_MIN_VRAM` (default 16GB), `RUNPOD_MAX_PRICE` (default $1.00/hr), and architecture compatibility, tries cheapest first. Set `RUNPOD_GPU_TYPES` to override with specific GPUs.
-- **Architecture filtering**: GPUs whose compute capability exceeds the image's PyTorch/ONNX support are automatically excluded (e.g. Blackwell sm_120 GPUs are skipped when the image only supports up to sm_90). Controlled by `_MAX_SUPPORTED_COMPUTE_CAP` in `orchestrator.py` — update when the base image upgrades.
-- GPU display names (e.g. `RTX 4090`) are resolved to API IDs via GraphQL
-- SSH uses RunPod's proxy: `{podHostId}@ssh.runpod.io` (podHostId from GraphQL `machine.podHostId`, NOT from SDK `get_pod()`)
-- WebSocket uses RunPod's proxy: `wss://{pod_id}-9000.proxy.runpod.net/ws`
-- Only port `9000/tcp` is exposed (no 8888 — that triggers slow JupyterLab init)
-- Image must be `devel` tag — `runtime` tag doesn't exist for `runpod/pytorch`
+- `start` always rents a new instance; `resume` starts an existing one, and
+  **falls back to `start` only when the failure is about capacity** — falling
+  back on any failure would rent a billing instance in response to a typo.
+- **Offers are searched, not enumerated.** Every filter is server-side:
+  geolocation, `dlperf`, VRAM, price, reliability, `inet_up`,
+  `direct_port_count`, `compute_cap`, `gpu_arch`. RunPod could filter on none
+  of the ones that matter here.
+- **`VAST_PREFERRED_HOST` pins a host** for a stable IP and a warm disk; the
+  filtered search runs whenever it has nothing rentable.
+- **Search needs no API key.** `offers` works from a clean checkout with no
+  account, which is the command someone runs to decide whether to open one.
+- SSH is `runtype: ssh_direct` — a real sshd on the instance, so `exec_command`
+  and SFTP both work. `pull` exists because of it.
+- Only port 9000 is published, mapped to a random external port on a shared
+  public IP.
 
 ### Critical API Notes
-- `runpod.create_pod(gpu_type_id=...)` needs the GPU **ID** (e.g. `NVIDIA GeForce RTX 4090`), not display name
-- `runpod.get_pod()` does NOT return `machine.podHostId` — must query GraphQL directly for SSH username
-- RunPod SSH proxy silently drops commands sent via `exec_command` — must use `invoke_shell()` for interactive sessions
-- RunPod GraphQL does NOT support schema introspection or per-datacenter GPU filtering
-- `support_public_ip=True` severely constrains pod scheduling — only enable for SSH mode
-- Never pass both `volume_in_gb` and `network_volume_id` to `create_pod()`
-- **Auto-stop**: Pipeline stops the pod after `RUNPOD_MAX_UPTIME` minutes (default 120) to prevent billing overruns. Sends `auto_stop_warning` event 5 minutes before. Desktop shows a dialog; user can click "Extend" (sends `keep_alive` command) or let it stop. Works even with no desktop connected — the pipeline calls `runpod.stop_pod()` directly.
+- **Two search filters fail silently**, returning HTTP 200 with zero offers:
+  `gpu_name` needs spaces (`"RTX 4090"`, not `"RTX_4090"`), and `geolocation`
+  matches the **country code** even though values read `"United Kingdom, GB"`.
+- **An offer `id` is stable within a query but not across queries.** The same
+  machine came back as `43933077` and `43933078` from two searches. Compare
+  result sets on `machine_id`; never cache an `id` and rent it later.
+- **Volumes are locked to one physical machine**, so there is no network-volume
+  equivalent. The instance disk is the only copy of the venv and weights, and
+  `terminate` destroys it.
+- **Storage bills while stopped**, per host, up to $0.40/GB/month — several
+  times RunPod's $0.07. `VAST_DISK` is a cost setting.
+- **Bandwidth is billed**, per host (`inet_up_cost` / `inet_down_cost`). ~4% on
+  top of the GPU at the `optimal` preset; `offers` prints it.
+- `env` on create carries environment variables **and** docker `-p` flags in
+  one object, with `"1"` as the value for a port entry.
+- Under `ssh_direct` the image's entrypoint is replaced, so `onstart` (or, here,
+  the orchestrator's own SSH session) is what launches anything.
+- **Auto-stop**: the pipeline stops the instance after `VAST_MAX_UPTIME`
+  minutes (default 120), sending `auto_stop_warning` 5 minutes before. It
+  **stops** rather than destroys, so the models stay warm — which does not end
+  storage billing. Works with no desktop connected.
+
+### Transport
+There is no TLS proxy. The instance generates a self-signed certificate once,
+`startup.sh` prints the SHA-256 of its **DER** encoding, and the orchestrator
+pins it into `.env` as `PHANTOM_TLS_FINGERPRINT`. A random `PHANTOM_API_TOKEN`
+goes with it, required in the first frame.
+
+This is not optional politeness: `desktop/controller.py` already speaks
+`ws://host:port/ws`, so the naive path *works* — in cleartext, with the
+operator's face in it. `tests/test_transport_security.py` pins both ends,
+including that an unauthenticated client never joins the broadcast set.
