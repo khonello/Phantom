@@ -565,6 +565,107 @@ check('a stage that did not run records nothing',
       compositor.last_detail_ratio is None,
       'a zero would be a claim about a frame that has no reading')
 
+# -- Scatter --------------------------------------------------------------
+print('\nScatter')
+
+# A face-sized aligned crop with shading (a gradient) and texture (noise) on it,
+# so the two bands can be told apart in the result.
+ALIGNED = 256
+scatter_face = make_face(x=0.0, y=0.0, size=float(ALIGNED))
+scatter_matrix = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
+shade = np.tile(
+    np.linspace(90, 170, ALIGNED, dtype=np.float32), (ALIGNED, 1))[:, :, None]
+grain = rng.normal(0, 8, (ALIGNED, ALIGNED, 3)).astype(np.float32)
+crop = np.clip(shade + grain, 0, 255).astype(np.uint8)
+full_mask = np.ones((ALIGNED, ALIGNED), dtype=np.float32)
+
+
+def scatter(strength):
+    config.diffuse_strength = strength
+    return compositor._scatter(crop, full_mask, scatter_face, scatter_matrix)
+
+
+def band(image, sigma):
+    """Deviation of the high band, as a stand-in for 'texture'."""
+    grey = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    return float((grey - cv2.GaussianBlur(grey, (0, 0), sigma)).std())
+
+
+check('scatter defaults to off', FaceSwapConfig().diffuse_strength == 0.0)
+check('at strength 0 the crop is untouched',
+      np.array_equal(scatter(0.0), crop),
+      'the layer must cost nothing and change nothing when off')
+
+softened = scatter(0.6)
+check('scatter changes the crop when on', not np.array_equal(softened, crop))
+check('it softens rather than sharpens',
+      band(softened, 4.0) < band(crop, 4.0),
+      '{:.2f} against {:.2f} in the shading band'.format(
+          band(softened, 4.0), band(crop, 4.0)))
+check('more strength softens more',
+      band(scatter(0.9), 4.0) < band(scatter(0.3), 4.0))
+
+# The scoping that keeps this from being the failure it imitates.
+lab_before = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB).astype(np.int16)
+lab_after = cv2.cvtColor(scatter(0.9), cv2.COLOR_BGR2LAB).astype(np.int16)
+chroma = np.abs(lab_after[:, :, 1:] - lab_before[:, :, 1:]).max()
+luma = np.abs(lab_after[:, :, 0] - lab_before[:, :, 0]).max()
+check('only the luminance channel moves',
+      chroma <= 2 < luma,
+      'chroma max {} vs luma max {} — on full RGB this would drift skin '
+      'tone as well as shading'.format(int(chroma), int(luma)))
+
+# Features are where softening reads as identity loss, so they are cut out.
+eye = (np.asarray(scatter_face.kps, dtype=np.float32)[0]).astype(int)
+cheek = (int(ALIGNED * 0.22), int(ALIGNED * 0.62))
+hard = scatter(0.9)
+eye_delta = float(abs(int(hard[eye[1], eye[0], 0]) - int(crop[eye[1], eye[0], 0])))
+cheek_delta = float(
+    abs(int(hard[cheek[1], cheek[0], 0]) - int(crop[cheek[1], cheek[0], 0])))
+check('the eyes are excluded from the softening',
+      eye_delta < cheek_delta,
+      'eye moved {:.0f}, cheek {:.0f} — softening a feature is the exact '
+      'identity loss this routes around'.format(eye_delta, cheek_delta))
+
+check('a fully masked-out frame comes back exactly untouched',
+      np.array_equal(
+          compositor._scatter(crop, np.zeros_like(full_mask), scatter_face,
+                              scatter_matrix),
+          crop),
+      'no weight means no work, not a lossy colour round trip for nothing')
+
+half_mask = np.zeros_like(full_mask)
+half_mask[:, :ALIGNED // 2] = 1.0
+gated = compositor._scatter(crop, half_mask, scatter_face, scatter_matrix)
+outside = np.abs(gated[:, ALIGNED // 2 + 40:].astype(np.int16)
+                 - crop[:, ALIGNED // 2 + 40:].astype(np.int16)).max()
+inside = np.abs(gated[:, :40].astype(np.int16)
+                - crop[:, :40].astype(np.int16)).max()
+# Sampled 40px clear of the midline, well past the weight blur's 3-sigma of
+# ~15px, so what is left is the uint8 BGR->LAB->BGR round trip and nothing else.
+check('the mask gates the softening',
+      outside <= 2 < inside,
+      'outside moved {} (colour round trip only; alpha is zero there at '
+      'paste), inside moved {}'.format(int(outside), int(inside)))
+
+check('unusable keypoints decline rather than soften blind',
+      np.array_equal(
+          compositor._scatter(crop, full_mask, MagicMock(kps=None),
+                              scatter_matrix),
+          crop))
+
+# The band split is what keeps scatter and texture from being the same lever.
+check('scatter sits above the texture band, not inside it',
+      FaceCompositor._SCATTER_SIGMA > DETAIL_SIGMA,
+      '{:.1f} against {:.1f} at the same 256 reference — a pass reaching into '
+      'the texture band would undo the stage after it'.format(
+          FaceCompositor._SCATTER_SIGMA, DETAIL_SIGMA))
+check('the sigma scales with the working resolution',
+      FaceCompositor._SCATTER_REFERENCE == DETAIL_SIGMA_REFERENCE,
+      'otherwise "soft" is a different distance when the operator leans in')
+
+config.diffuse_strength = 0.0
+
 # ── Stale readings ─────────────────────────────────────────────────────
 print('\nStale readings')
 

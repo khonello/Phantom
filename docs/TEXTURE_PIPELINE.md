@@ -343,7 +343,8 @@ this document needs building.
 
 ## 7. The diffuse / light-scatter pass
 
-Decision 7 is agreed: subsurface scattering is a genuinely separate axis from
+**Built** — `FaceCompositor._scatter`, `diffuse_strength`, default 0. Decision 7
+is agreed: subsurface scattering is a genuinely separate axis from
 detail, it is a shading-domain problem, and scoping it to luminance is the right
 call. Three additions.
 
@@ -364,9 +365,43 @@ with eye and mouth polygons removed — and the landmark hull already gives you 
 positions for free, no parsing net required. This is the difference between a
 working pass and the failure mode decision 7 correctly worries about.
 
-`diffuse_strength` on `FaceSwapConfig`, reachable from `set_realism`, CLI and env,
-defaulting **off** until judged on footage. Same treatment every other realism knob
-gets.
+`diffuse_strength` on `FaceSwapConfig`, reachable from `set_realism`, CLI, env
+and the pod, defaulting **off** until judged on footage. Same treatment every
+other realism knob gets.
+
+**As built.** Aligned space, immediately before `_match_color`, so the colour
+stages can still reconcile it. LAB's L channel only. The blur sigma is 3.0 at a
+256px reference — roughly 2mm on a real face, which is the order of skin's actual
+diffusion length — and scales with the working resolution like every other
+spatial constant, so "soft" is the same physical distance whether the operator
+leans in or sits back. Deliberately above `_DETAIL_SIGMA`: this is a shading
+effect and that is a texture one.
+
+Feature exclusions come from `face.kps` rather than the 106 landmarks, so they do
+not depend on a layout that varies between model packs, with radii scaled by the
+inter-ocular distance. They are feathered, because an unfeathered exclusion is a
+visible disc of "sharp" sitting in softened skin — a seam of its own, at the
+eyes.
+
+One ordering property worth stating because it looks like a bug and is not: a
+blur at `_SCATTER_SIGMA` does attenuate part of the texture band on its way past.
+`_match_detail` runs **after** it and scales that band back up against the real
+crop, so what scatter takes out of the texture band is restored and what it takes
+out of the shading band stays out — which is exactly the split that was wanted.
+
+**Cost, measured on a laptop CPU** — see §9 on why that is indicative rather
+than predictive, and why the pod will print its own figure: 0.61 / 1.96 / 3.18 /
+4.74ms at aligned 128 / 192 / 256 / 320, and 0.004ms when off. About 0.8ms of that is rebuilding the feature-exclusion
+weight each frame, which the keypoints moving makes unavoidable without caching
+work nobody has justified yet.
+
+**The cheaper variant was measured and rejected.** Adding a monochrome luma delta
+to all three BGR channels — the trick `_add_grain` uses — avoids the LAB round
+trip and looked like the obvious saving. At 256 it runs 2.29ms against LAB's
+2.41ms, a 5% gain, and drifts chroma **three times** as far (max 3 LAB units
+against 1). The design's stated preference for an L-channel operation turns out
+to be the right one on both counts, which is not what a guess would have
+predicted.
 
 ---
 
@@ -390,6 +425,31 @@ Do not put BiSeNet on the live path.
 ---
 
 ## 9. Performance, rewritten for this codebase
+
+**Every millisecond in this document was measured on a development laptop's CPU,
+and the thing that will run this is a RunPod GPU instance.** Read them as shape,
+not as magnitude.
+
+The reason they transfer at all is that **a GPU does not touch these stages**.
+The models are ONNX on the GPU; the compositor is NumPy and OpenCV on the CPU,
+and `_scatter`, `_add_texture`, `_texture_headroom` and the seam feather are all
+compositor work. Renting a faster card does not speed them up.
+
+The reason they do not transfer exactly is that a pod's CPU is not this one, and
+is not even constant across pods: [CLAUDE.md](../CLAUDE.md) records the whole
+compositor-plus-paste-plus-encode bucket at ~20ms on an L4 instance and ~10.3ms
+on a 4090 instance, and explicitly corrects an earlier claim that the non-GPU
+portion was a fixed floor. It scaled with the instance, because the instance's
+CPU scaled with it.
+
+So the numbers here bound the *ratios* — texture grows with the face's area in
+frame, scatter grows with the aligned size, the headroom sample is flat — and
+say nothing reliable about the absolutes.
+
+**None of which needs resolving by argument.** `scatter` is its own bucket in
+`LatencyBudget` and `texture` is recorded as a subset of `paste`, so the pod's
+own latency report prints both, per-stage, against the preset's deadline, on the
+hardware that matters. One stream answers it.
 
 The proposal's optimisation section is generic and, for Phantom, points at the
 wrong machine. Its own decision 1 — "pick one home, matching whatever the models
@@ -462,6 +522,12 @@ fastest, and it sits between the operator and any judgement about texture.
    cached at 512 and the *map* derived per working size, because the band has to
    be chosen at the resolution it will be displayed at. Sigma comes from
    `geometry.DETAIL_SIGMA`, the constant `_match_detail` also reads.
+0. ~~**Diffuse / light-scatter pass**~~ — `FaceCompositor._scatter`,
+   `diffuse_strength`, default 0. Built ahead of its trigger on the practical
+   argument rather than the tidy one: it is default-off and independently
+   toggleable, so it is *available* rather than *stacked*, and a pod session
+   costs money — one session can now judge texture and scatter instead of two.
+   See §7 for what it does and what it cost.
 3. ~~**Frame-space reprojection and blend**~~ — `FaceCompositor._add_texture`,
    inside `_paste` between the alpha composite and `_add_grain`.
    Measured with the B1 headroom bound in place: **0.90ms** per frame on a 101px
@@ -685,7 +751,7 @@ attenuate where the pose disagrees, rather than correct for it.
 
 ### Phase E — open, but unjustified until footage says otherwise
 
-Three items from the source document are neither built nor rejected. What they
+Two items from the source document are neither built nor rejected. What they
 share is that **nothing has yet shown they are needed**, and each would add a
 layer to a stack that is already three deep and entirely unjudged. Each is
 listed with the observation that would justify it, so the decision has a trigger
@@ -698,13 +764,6 @@ as the angle diverges, so a low-confidence region now gets less detail rather
 than wrong detail. That may simply be the right answer, and synthetic fill is
 only better if "less texture here" reads worse than "invented texture here" —
 which is exactly the generic look this design exists to avoid.
-
-**Diffuse / light-scatter pass** (source decision 7, §7). Justified if someone
-says the skin reads *hard* — not plastic, which is the texture problem, but
-lacking the soft light falloff real skin has. It is the highest-risk item in the
-source document by its own admission (identity softening), it belongs in a
-different frequency band at a different insertion point (§3.2), and no
-observation yet points at it.
 
 **Low-frequency tonal variation** (§5). Last, always. It has the narrowest band
 to live in — between `_match_illumination`'s 8x downscale and `_match_detail`'s
@@ -780,6 +839,13 @@ Carried from the proposal, with two added.
   turned away from the source is attenuated uniformly rather than across the
   cheek that is actually stretched. Conservative, and it costs some good detail
   on the near side of an off-pose frame.
+- **Added: texture and scatter together may miss the `production` deadline.**
+  ~12ms combined with a large face, on a laptop CPU. `optimal`'s 50ms against a
+  ~27ms frame absorbs that comfortably; `production`'s 33ms would not. But the
+  arithmetic is being done in the wrong units — the pod's CPU is faster than the
+  one those were taken on (§9), so this is a flag to *read the latency report*
+  at `production`, not a prediction that it misses. Judge realism at `optimal`
+  regardless, where there is headroom to spare.
 - **Added: the seam knobs are two more interacting parameters**, on top of the
   three §12 already warned about. `mask_feather` and `mask_erode` pull against
   each other by construction — erode moves the transition in, feather spreads it

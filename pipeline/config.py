@@ -203,6 +203,22 @@ class FaceSwapConfig:
     mask_feather: float = 0.04
     mask_erode: float = 0.03
 
+    # Subsurface scattering, approximated. Real skin is translucent: light
+    # enters, bounces around under the surface and leaves somewhere slightly
+    # else, which softens the *shading* over a millimetre or two without
+    # touching the texture on top of it. A generated face has none of that, and
+    # the result reads as hard rather than as plastic — a different complaint
+    # from the one `texture_strength` answers, in a different frequency band.
+    #
+    # Scoped to the luminance channel, and to skin with eyes, nose and mouth
+    # cut out. Unscoped it would soften facial structure, which is the exact
+    # failure this whole pipeline routes around in full-strength restoration.
+    #
+    # **Defaults off, and never judged on footage.** It is the highest-risk
+    # layer here by the design's own admission; 0.2-0.4 is the expected working
+    # range if it turns out to be wanted at all.
+    diffuse_strength: float = 0.0
+
     # Skin detail lifted from the operator's own source photograph and warped
     # onto the face every frame. The swapped face carries 58% of the frame's
     # high-frequency energy against an ideal of 1.00, and restoration was
@@ -455,6 +471,7 @@ class FaceSwapConfig:
             'color_strength': self.color_strength,
             'mask_feather': self.mask_feather,
             'mask_erode': self.mask_erode,
+            'diffuse_strength': self.diffuse_strength,
             'texture_strength': self.texture_strength,
             'grain': self.grain,
             'occluder': self.occluder,

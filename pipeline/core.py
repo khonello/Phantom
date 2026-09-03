@@ -136,6 +136,9 @@ def parse_args() -> None:
     program.add_argument('--mask-erode',
                         help='pull the mask in before feathering, fraction of aligned size',
                         dest='mask_erode', type=float, default=_env_float('MASK_ERODE'))
+    program.add_argument('--diffuse-strength',
+                        help='subsurface scatter on the luminance channel (0.0-1.0, 0 disables)',
+                        dest='diffuse_strength', type=float, default=_env_float('DIFFUSE_STRENGTH'))
     program.add_argument('--texture-strength',
                         help='source skin detail added over the swap (0.0-1.0, 0 disables)',
                         dest='texture_strength', type=float, default=_env_float('TEXTURE_STRENGTH'))
@@ -236,6 +239,7 @@ def parse_args() -> None:
         ('mask_feather', args.mask_feather),
         ('mask_erode', args.mask_erode),
         ('texture_strength', args.texture_strength),
+        ('diffuse_strength', args.diffuse_strength),
         ('aligned_size', args.aligned_size),
         ('restore_size', args.restore_size),
         ('restore_min_face', args.restore_min_face),

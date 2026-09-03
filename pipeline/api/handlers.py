@@ -916,6 +916,10 @@ _REALISM_FIELDS: Dict[str, Any] = {
     # the face wide is not a seam fix, it is a dissolve.
     'mask_feather': lambda v: min(0.25, max(0.0, float(v))),
     'mask_erode': lambda v: min(0.25, max(0.0, float(v))),
+    # The scatter pass. Independently toggleable on purpose: it and
+    # `texture_strength` work in different bands and either could be blamed for
+    # the other's artefact, so isolating them is required tooling.
+    'diffuse_strength': lambda v: min(1.0, max(0.0, float(v))),
     # The additive skin-detail layer. Live-switchable for the same reason the
     # restoration knobs are: whether it reads as skin or as noise is a footage
     # question, and A/B on one clip is the only way to answer it.

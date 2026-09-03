@@ -168,6 +168,24 @@ class FaceCompositor:
     # 4% of it is under two pixels has no transition to speak of otherwise.
     _FEATHER_FLOOR = 2.0
 
+    # Subsurface scattering. Sigma is specified at a 256px face and scales with
+    # the working resolution, like every other spatial constant here, so "soft"
+    # means the same physical distance whether the operator is close to the
+    # camera or sitting back — otherwise the look changes when they lean.
+    #
+    # 3.0 at 256 is roughly 2mm on a real face, which is the order of skin's
+    # actual diffusion length. Deliberately above `_DETAIL_SIGMA` (1.5): this is
+    # a shading effect and that is a texture one, and a pass that reached into
+    # the texture band would be undoing the stage that comes after it.
+    _SCATTER_SIGMA = 3.0
+    _SCATTER_REFERENCE = 256.0
+    # Feature exclusion radii, as fractions of the inter-ocular distance in
+    # aligned space. Derived from `face.kps` rather than the 106 landmarks, so
+    # this does not depend on a layout that varies between model packs.
+    _SCATTER_EYE = 0.42
+    _SCATTER_MOUTH = 0.40
+    _SCATTER_NOSE = 0.30
+
     # Pose agreement between the source photograph and the frame, in degrees of
     # yaw. Below the first the map is used at full strength; above the second it
     # is not used at all.
@@ -394,6 +412,14 @@ class FaceCompositor:
         if not self.config.many_faces:
             fake = self._smooth(fake, real)
             elapsed('smooth')
+
+        # Before colour matching, and that ordering is the point. This is a
+        # low-frequency change to the luminance channel, so it has to happen
+        # where the colour stages can still reconcile it against the target
+        # rather than landing on top of a finished match — see
+        # docs/TEXTURE_PIPELINE.md section 3.2.
+        fake = self._scatter(fake, mask, face, aligned_matrix)
+        elapsed('scatter')
 
         if self.config.color_correction:
             fake = self._match_color(fake, real, mask)
@@ -759,6 +785,136 @@ class FaceCompositor:
             local_gate, (size, size), interpolation=cv2.INTER_LINEAR,
         )
         return gate
+
+    def _scatter(
+        self,
+        fake: Frame,
+        mask: Mask,
+        face: Face,
+        matrix: Matrix,
+    ) -> Frame:
+        """
+        Soften the shading the way light under skin does.
+
+        Real skin is translucent. Light enters, scatters through a millimetre or
+        two of tissue and leaves somewhere slightly else, which blurs the
+        *shading* while leaving the texture sitting on top of it sharp. A
+        generated face has none of that, and the result reads hard — a different
+        complaint from plastic, in a different band, and `texture_strength`
+        does not answer it.
+
+        **Luminance only.** The pass runs on LAB's L channel and leaves a and b
+        untouched. Applied to full RGB it would drift skin tone as well as
+        shading, and applied without the feature exclusions below it would
+        soften eyes and mouth — which is precisely the identity-softening
+        failure this whole pipeline exists to route around in full-strength
+        restoration. Scoping it is not a refinement; it is the difference
+        between the pass and the thing it is imitating.
+
+        **Before `_match_detail`, deliberately.** A blur at `_SCATTER_SIGMA`
+        does attenuate some of the texture band on its way past, and detail
+        matching runs afterwards and scales that band back up against the real
+        crop. So the ordering is self-correcting: what scatter takes out of the
+        texture band, the next stage puts back, and what it takes out of the
+        shading band stays out — which is the split that was wanted.
+
+        Args:
+            fake: The swap in aligned space
+            mask: Compositing mask, so nothing outside the swap is touched
+            face: Detection, for the five keypoints the exclusions are built on
+            matrix: frame -> aligned affine
+
+        Returns:
+            `fake` with softened shading, or unchanged when the layer is off.
+        """
+        strength = float(np.clip(getattr(self.config, 'diffuse_strength', 0.0), 0.0, 1.0))
+        if strength <= 0.0:
+            return fake
+
+        size = fake.shape[0]
+        weight = self._scatter_weight(mask, face, matrix, size)
+        if weight is None or not weight.any():
+            return fake
+
+        # Note the LAB round trip below is not bit-exact: pixels the weight
+        # leaves alone still come back +/-1 from the colour-space conversion.
+        # That is harmless where it happens — those pixels are outside the
+        # compositing mask and are multiplied by an alpha of zero at paste — but
+        # it is why the guard above is `any()` rather than a strength check. A
+        # frame with nothing to soften must come back untouched, exactly.
+
+        lab = cv2.cvtColor(fake, cv2.COLOR_BGR2LAB).astype(np.float32)
+        luma = lab[:, :, 0]
+
+        sigma = self._SCATTER_SIGMA * size / self._SCATTER_REFERENCE
+        soft = cv2.GaussianBlur(luma, (0, 0), max(sigma, 0.6))
+
+        # luma + (soft - luma) * w, which moves the shading toward its blurred
+        # self by `w` and leaves it alone where `w` is zero.
+        lab[:, :, 0] = luma + (soft - luma) * (weight * strength)
+
+        result: Frame = cv2.cvtColor(
+            np.clip(lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR,
+        )
+        return result
+
+    def _scatter_weight(
+        self,
+        mask: Mask,
+        face: Face,
+        matrix: Matrix,
+        size: int,
+    ) -> Optional[Mask]:
+        """
+        Where scattering may apply: inside the swap, on skin, off the features.
+
+        Built from the five keypoints rather than the 106 landmarks, because the
+        five are the same points the swap itself is aligned on and their meaning
+        does not change with the model pack. Radii scale with the inter-ocular
+        distance, so the exclusions track the face rather than the crop.
+
+        Args:
+            mask: Compositing mask in aligned space
+            face: Detection for this frame
+            matrix: frame -> aligned affine
+            size: Aligned edge length
+
+        Returns:
+            Weight in [0, 1], or None when the keypoints are unusable — in which
+            case the caller declines to run rather than softening blind.
+        """
+        kps = getattr(face, 'kps', None)
+        if kps is None or len(kps) < 5:
+            return None
+
+        points = cv2.transform(
+            np.asarray(kps, dtype=np.float32).reshape(-1, 1, 2),
+            matrix.astype(np.float32),
+        ).reshape(-1, 2)
+
+        span = float(np.linalg.norm(points[1] - points[0]))
+        if span < 1e-3:
+            return None
+
+        weight = mask.copy()
+        for index, scale in (
+            (0, self._SCATTER_EYE), (1, self._SCATTER_EYE),
+            (2, self._SCATTER_NOSE),
+            (3, self._SCATTER_MOUTH), (4, self._SCATTER_MOUTH),
+        ):
+            centre = points[index]
+            cv2.circle(
+                weight,
+                (int(round(centre[0])), int(round(centre[1]))),
+                max(1, int(round(span * scale))),
+                (0.0,),
+                -1,
+            )
+
+        # Feather the exclusions, or each one is a visible disc of "sharp"
+        # sitting in softened skin — a seam of its own, at the eyes.
+        blur = max(1.0, size * 0.02)
+        return cv2.GaussianBlur(weight, (0, 0), blur)
 
     def _match_color(self, fake: Frame, real: Frame, mask: Mask) -> Frame:
         """

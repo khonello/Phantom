@@ -1109,6 +1109,36 @@ Four properties carry it:
 expected working range; A/B it with
 `tools/realism.py --host ... texture_strength=0.4`.
 
+**Subsurface scatter is built and off** (`diffuse_strength`). Real skin is
+translucent: light enters, scatters through a millimetre or two and leaves
+somewhere slightly else, softening the *shading* while the texture on top stays
+sharp. A generated face has none of that and reads **hard** — a different
+complaint from plastic, in a different band, which `texture_strength` does not
+answer. It runs in aligned space immediately before `_match_color` so the colour
+stages can still reconcile it, on the L channel only, with feature exclusions
+built from `face.kps` (not the 106 landmarks, whose layout varies by pack) and
+feathered, since an unfeathered exclusion is a disc of "sharp" in softened skin.
+
+Two things about it that look wrong and are not. The blur does attenuate part of
+the texture band on its way past — but `_match_detail` runs *after* it and scales
+that band back against the real crop, so what scatter removes from texture is
+restored and what it removes from shading stays out. And the LAB round trip was
+kept rather than replaced by the cheaper monochrome-delta trick `_add_grain`
+uses: measured at 256, that variant is 2.29ms against 2.41ms — 5% — and drifts
+chroma three times as far.
+
+**The costs quoted for both new layers are laptop-CPU measurements, and the pod
+will print its own.** A GPU does not touch either of them — the models are ONNX
+on the card, the compositor is OpenCV on the CPU — so renting a faster card does
+not speed them up; but a pod's CPU is not this one, and the whole compositor
+bucket has already been recorded at ~20ms on an L4 against ~10.3ms on a 4090.
+Locally: scatter 0.61/1.96/3.18/4.74ms at aligned 128/192/256/320 and 0.004ms
+off; texture 0.90ms on a 101px face and 7.49ms on a 460px one. Both are their
+own line in the latency report, so **one stream on the pod replaces all of
+that**. Combined they are ~12ms with a large face, which `optimal`'s 50ms
+absorbs; treat `production`'s 33ms as a question for the report rather than a
+prediction. Judge realism at `optimal` either way.
+
 **The seam came first.** A live run reported the swap as "very noticeable, like
 the face pasted on target" — failure mode 2, seen rather than measured, and the
 thing the eye finds before it finds texture. Three causes were arithmetic rather
@@ -1187,6 +1217,7 @@ Two things it deliberately does **not** do, both recorded rather than forgotten:
 | `texture_strength` | `0.0` | Skin detail lifted from the operator's own source photo and warped onto the face each frame. **The fraction of the measured gap to close** — the compositor measures the real face's high-frequency energy in the same pixels, less what the swap and grain already carry, so `1.0` is parity and overshoot is impossible. **Off by default, never judged on footage.** 0.3-0.5 expected |
 | `mask_feather` | `0.04` | Frame-space seam transition, as a fraction of the face's extent in frame (floor 2px). Was effectively 1%, giving a ~1.4px transition on a 101px face — a hard edge, and the reported "pasted on" look |
 | `mask_erode` | `0.03` | Pulls the mask in, in aligned space, **before** it is feathered, so the transition sits on skin rather than straddling the expanded hull onto neck and hair |
+| `diffuse_strength` | `0.0` | Subsurface scatter — softens *shading* the way light under skin does, on LAB's L channel only, with eyes/nose/mouth cut out. Answers "the skin reads hard", which is a different complaint from "plastic" and a different band. **Off by default, never judged on footage.** 0.2-0.4 expected |
 | `aligned_size` | `256` | **Ceiling** on compositing resolution (clamped 128–512). The size actually used follows the face's own size in frame, in steps, with hysteresis — a distant face is not upsampled to detail its webcam never captured, and costs proportionally less |
 | `temporal_alpha` | `0.6` | EMA on aligned pixels, kills shimmer (`1.0` disables) |
 | `color_correction` | `True` | LAB transfer, sampled inside the mask, ramped by colour distance |

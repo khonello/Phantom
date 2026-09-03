@@ -127,6 +127,7 @@ _BASE: Dict[str, Any] = {
     'texture_strength': 0.0,
     'mask_feather': 0.04,
     'mask_erode': 0.03,
+    'diffuse_strength': 0.0,
 }
 
 # The pipeline prints the latency budget as a STATUS_CHANGED with this scope
