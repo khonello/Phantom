@@ -422,7 +422,7 @@ the target anyway.
 ## Model files
 
 ```
-pipeline/models/            (or /workspace/models/ on RunPod)
+pipeline/models/            (or /workspace/models/ on a rented instance)
   inswapper_128.onnx        face swap            — required
   codeformer.onnx           restoration          — auto-downloads
   dfl_xseg.onnx             occlusion masking    — auto-downloads
@@ -430,7 +430,7 @@ pipeline/models/            (or /workspace/models/ on RunPod)
 ```
 
 The two auto-downloading models come from
-[facefusion-assets](https://github.com/facefusion/facefusion-assets). RunPod's
+[facefusion-assets](https://github.com/facefusion/facefusion-assets). The instance's
 network volume is checked first so weights survive pod restarts.
 
 ---
@@ -444,7 +444,7 @@ network volume is checked first so weights survive pod restarts.
 | Swap + CodeFormer + XSeg | ~5–6 GB |
 | Swap + GFPGAN + XSeg | ~6–7 GB |
 
-The default RunPod filter is ≥16 GB, which is comfortable for all of these.
+The default VRAM floor is ≥16 GB, which is comfortable for all of these.
 
 ---
 

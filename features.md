@@ -428,13 +428,13 @@ back to the other backend or off — rather than failing.
 
 ### Commands
 ```
-python runpod/orchestrator.py start        # Deploy fresh GPU pod
-python runpod/orchestrator.py resume       # Resume stopped pod
-python runpod/orchestrator.py stop         # Pause pod (volume preserved)
-python runpod/orchestrator.py terminate    # Delete pod (network volume survives)
-python runpod/orchestrator.py status       # Show pod state, GPU, cost, WebSocket URL
-python runpod/orchestrator.py gpus         # List GPUs with VRAM, pricing, eligibility
-python runpod/orchestrator.py datacenters  # List all datacenters
+python vast/orchestrator.py start        # Deploy fresh GPU pod
+python vast/orchestrator.py resume       # Resume stopped pod
+python vast/orchestrator.py stop         # Pause pod (volume preserved)
+python vast/orchestrator.py terminate    # Delete pod (network volume survives)
+python vast/orchestrator.py status       # Show pod state, GPU, cost, WebSocket URL
+python vast/orchestrator.py gpus         # List GPUs with VRAM, pricing, eligibility
+python vast/orchestrator.py datacenters  # List all datacenters
 ```
 
 ### Deployment Modes
@@ -443,8 +443,8 @@ python runpod/orchestrator.py datacenters  # List all datacenters
 
 ### GPU Auto-Discovery
 - Queries RunPod GraphQL for all available GPU types
-- Filters by minimum VRAM (`RUNPOD_MIN_VRAM`, default 16 GB)
-- Filters by maximum hourly price (`RUNPOD_MAX_PRICE`, default $1.00)
+- Filters by minimum VRAM (`VAST_MIN_VRAM`, default 16 GB)
+- Filters by maximum hourly price (`VAST_MAX_PRICE`, default $1.00)
 - Sorts by cheapest first, tries until one succeeds
 - Manual override via `RUNPOD_GPU_TYPES` (comma-separated display names)
 
@@ -455,8 +455,8 @@ python runpod/orchestrator.py datacenters  # List all datacenters
 - Network volumes persist models and venv across pod restarts
 
 ### Auto-Stop (Billing Protection)
-- `RUNPOD_MAX_UPTIME`: Stop pod after N minutes (default 120, 0 = disabled)
-- `RUNPOD_STOP_WARNING`: Warning N minutes before stop (default 5)
+- `VAST_MAX_UPTIME`: Stop pod after N minutes (default 120, 0 = disabled)
+- `VAST_STOP_WARNING`: Warning N minutes before stop (default 5)
 - Background timer runs in the pipeline server — works even without a desktop connected
 - Desktop shows warning dialog with extend option
 - Calls `runpod.stop_pod()` on expiry (pod can be resumed later)
@@ -546,14 +546,14 @@ python pipeline.py --stream --no-grain --no-occluder
 
 ### GPU Deployment
 
-What happens when you run `python runpod/orchestrator.py start`:
+What happens when you run `python vast/orchestrator.py start`:
 
 ```
 orchestrator.py start
 │
 ├─ Load .env, verify API key
 │
-├─ RUNPOD_POD_ID already set?
+├─ VAST_INSTANCE_ID already set?
 │  ├─ Yes → "Deploy NEW pod? [y/N]"
 │  │         ├─ No  → abort
 │  │         └─ Yes → continue
@@ -614,7 +614,7 @@ orchestrator.py start
 │     wait for → {"status":"healthy"} (up to 2 min)
 │
 ├─ UPDATE .env
-│  ├─ RUNPOD_POD_ID = <new pod id>
+│  ├─ VAST_INSTANCE_ID = <new pod id>
 │  └─ PHANTOM_API_URL = wss://<pod>-9000.proxy.runpod.net/ws
 │
 └─ DONE — "python desktop.py" to connect
@@ -741,7 +741,7 @@ Billing protection flow — works even with no desktop connected:
 ```
 Pod starts
 │
-├─ RUNPOD_MAX_UPTIME = 120 min?
+├─ VAST_MAX_UPTIME = 120 min?
 │  ├─ 0 → timer disabled, no auto-stop
 │  └─ >0 → start background timer thread
 │

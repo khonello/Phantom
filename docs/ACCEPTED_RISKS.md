@@ -24,44 +24,10 @@ accepted risk, it is an unfixed bug.
 
 ## Security
 
-### 🔴 The WebSocket API has no authentication
 
-`WebSocketAPIServer` binds `0.0.0.0:9000` and RunPod exposes it at
-`wss://{pod_id}-9000.proxy.runpod.net/ws`. There is no token, no handshake, no
-origin check. Anyone holding that URL can upload a source face, start a stream,
-call `cleanup_session`, or `shutdown` the pipeline.
+### 🟠 An SSH key registered on Vast grants root on the instance
 
-Worse than control: **frames are broadcast to every connected client**, so a
-second connection receives the operator's swapped video.
-
-**Why accepted:** the proxy URL is pod-specific and unguessable in practice, and
-an assessment session is short and watched. Treat the URL as a credential.
-
-**Note what does *not* mitigate this.** The access-code gate lives in
-`desktop/bridge.py` — it is client-side. It gates the UI, not the pod. A
-customer with a valid code and a customer with none reach the same
-unauthenticated socket.
-
-**Closes when:** the WebSocket sits behind an authenticated reverse proxy, or
-the server requires a token in the first frame and drops connections that do
-not present one. Required before the first paying user.
-
-### 🟠 `RUNPOD_API_KEY` is forwarded into the pod, unscoped
-
-The pod needs it to stop itself when `RUNPOD_MAX_UPTIME` expires. RunPod API
-keys are account-wide, so a pod that can stop itself can stop, start, or
-terminate **every other pod on the account**.
-
-**Why accepted:** self-stopping is what prevents an unattended pod billing a
-full day, which is a larger and more likely loss than the key being extracted
-from a pod only we can reach.
-
-**Closes when:** RunPod offers scoped keys, or the auto-stop moves to something
-outside the pod that watches it and stops it from the account side.
-
-### 🟠 An SSH key registered on RunPod grants root on the pod
-
-`RUNPOD_SSH_KEY_PATH` must be an unencrypted key, because the orchestrator
+`VAST_SSH_KEY_PATH` must be an unencrypted key, because the orchestrator
 loads it without a passphrase prompt.
 
 **Why accepted:** SSH mode is a development convenience. Docker mode does not
@@ -94,7 +60,7 @@ it fixes*, so the first recovery is always manual.
 **Diagnosis** — one command, and it is the only one that matters:
 
 ```bash
-python runpod/orchestrator.py run "git -C /workspace/Phantom remote get-url origin"
+python vast/orchestrator.py run "git -C /workspace/Phantom remote get-url origin"
 ```
 
 **Recovery.** Retry first — it is transient, and `startup.sh` now retries three
@@ -103,22 +69,22 @@ is not subject to the anonymous rate limit, whether or not the repository needs
 a token to be *read*.
 
 ```bash
-python runpod/orchestrator.py run "git -C /workspace/Phantom remote set-url origin https://<token>@github.com/khonello/Phantom.git"
+python vast/orchestrator.py run "git -C /workspace/Phantom remote set-url origin https://<token>@github.com/khonello/Phantom.git"
 ```
 
-Set `RUNPOD_REPO_URL` in `.env` to the same value, or any pod that re-clones
+Set `VAST_REPO_URL` in `.env` to the same value, or any pod that re-clones
 goes straight back to being anonymous. Both `start` and `resume` run the clone
 step, so this is not only a first-deploy concern. The token then lives in
 `.git/config` on the volume for every future pod to read — the trade recorded
 below.
 
 Deleting the checkout and redeploying also works, and picks up whatever
-`RUNPOD_REPO_URL` currently says, since the clone step only runs when the
+`VAST_REPO_URL` currently says, since the clone step only runs when the
 directory is absent:
 
 ```bash
-python runpod/orchestrator.py run "rm -rf /workspace/Phantom"
-python runpod/orchestrator.py resume
+python vast/orchestrator.py run "rm -rf /workspace/Phantom"
+python vast/orchestrator.py resume
 ```
 
 The venv, models and templates live elsewhere on the volume, so that costs one
@@ -133,14 +99,14 @@ rather than discovering it inside a pull that cannot report.
 
 ### 🟡 A private repo would put a token on the network volume
 
-Not the current configuration — `RUNPOD_REPO_URL` carries no token and the
+Not the current configuration — `VAST_REPO_URL` carries no token and the
 repository is public — but it is the documented way to use a private one, so the
 cost is worth stating before someone reaches for it. `git clone` would write
 `https://<token>@github.com/...` into `.git/config` on the volume, which
 survives `terminate` and is readable by every future pod.
 
 **Why accepted:** it would sit inside the same trust boundary as the forwarded
-`RUNPOD_API_KEY` — anyone who can read it already has root on the pod.
+`VAST_API_KEY` — anyone who can read it already has root on the pod.
 
 **Closes when:** if the repo is ever made private, the token used is a
 fine-grained PAT scoped to that one repository with read-only contents access,
@@ -307,11 +273,21 @@ absence with the reason so it does not read as an oversight.
 
 ## Reading this list
 
-Two entries are 🔴 or would become so under load: **the unauthenticated
-WebSocket** is the one that must close before a paying customer, and **shared
-upload directories** become real the moment one pod serves more than one
-session. Everything else is either waiting on the pod session that will
-calibrate it, or genuinely small.
+**Shared upload directories** become real the moment one instance serves more
+than one session, and are now the largest thing here. Everything else is either
+waiting on the pod session that will calibrate it, or genuinely small.
+
+Two entries were deleted rather than demoted when the move to Vast closed them,
+which is what the rule below asks for. Recorded here only because their absence
+is otherwise indistinguishable from their never having been written:
+
+- **The unauthenticated WebSocket.** It was accepted partly because the RunPod
+  proxy URL was "unguessable in practice", and a bare IP and port is not — so
+  the move had to close it rather than inherit it. The server now requires a
+  token in the first frame and serves TLS with a pinned certificate.
+- **The unscoped API key on the pod.** RunPod keys were account-wide; Vast
+  supports scoped keys, so `VAST_SCOPED_API_KEY` carries one limited to
+  starting and stopping instances.
 
 When an entry closes, delete it rather than marking it done — this file is
 about what is *currently* accepted, and a list of resolved items buries the

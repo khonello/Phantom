@@ -6,7 +6,7 @@ regional redundancy, persistent storage, fault-tolerant execution.
 **Status: proposed. None of this is built.** The pipeline described in
 [ARCHITECTURE.md](ARCHITECTURE.md) is the execution layer this sits above; today
 it runs single-tenant on a pod provisioned by hand through
-`runpod/orchestrator.py`.
+`vast/orchestrator.py`.
 
 ## How to read this document
 
@@ -350,7 +350,7 @@ can never race a live session the way the current per-process timer does.
 > pipeline processes, each with its own config, event bus, port and client set —
 > isolated by construction. Three shared paths need session-scoping first:
 > `_UPLOAD_DIR`, the batch temp directories, and — most importantly —
-> `runpod.stop_pod()` in the auto-stop timer, since whichever process fires
+> the auto-stop timer's API call, since whichever process fires
 > first would kill the pod and every session on it. Pod lifecycle belongs to the
 > scheduler (§6), not the worker.
 >
@@ -541,9 +541,9 @@ with models and pipeline assets. Fallback is by region:
 Region A → no suitable GPU → Region B → GPU available → run session
 ```
 
-Already implemented in prototype form: `RUNPOD_DATACENTERS=DC1:vol1,DC2:vol2`
-pairs each datacenter with its volume, and `_resolve_gpu_candidates()` walks
-regions as the outer loop. That logic is the seed of the scheduler.
+Already implemented in prototype form: `VAST_GEOLOCATIONS` is a strict
+priority list of countries, and `_rank()` orders every offer by it before
+price. That logic is the seed of the scheduler.
 
 > **Annotation —** ensure every regional volume is genuinely pre-seeded.
 > Otherwise the fallback region is silently the slow path, and failover costs a
@@ -970,7 +970,7 @@ Region A                    Region B
 ```
 
 > **Annotation —** everything from `FACIAL PIPELINE` downward exists today. The
-> scheduler exists as a CLI prototype in `runpod/orchestrator.py`. Everything
+> scheduler exists as a CLI prototype in `vast/orchestrator.py`. Everything
 > else is new. See SESSION_PLANE.md for the mapping and the staged path.
 
 ---
@@ -1070,8 +1070,9 @@ with regional redundancy absorbing capacity problems, pooling absorbing normal
 demand, and the grace period absorbing short idle gaps.
 
 The consequence worth stating explicitly: this is **a small fault-tolerant
-compute orchestration layer over GPU providers**, in which RunPod is initially
-one execution backend. That abstraction is the point. If RunPod availability or
+compute orchestration layer over GPU providers**, in which Vast is currently
+one execution backend. That abstraction is the point — and it has already paid
+once, in the move off RunPod. If Vast availability or
 pricing becomes a problem later, another provider goes in behind the same
 scheduler rather than forcing a redesign.
 
@@ -1082,5 +1083,5 @@ scheduler rather than forcing a redesign.
 - [SESSION_PLANE.md](SESSION_PLANE.md) — assessment of this design, economics,
   gap analysis against the current code, and the staged migration path.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — the pipeline this orchestrates.
-- [../runpod/TROUBLESHOOTING.md](../runpod/TROUBLESHOOTING.md) — accumulated
-  RunPod API behaviour, much of which constrains what the scheduler can do.
+- [../vast/TROUBLESHOOTING.md](../vast/TROUBLESHOOTING.md) — accumulated
+  provider API behaviour, much of which constrains what the scheduler can do.

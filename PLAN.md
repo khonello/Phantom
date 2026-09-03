@@ -202,7 +202,7 @@ Resolution:
 ### Phase 4B — RunPod Cloud Deployment
 
 #### Task 4B.1 — Create RunPod deployment guide
-- Create `RUNPOD_DEPLOYMENT.md` with:
+- Create `VAST_DEPLOYMENT.md` with:
   - Step-by-step pod creation in RunPod UI
   - Network Volume setup for persistent model cache
   - Port 9000 exposure
@@ -210,7 +210,7 @@ Resolution:
   - Troubleshooting section
 
 #### Task 4B.2 — Create pod startup script
-- Create `runpod/startup.sh`:
+- Create `vast/startup.sh`:
   - Install FFmpeg
   - Check CUDA availability, log GPU name
   - Create `/workspace/models` if not present

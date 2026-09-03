@@ -194,7 +194,7 @@ environment runs everything**, and the failure is always the same
 | Environment | Runs | Needs |
 |---|---|---|
 | **Test / lint** (system or pyenv) | `pytest tests/`, `flake8`, `mypy` | `requirements-ci.txt` plus pytest, flake8, mypy |
-| **`environ-orchestrator/`** | `runpod/orchestrator.py`, `tools/sweep_levers.py`, `tools/stats.py`, `tools/realism.py` | `requirements-orchestrator.txt` |
+| **`environ-orchestrator/`** | `vast/orchestrator.py`, `tools/sweep_levers.py`, `tools/stats.py`, `tools/realism.py` | `requirements-orchestrator.txt` |
 | **Desktop venv** | `desktop.py`, `tools/build_desktop.py` | `requirements-desktop.txt` |
 
 Two things worth knowing before you copy the layout:
@@ -224,9 +224,9 @@ microphone.
 
 ## 2.1 On a rented pod
 
-`runpod/orchestrator.py start` provisions everything — CUDA image, venv,
+`vast/orchestrator.py start` provisions everything — CUDA image, venv,
 dependencies, model weights on the network volume. See
-[RUNPOD_DEPLOYMENT.md](../RUNPOD_DEPLOYMENT.md), which is the authority for that
+[VAST_DEPLOYMENT.md](../VAST_DEPLOYMENT.md), which is the authority for that
 side. You install nothing by hand.
 
 ## 2.2 On your own GPU machine
@@ -285,7 +285,7 @@ the output path, and copying it beside itself would be noise.
     the only check that shows video and audio together, the way a participant
     gets them
 9. Copy `.env` across — **it is gitignored**, so it does not arrive with a
-   `git clone`, and it holds the API key and `RUNPOD_POD_ID`
+   `git clone`, and it holds the API key and `VAST_INSTANCE_ID`
 
 For running the test suite as well, add `requirements-ci.txt` plus `pytest`,
 `flake8` and `mypy` — see 1.4 for why that is a separate environment.
@@ -299,7 +299,7 @@ For running the test suite as well, add `requirements-ci.txt` plus `pytest`,
 `.env` deserves its own warning on either machine: it is read by the
 orchestrator at **pod creation time only**, so editing it never affects a pod
 that already exists. On a running pipeline use `tools/realism.py`. See
-RUNPOD_DEPLOYMENT.md, "Changing settings on a pod that already exists".
+VAST_DEPLOYMENT.md, "Changing settings on a pod that already exists".
 
 ---
 

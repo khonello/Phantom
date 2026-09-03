@@ -26,7 +26,7 @@ nothing below it needs to change conceptually.
 it.**
 
 Roughly a third of what the proposal describes already exists, mostly inside
-`runpod/orchestrator.py` — GPU discovery filtered by VRAM, price and compute
+`vast/orchestrator.py` — GPU discovery filtered by VRAM, price and compute
 capability; multi-datacenter fallback with paired volumes; cheapest-first
 ordering; persistent model storage. That is a scheduler. It just runs once, from
 a laptop, for one session. Much of the work is to *relocate* that knowledge into
@@ -40,7 +40,7 @@ a service, not to invent it.
   process does not imply a healthy workload is exactly right — a CUDA call can
   hang while the worker happily answers pings.
 - **The provider abstraction.** Cheap to build now while there is one provider,
-  expensive to retrofit once scheduling logic has grown RunPod-shaped
+  expensive to retrofit once scheduling logic has grown provider-shaped
   assumptions.
 
 ### Needs correcting
@@ -189,7 +189,7 @@ from the pod back to the customer — and the same again inbound. Over a 24-hour
 ```
 
 At $0.05/GB this would still be the **second-largest cost line after the GPU**,
-about seven times the Lightning fee. RunPod is believed to include bandwidth on
+about seven times the Lightning fee. Vast bills bandwidth per host on
 pods, which is why it is modelled at zero — but that has not been verified, and
 it is the only cost here set to zero without evidence.
 
@@ -224,7 +224,7 @@ WARM SLOT        ├┬───────────────────
 ```
 
 > **Estimate, not a measurement.** The 90-second figure is assembled from the
-> steps in `runpod/startup.sh` — provisioning, `apt-get` for ffmpeg,
+> steps in `vast/startup.sh` — provisioning, `apt-get` for ffmpeg,
 > `git pull`, a conditional `pip install`, then parallel warm-up of four ONNX
 > models, two of which download on first use. It has never been timed end to
 > end. On a cold volume it is considerably worse. Measuring it is stage 1 for
@@ -282,7 +282,7 @@ live-shaped session.
 | Proposal component | Status | Where it lives today |
 |---|---|---|
 | Persistent storage / disposable GPU | **have** | Network volume; models resolve to `/workspace/models` before local paths |
-| Regional redundancy | **have** | `RUNPOD_DATACENTERS=DC1:vol1,DC2:vol2` with per-region volume pairing |
+| Regional redundancy | **have** | `VAST_GEOLOCATIONS` is a strict priority list of countries; the search falls through it |
 | GPU selection by cost and capability | **have** | `_discover_gpus()`, `_resolve_gpu_candidates()` — VRAM, price, compute-cap filters, cheapest first |
 | Session expiry / purchased time | partial | Auto-stop timer + `keep_alive` — protects *us* from billing overrun, not the customer's clock |
 | Worker readiness | partial | WebSocket `health` check, polled once at provision time |
@@ -301,7 +301,7 @@ live-shaped session.
            │                                  └──────────────────────┘
       Session manager       ◀── new
            │  state machine · billing clock
-      Scheduler             ◀── proto   runpod/orchestrator.py
+      Scheduler             ◀── proto   vast/orchestrator.py
            │  slots · regions · retries
       Worker supervisor     ◀── new
            │  heartbeat · lease · watchdog
@@ -361,7 +361,7 @@ filesystem or the same pod:
 |---|---|---|
 | `_UPLOAD_DIR = '/tmp/phantom_uploads'` | Two customers upload `face.jpg`; one overwrites the other | Scope by session id |
 | Batch temp dirs derived from the target filename | Same-named targets collide | Scope by session id |
-| Auto-stop calls `runpod.stop_pod()` (`api/server.py`) | Whichever process's timer fires first kills the pod **and every session on it** | Move pod lifecycle to the control plane; workers must not stop pods |
+| Auto-stop stops the instance from `api/server.py` | Whichever process's timer fires first kills the instance **and every session on it** | Move instance lifecycle to the control plane; workers must not stop instances |
 
 The third is architectural rather than a bug. In the target design the scheduler
 owns the GPU, so that code leaves the worker entirely.
@@ -395,7 +395,7 @@ What actually binds, in order:
 |---|---|---|
 | GPU compute | ~80 inferences/s | Four models per frame at 20 fps. Detection runs every frame and is the most expensive of the four. |
 | Host CPU | 0.26–1.14 cores | Compositing is pure OpenCV — measured at ~13 ms/frame at 256, ~38 ms for a close-up at 320. The GPU does not help with any of it. |
-| VRAM | ~1 GB, or a few MB | Two processes duplicate all four models, so ~1 GB per session. With the sharing refactor, a few MB. On the 16 GB+ cards `RUNPOD_MIN_VRAM` already selects, duplication is affordable for several sessions — compute and CPU still bind first. |
+| VRAM | ~1 GB, or a few MB | Two processes duplicate all four models, so ~1 GB per session. With the sharing refactor, a few MB. On the 16 GB+ cards `VAST_MIN_VRAM` already selects, duplication is affordable for several sessions — compute and CPU still bind first. |
 
 The CPU line is the one to watch, and the proposal does not mention CPU at all.
 A pod is rented with a fixed vCPU allocation attached to the GPU, and it is
@@ -685,7 +685,7 @@ Not control-plane work, but nothing above can be sold without it.
 *Ships: insurance against a single vendor's availability and pricing.*
 
 Define the provider interface — provision, status, terminate, list capacity —
-and move RunPod specifics behind it. Cheap now, because there is exactly one
+and move Vast specifics behind it. Cheap now, because there is exactly one
 implementation to conform to it and its shape is already visible in
 `orchestrator.py`.
 
@@ -697,7 +697,7 @@ Split in two, because the first half is nearly free:
 
 **7a — packing (small).** Run *N* pipeline processes per pod, isolated as they
 already are. Fix the three shared paths: session-scope `_UPLOAD_DIR`,
-session-scope batch temp dirs, and move `runpod.stop_pod()` out of the worker
+session-scope batch temp dirs, and move the auto-stop call out of the worker
 into the control plane. Enforce the measured `max_sessions` in slot accounting.
 
 **7b — shared models (larger, optional).** Remove the `CONFIG` and `BUS`

@@ -19,7 +19,7 @@ when it does not.
 
 ## Why `pip install -r requirements-pipeline-gpu.txt` is not enough
 
-That file was written for RunPod, where the base image already ships PyTorch
+That file was written for the rented instance, whose base image already ships PyTorch
 and CUDA. Three things it cannot express, each of which ends in a
 **working-looking install that silently runs on CPU** — which for this pipeline
 is seconds per frame rather than a live call.
@@ -185,7 +185,7 @@ part that has been hurting.
 
 ## Honest status
 
-`tools/setup_local_gpu.py` mirrors `runpod/startup.sh`, which is proven on a
+`tools/setup_local_gpu.py` mirrors `vast/startup.sh`, which is proven on a
 pod, but **the local install path has not been run against a real NVIDIA
 machine**. The verification half is safe to run anywhere and is what tells you
 whether it worked; `--dry-run` prints every command without executing it if you

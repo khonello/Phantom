@@ -105,7 +105,7 @@ On first run, Phantom automatically downloads its models:
   download** from https://github.com/TencentARC/GFPGAN/releases
 
 These are cached in `pipeline/models/` for subsequent runs (or
-`/workspace/models/` on RunPod, so they survive pod restarts).
+`/workspace/models/` on a rented instance, so they survive a container restart).
 
 The restoration and masking models are optional at runtime: if a download fails,
 masking falls back to landmark hull only and restoration falls back to the other

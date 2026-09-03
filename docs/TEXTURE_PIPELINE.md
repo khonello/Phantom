@@ -429,7 +429,7 @@ Do not put BiSeNet on the live path.
 ## 9. Performance, rewritten for this codebase
 
 **Every millisecond in this document was measured on a development laptop's CPU,
-and the thing that will run this is a RunPod GPU instance.** Read them as shape,
+and the thing that will run this is a rented GPU instance.** Read them as shape,
 not as magnitude.
 
 The reason they transfer at all is that **a GPU does not touch these stages**.
@@ -483,7 +483,7 @@ headroom, and that the non-GPU portion already scaled with the card (20ms on an
 L4, 10.3ms on a 4090) rather than being a fixed floor.
 
 What *is* now true and was not before: torch is on the pod — `pipeline/core.py`
-imports it unconditionally and the RunPod image supplies it — so the
+imports it unconditionally and the instance image supplies it — so the
 `affine_grid`/`grid_sample` route is a code change rather than a dependency one.
 The trigger to take it is the latency report showing compute as the largest term,
 which it does not.

@@ -128,7 +128,7 @@ cadence rather than replacing.
 
 ### "Would a better GPU make this unnecessary?"
 
-For the live path, no — and `runpod/orchestrator.py` already says so. `_GPU_PERF`
+For the live path, no — and `vast/orchestrator.py` already says so. `_GPU_PERF`
 ranks **RTX 4090 at 100, above H100/H200 at 95 and A100 at 70**, because (per
 commit 45ba27c) the workload is "one stream of small ONNX models, bound by
 latency rather than throughput: it rewards clocks and cache, and is indifferent
@@ -147,14 +147,14 @@ What no GPU changes at any price:
   become a *larger* fraction, so a faster GPU makes the missing IOBinding cost
   proportionally more, not less.
 - The WebSocket round trip. The desktop pushes webcam frames to the pod
-  (`bridge.py:2660`) and reads them back through RunPod's proxy. Tens of ms,
+  (`bridge.py:2660`) and reads them back over the network. Tens of ms,
   GPU-independent, and on a remote pod plausibly the largest single term.
 
 Amdahl sets the ceiling: at 60% inference, an infinitely fast GPU buys 2.5x.
 
 Two hardware moves that *are* real:
 
-1. **Verify what auto-discovery actually selects.** `RUNPOD_MAX_PRICE` defaults
+1. **Verify what auto-discovery actually selects.** `VAST_MAX_PRICE` defaults
    to $1.00/hr. Landing on an L4 (34), A4000 (32) or V100 (25) instead of a
    4090 (100) is a ~3x gap closable by one `.env` line — cheaper than any
    optimisation in this document. Run `orchestrator.py gpus` before writing code.
@@ -167,7 +167,7 @@ Two hardware moves that *are* real:
 deadline, and frames could genuinely be batched. There throughput binds and a
 bigger card earns its rate.
 
-**On cost efficiency rather than latency:** if the goal is the RunPod bill
+**On cost efficiency rather than latency:** if the goal is the GPU bill
 rather than the frame deadline, the levers are the same ones. A faster frame
 means either a cheaper GPU holds the preset, or a batch render finishes sooner.
 The existing GPU auto-discovery already picks on price against eligibility;
