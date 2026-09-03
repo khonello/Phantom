@@ -252,9 +252,10 @@ else
 fi
 
 # ── 5. Create or reuse /workspace/venv ────────────────────────────────────────
-# The venv lives on the network volume so it survives pod restarts and
-# new pod deployments. Packages are installed on first run, and re-synced
-# whenever requirements-pipeline-gpu.txt changes.
+# The venv lives on the instance disk, so it survives `stop`/`resume` but NOT
+# `terminate` — nothing is baked into an image, so this is the only copy.
+# Packages are installed on first run and re-synced whenever
+# requirements-pipeline-gpu.txt changes.
 echo ""
 echo "--- Python Venv ---"
 _phase "venv"
@@ -561,7 +562,17 @@ else
     # No hostname to bind to: the IP changes with the host and the desktop pins
     # the fingerprint rather than checking a name, so CN is decorative. -nodes
     # because the pipeline starts unattended and cannot answer a passphrase.
-    openssl req -x509 -newkey rsa:2048 -nodes         -keyout "${KEY_FILE}" -out "${CERT_FILE}"         -days 3650 -subj "/CN=phantom-pipeline" 2>/dev/null
+    # Errors are NOT sent to /dev/null. This script already learned that once:
+    # the cuDNN resolver hid a TypeError behind 2>/dev/null and turned it into a
+    # misleading warning. Here it would be worse — set -e aborts, the
+    # orchestrator reports "startup failed (exit 1)", and openssl's perfectly
+    # clear explanation is the thing that was thrown away.
+    openssl req -x509 -newkey rsa:2048 -nodes         -keyout "${KEY_FILE}" -out "${CERT_FILE}"         -days 3650 -subj "/CN=phantom-pipeline"
+    if [ ! -s "${CERT_FILE}" ] || [ ! -s "${KEY_FILE}" ]; then
+        echo "ERROR: openssl reported success but produced no certificate."
+        echo "       Refusing to continue: the pipeline would serve cleartext."
+        exit 1
+    fi
     chmod 600 "${KEY_FILE}"
 fi
 

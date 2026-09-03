@@ -967,6 +967,17 @@ def _setup_and_start(instance: Dict[str, Any], timer: Optional[BootTimer] = None
     """
     client = _connect_ssh(instance)
     try:
+        # Before anything else, because the clone below needs git and the base
+        # image does not ship it. startup.sh installs what the *pipeline*
+        # needs, but it arrives with the repo, so it cannot bootstrap the tools
+        # used to fetch the repo. Idempotent, and a no-op on a warm disk.
+        _ssh_run(
+            client,
+            "command -v git >/dev/null 2>&1 || { apt-get update -qq && "
+            "apt-get install -y -qq git ca-certificates; }",
+            "bootstrap",
+        )
+
         repo_url = os.getenv("VAST_REPO_URL")
         if repo_url:
             _ssh_run(

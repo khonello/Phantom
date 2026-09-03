@@ -17,6 +17,7 @@ Skipped when openssl is unavailable. CI has it; a developer machine might not,
 and a skipped integration test is better than a fake one.
 """
 
+import io
 import json
 import os
 import shutil
@@ -208,3 +209,144 @@ def test_plain_ws_cannot_reach_a_tls_server(live_server):
         with ws_connect(url, open_timeout=10, close_timeout=5) as ws:
             ws.send(json.dumps({'action': 'health', 'token': TOKEN}))
             ws.recv(timeout=10)
+
+
+# ── The startup.sh block that produces all of this ───────────────────────────
+
+def _tls_block():
+    """The TLS section of vast/startup.sh, as a runnable fragment."""
+    script = io.open(os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        'vast', 'startup.sh'), encoding='utf-8').read()
+    start = script.index('# \u2500\u2500 8b. TLS certificate and API token')
+    end = script.index('# \u2500\u2500 9. Summary')
+    # `_phase` belongs to the surrounding script's timing harness.
+    return 'set -euo pipefail\nWORKSPACE="$1"\n' + \
+        script[start:end].replace('_phase "tls"', ':')
+
+
+@pytest.mark.skipif(shutil.which('bash') is None, reason='bash not available')
+def test_the_startup_tls_block_is_idempotent(tmp_path):
+    """
+    Running it twice must reuse the certificate, not regenerate it.
+
+    This is the property that makes `resume` work at all. The certificate's
+    fingerprint is pinned in the operator's `.env`; regenerating it on every
+    boot would break the pin after every stop/start, and the desktop would
+    refuse the connection — which reads as an attack rather than as a restart.
+
+    Executed rather than argued, because "the `if [ -f ... ]` looks right" is
+    exactly what one would have said about the version that silently failed:
+    an `openssl` error was going to /dev/null, so the files were never created
+    and every run took the generate branch.
+    """
+    block = tmp_path / 'block.sh'
+    # newline='' so LF survives. write_text() would translate to CRLF on
+    # Windows, and bash then rejects the CR at the end of the first line as
+    # part of the option name -- the same way a CRLF startup.sh would fail
+    # on the instance.
+    with io.open(str(block), 'w', encoding='utf-8', newline='') as fh:
+        fh.write(_tls_block())
+
+    env = dict(os.environ)
+    # MSYS rewrites the POSIX -subj argument into a Windows path on Git Bash.
+    # A local-shell artefact, not a script bug — the pod is Linux.
+    env['MSYS_NO_PATHCONV'] = '1'
+
+    def run():
+        # Relative paths, run from inside tmp_path: MSYS_NO_PATHCONV stops
+        # Git Bash converting the -subj argument, but it stops it converting
+        # the script path too, and a Windows path reaches bash mangled.
+        done = subprocess.run(['bash', 'block.sh', '.'], cwd=str(tmp_path),
+                              capture_output=True, text=True, env=env)
+        assert done.returncode == 0, done.stdout + done.stderr
+        return done.stdout
+
+    first = run()
+    second = run()
+
+    def field(out, name):
+        for line in out.splitlines():
+            if line.startswith(name + ' '):
+                return line.split()[-1]
+        return None
+
+    assert 'Generating a self-signed certificate' in first
+    assert 'Reusing existing certificate' in second, \
+        'a second boot regenerated the certificate, which breaks the pin'
+
+    fp1, fp2 = field(first, 'CERT_FINGERPRINT'), field(second, 'CERT_FINGERPRINT')
+    tk1, tk2 = field(first, 'API_TOKEN'), field(second, 'API_TOKEN')
+
+    assert fp1 and len(fp1) == 64 and int(fp1, 16) >= 0, 'fingerprint is not 64 hex chars'
+    assert tk1 and len(tk1) == 64 and int(tk1, 16) >= 0, 'token is not 64 hex chars'
+    assert fp1 == fp2, 'the fingerprint changed between boots'
+    assert tk1 == tk2, 'the token changed between boots'
+
+
+@pytest.mark.skipif(shutil.which('bash') is None, reason='bash not available')
+def test_the_block_reports_a_fingerprint_the_server_actually_presents(tmp_path):
+    """
+    Close the loop: the value startup.sh prints is the value a TLS server built
+    from those same files hands to a client.
+
+    Both halves were verified separately — openssl produces a DER hash, and the
+    server serves the cert — but the thing that matters is that they are the
+    same number, because the orchestrator writes one and the desktop checks the
+    other.
+    """
+    block = tmp_path / 'block.sh'
+    # newline='' so LF survives. write_text() would translate to CRLF on
+    # Windows, and bash then rejects the CR at the end of the first line as
+    # part of the option name -- the same way a CRLF startup.sh would fail
+    # on the instance.
+    with io.open(str(block), 'w', encoding='utf-8', newline='') as fh:
+        fh.write(_tls_block())
+    env = dict(os.environ)
+    env['MSYS_NO_PATHCONV'] = '1'
+    out = subprocess.run(['bash', 'block.sh', '.'], cwd=str(tmp_path),
+                         capture_output=True, text=True, env=env)
+    assert out.returncode == 0, out.stdout + out.stderr
+
+    reported = None
+    for line in out.stdout.splitlines():
+        if line.startswith('CERT_FINGERPRINT '):
+            reported = line.split()[-1]
+
+    import hashlib
+    import ssl
+    cert = str(tmp_path / 'phantom-tls.pem')
+    key = str(tmp_path / 'phantom-tls.key')
+
+    server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_ctx.load_cert_chain(cert, key)
+
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(('127.0.0.1', 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+
+    import threading as _threading
+
+    def serve():
+        try:
+            conn, _ = listener.accept()
+            try:
+                server_ctx.wrap_socket(conn, server_side=True).close()
+            except OSError:
+                conn.close()
+        except OSError:
+            pass
+
+    _threading.Thread(target=serve, daemon=True).start()
+
+    probe = ssl.create_default_context()
+    probe.check_hostname = False
+    probe.verify_mode = ssl.CERT_NONE
+    with socket.create_connection(('127.0.0.1', port), timeout=10) as raw:
+        with probe.wrap_socket(raw, server_hostname='127.0.0.1') as tls:
+            der = tls.getpeercert(True)
+    listener.close()
+
+    assert hashlib.sha256(der).hexdigest() == reported
