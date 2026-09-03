@@ -41,30 +41,28 @@ should be built until a stream has been watched. The runbook is
 but guarded frames) and then the `REALISM` block, whose `detail_ratio` reading
 decides how much of the texture work was necessary at all.
 
-**2. Finish the performance audit.** [docs/PERFORMANCE_AUDIT.md](docs/PERFORMANCE_AUDIT.md)
-§3 is **done** — measured end to end at 0.74ms saved at `optimal` and 6.77ms at
+**2. Nothing else.** [docs/PERFORMANCE_AUDIT.md](docs/PERFORMANCE_AUDIT.md) §3 is
+**done** — measured end to end at 0.74ms saved at `optimal` and 6.77ms at
 `production`, and that is *net* of a correctness fix in §3.7 which cost ~3.3ms,
-so the optimisations themselves were worth about 11ms there.
+so the optimisations were worth about 11ms there.
 
-§4 and §5 are **not done**. §4 is worth **~1.3ms at `optimal` and ~4.6ms at
-`production`**, measured:
+**§4 is measured and closed.** It comes to 0.47ms at `fast`, ~1.3ms at `optimal`
+and ~4.6ms at `production` — against frame deadlines of 66.7, 50.0 and 33.3ms,
+so **0.7% and 2.6% of budget** on the two live presets, and at `production` it is
+4.6ms against a 16ms overrun, which does not fix it either. Revive it only if
+`production` becomes a live target.
 
-| | `optimal` | `production` |
-|---|---|---|
-| `real_lab` converted at half size (statistics only) | 0.63ms | 0.63ms |
-| region-of-interest padding 3σ → 2σ | ~0.6ms | ~3.5ms |
-| drop `frame.copy()` in `_paste` | 0.09ms | 0.48ms |
+One thing from that measurement is worth carrying: **`fast` is not cheaper than
+`optimal` in the compositor.** At a seated distance both clamp to the same
+aligned size — `_ALIGNED_MIN` is 128 and a 76px face and a 101px face are both
+under it — so smoothing, colour, detail and scatter do byte-identical work at
+either preset, and only the frame-space region differs (104px against 135px).
+What `fast` buys is uplink, a smaller detector input, and XSeg off. None of it is
+compositor work, which is also why the `fast` uplink test in §2.3b has a compute
+saving of only ~5-6ms to subtract.
 
-One correction to that document: the padding item is filed under "safe" and is
-not quite. At 2σ the feather's tail truncates at ~5% of peak rather than ~0.1%,
-so the mask does not fully reach zero at the region border. Probably invisible —
-but it is the seam again, and the seam is the thing footage just complained
-about. Judge it, do not assume it.
-
-**Do §4 after the pod run, not before.** At `optimal` it turns 7.8ms into 6.5ms
-of a 50ms budget, which changes nothing anyone can feel; at `production` it takes
-48.8ms to 44ms against a 33ms deadline, which does not fit either way. Neither is
-worth spending a session on ahead of the one measurement that is.
+§5 is the torch port and the video codec, both already decided and both gated on
+the pod's own report rather than on more local measurement.
 
 **Next actions live in [docs/PENDING_WORK.md](docs/PENDING_WORK.md)** — a runbook
 from starting the pod through to the outstanding implementation work.

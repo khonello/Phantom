@@ -162,12 +162,42 @@ the texture map four times the area. Correct before fast.
 
 ---
 
-## 4. Not acted on: safe, but not yet justified
+## 4. Not acted on, and now closed
 
-Each of these is real and none changes output. They are listed rather than done
-because together they are worth a few milliseconds at `production` and nothing at
-`optimal`, and `production` needs [§8](#8-the-gpu-question-answered-with-this-data)
-rather than a few milliseconds.
+Three real items, measured at every preset, and the measurement closes them.
+
+| | `fast` | `optimal` | `production` |
+|---|---|---|---|
+| `real` -> LAB at half size | 0.09ms | 0.63ms | 0.63ms |
+| region padding 3σ -> 2σ | 0.37ms | ~0.6ms | ~3.5ms |
+| drop `frame.copy()` | 0.01ms | 0.09ms | 0.48ms |
+| **total** | **0.47ms** | **~1.3ms** | **~4.6ms** |
+| **frame deadline** | **66.7ms** | **50.0ms** | **33.3ms** |
+| **share of budget** | **0.7%** | **2.6%** | — |
+
+At `fast` and `optimal` this is noise. At `production` it is 4.6ms against a
+16ms overrun, so it does not fix the one case that needs fixing either.
+
+**The reason `fast` is not cheaper than `optimal` is worth keeping.** At a normal
+seated distance both clamp to the *same* aligned size:
+
+    fast        ceiling 192, face  76px -> aligned 128
+    optimal     ceiling 256, face 101px -> aligned 128
+    production  ceiling 320, face 400px -> aligned 320
+
+`_ALIGNED_MIN` is 128 and both faces are under it, so the aligned-space work —
+smoothing, colour, detail, scatter — is byte-for-byte identical between the two
+presets. Only the frame-space region differs, 104px against 135px. **The
+compositor is not where `fast` and `optimal` differ at live face sizes.** What
+`fast` actually buys is uplink, a smaller detector input, and the XSeg pass
+turned off, and none of those is compositor work.
+
+**Revive this section if** `production` becomes a live target, or if the pod's
+CPU turns out far slower than the one these were taken on — in which case
+everything here scales together and the *share of budget* column, which is what
+decides it, stays where it is.
+
+### The items, for whoever revives them
 
 - **`_match_color` converts `real` to LAB at full size** and uses it for two
   things: masked mean/std, and a residual that `_match_illumination` immediately
