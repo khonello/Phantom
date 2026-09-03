@@ -79,7 +79,7 @@ def _resolve_model_path(model_name: str) -> str:
     """
     Resolve a model path.
 
-    Checks the RunPod Network Volume first so weights survive pod restarts,
+    Checks /workspace first so weights survive a container restart,
     then `pipeline/models/` where the swapper keeps its own.
 
     Args:

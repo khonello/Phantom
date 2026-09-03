@@ -364,18 +364,18 @@ class FaceSwapper:
         Resolve the model path, checking known locations in priority order.
 
         Priority:
-        1. RunPod Network Volume (/workspace/models/)
+        1. /workspace/models/ on the instance disk
         2. Relative to repo root (models/)
         3. Working directory fallback
 
         Returns:
             Full path to inswapper_128.onnx model
         """
-        # RunPod Network Volume (highest priority) — use if volume dir exists,
+        # /workspace/models (highest priority) — use if the directory exists,
         # even when the file hasn't been downloaded yet (pre_check will create it here)
-        runpod_model = '/workspace/models/inswapper_128.onnx'
+        workspace_model = '/workspace/models/inswapper_128.onnx'
         if os.path.isdir('/workspace/models'):
-            return runpod_model
+            return workspace_model
 
         # Relative to repo root (pipeline package lives one level down)
         pipeline_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

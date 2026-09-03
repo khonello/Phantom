@@ -7,7 +7,7 @@ import types
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 spec = importlib.util.spec_from_file_location(
-    'cudnn_path', os.path.join(_REPO, 'runpod', 'cudnn_path.py'))
+    'cudnn_path', os.path.join(_REPO, 'vast', 'cudnn_path.py'))
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 

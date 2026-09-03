@@ -8,7 +8,7 @@ reading. Every model that decides how the output looks is ONNX — the swapper,
 CodeFormer and XSeg — so that fallback is not a degradation, it is seconds per
 frame instead of a live call.
 
-It has already happened once (see runpod/TROUBLESHOOTING.md section 5b) and was
+It has already happened once (see vast/TROUBLESHOOTING.md section 5b) and was
 found by reading the Dockerfile, not by anything failing. Build-time checks now
 exist on both deploy paths, but they only cover the ways it went wrong before.
 This module asks the question the ways-not-yet-invented cannot dodge: once the
@@ -50,7 +50,7 @@ _LIKELY_CAUSE = {
     'CUDAExecutionProvider': (
         'libcudnn.so.9 is missing or not on the loader path. The Docker image '
         'installs nvidia-cudnn-cu12 and registers it with ldconfig; the SSH path '
-        'does the same in runpod/startup.sh step 6b'
+        'does the same in vast/startup.sh step 6b'
     ),
     'ROCMExecutionProvider': 'the ROCm runtime is not installed or not visible',
     'DmlExecutionProvider': 'the DirectML runtime is not available',

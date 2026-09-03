@@ -89,11 +89,16 @@ async def _run(args: argparse.Namespace) -> int:
     # helpers above are worth testing on a machine that has no
     # WebSocket client installed, and CI is one of them.
     import websockets
+    from pipeline_link import build, describe, opening_frame, warn_if_unprotected
 
-    url = 'ws://{}:{}/ws'.format(args.host, args.port)
-    print('connecting to {}'.format(url))
+    url, kwargs = build(args.host, args.port)
+    warn_if_unprotected(url)
+    print('connecting to {}'.format(describe(url)))
 
-    async with websockets.connect(url, open_timeout=20, max_size=None) as ws:
+    async with websockets.connect(url, open_timeout=20, **kwargs) as ws:
+        hello = opening_frame()
+        if hello:
+            await ws.send(hello)
 
         async def collect(action: str, timeout: float = 10.0) -> Optional[Dict[str, Any]]:
             """Read until the reply to `action` arrives, ignoring frames."""

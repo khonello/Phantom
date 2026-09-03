@@ -26,7 +26,7 @@ stream starts rather than when the process does, so `--input-url` sends
 
 Use the host and port `orchestrator.py push` prints. Port 9000 is exposed
 as tcp, so the pod has a public IP and a mapped port rather than a
-`proxy.runpod.net` hostname, and `--tls` does not apply to it.
+instance's own address. TLS and the API token are picked up from .env.
 
 Each configuration starts the stream, runs for `--seconds`, stops it, and
 captures the latency report the pipeline prints on stop. Order matters and is
@@ -179,18 +179,24 @@ async def _run(args: argparse.Namespace) -> int:
         print('websockets is required: pip install websockets', file=sys.stderr)
         return 1
 
-    scheme = 'wss' if args.tls else 'ws'
-    url = '{}://{}:{}/ws'.format(scheme, args.host, args.port)
-    if args.tls and args.port == 443:
-        url = 'wss://{}/ws'.format(args.host)
+    from pipeline_link import build, describe, opening_frame, warn_if_unprotected
+
+    # --tls forces the scheme; without it the presence of a pinned fingerprint
+    # decides, which is the case that matters: the orchestrator writes that
+    # fingerprint exactly when it has put the pipeline behind TLS.
+    url, connect_kwargs = build(args.host, args.port, tls=args.tls or None)
+    warn_if_unprotected(url)
 
     results: Dict[str, Any] = {'url': url, 'seconds': args.seconds, 'runs': {}}
     # The latency report is emitted around PIPELINE_STOPPED, so it can arrive
     # while waiting for that event rather than in the collect() after it.
     nonlocal_report: List[str] = []
 
-    print('Connecting to {}'.format(url))
-    async with websockets.connect(url, max_size=None) as socket:
+    print('Connecting to {}'.format(describe(url)))
+    async with websockets.connect(url, **connect_kwargs) as socket:
+        hello = opening_frame()
+        if hello:
+            await socket.send(hello)
 
         async def send(action: str, **payload: Any) -> Dict[str, Any]:
             """
@@ -448,7 +454,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument('--host', required=True, help='pipeline host')
     parser.add_argument('--port', type=int, default=9000, help='pipeline port')
-    parser.add_argument('--tls', action='store_true', help='use wss (RunPod proxy)')
+    parser.add_argument('--tls', action='store_true',
+                        help='force wss; otherwise a pinned fingerprint decides')
     parser.add_argument('--source', help='source face path on the pipeline filesystem')
     parser.add_argument('--input-url', dest='input_url',
                         help='clip path on the pipeline filesystem, as printed by '

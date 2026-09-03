@@ -324,7 +324,8 @@ def _api_key(required: bool = True) -> str:
     return key
 
 
-def _request(method: str, path: str, auth: bool = True, **kwargs: Any) -> Any:
+def _request(method: str, path: str, auth: bool = True,
+             raise_on_error: bool = False, **kwargs: Any) -> Any:
     """
     One call against the Vast REST API.
 
@@ -346,12 +347,37 @@ def _request(method: str, path: str, auth: bool = True, **kwargs: Any) -> Any:
         sys.exit(1)
 
     if resp.status_code >= 400:
+        if raise_on_error:
+            raise VastAPIError("HTTP {}: {}".format(resp.status_code, resp.text[:400]))
         print("ERROR: {} {} → HTTP {}: {}".format(method, path, resp.status_code, resp.text[:400]))
         sys.exit(1)
     try:
         return resp.json()
     except ValueError:
         return {}
+
+
+class VastAPIError(Exception):
+    """An API call that the caller wants to inspect rather than die on."""
+
+
+# Phrases Vast uses when a stopped instance's host has no GPU left for it.
+# Matched as substrings because the wording carries the machine's own numbers.
+#
+# A stopped instance keeps its host — that is what keeps its disk — so
+# resuming needs a GPU free on that specific machine. Someone else taking it
+# while you rested is an ordinary outcome rather than a fault, and it is the
+# one resume failure that a *new* instance actually fixes.
+_CAPACITY_MARKERS = (
+    "no gpu", "not enough", "unavailable", "insufficient",
+    "no longer available", "capacity", "already rented", "cannot start",
+)
+
+
+def _is_capacity_error(message: str) -> bool:
+    """Whether a resume failure means the host is full rather than broken."""
+    low = message.lower()
+    return any(marker in low for marker in _CAPACITY_MARKERS)
 
 
 def _search_offers(
@@ -399,6 +425,12 @@ def _search_offers(
         "direct_port_count": {"gte": min_ports},
         "compute_cap": {"lte": max_compute_cap},
         "disk_space": {"gte": disk},
+        # Every ONNX model here runs on CUDAExecutionProvider, so a card
+        # without it is not a slower option, it is no option. AMD's MI300X
+        # listed at $0.50/hr with 192GB on RunPod and passed every other
+        # filter, which a cheapest-first search reaches straight for: cheap and
+        # unusable is the worst combination on a rented GPU.
+        "gpu_arch": {"eq": "nvidia"},
         "order": [["dph_total", "asc"]],
     }
     if geolocations:
@@ -414,12 +446,47 @@ def _search_offers(
             "num_gpus": {"eq": 1}, "host_id": {"eq": host_id},
             "compute_cap": {"lte": max_compute_cap},
             "disk_space": {"gte": disk},
+            "gpu_arch": {"eq": "nvidia"},
             "order": [["dph_total", "asc"]],
         }
 
     resp = _request("POST", "/bundles/", auth=False, json=body)
-    offers = resp.get("offers") or []
-    return [o for o in offers if isinstance(o, dict)]
+    offers = [o for o in (resp.get("offers") or []) if isinstance(o, dict)]
+    return _rank(offers, geolocations)
+
+
+def _country(offer: Dict[str, Any]) -> str:
+    """
+    The country code out of a geolocation string like "United Kingdom, GB".
+
+    Vast returns the whole label; the filter matches the code. Reading the last
+    comma-separated token gives back the code the caller asked for.
+    """
+    label = str(offer.get("geolocation") or "")
+    return label.rsplit(",", 1)[-1].strip().upper()
+
+
+def _rank(offers: List[Dict[str, Any]], geolocations: List[str]) -> List[Dict[str, Any]]:
+    """
+    Order by how close the country is first, price second.
+
+    The API sorts on one field, and sorting on price alone was wrong for this
+    product: VAST_GEOLOCATIONS is documented as a priority order, and a French
+    host at $0.336 was beating a British one at $0.350 — three cents to give
+    back some of the round trip the whole migration exists to remove.
+
+    Note this is deliberately *not* fastest-first, which is what the RunPod
+    orchestrator did. There, ordering by speed was the only protection against
+    picking a weak card. Here `VAST_MIN_DLPERF` has already removed everything
+    below a 4090, so every remaining offer is fast enough and the ordering is
+    free to spend on the two things that still differ: distance, then money.
+    """
+    rank = {code: i for i, code in enumerate(geolocations)}
+    fallback = len(rank)
+    return sorted(
+        offers,
+        key=lambda o: (rank.get(_country(o), fallback), o.get("dph_total") or 0.0),
+    )
 
 
 def _describe_offer(offer: Dict[str, Any]) -> str:
@@ -1061,14 +1128,22 @@ def cmd_start() -> None:
 
 def cmd_resume(instance_id: str) -> None:
     """
-    Start a stopped instance.
+    Start a stopped instance, falling back to a new one if its host is full.
 
     A stopped instance keeps its disk but frees its GPU, so the host may have
     rented it out in the meantime. That is an ordinary outcome of resting
-    rather than a fault, and the only thing that helps is a different host —
-    which costs the warm disk, because nothing is baked into the image. Said
-    plainly rather than papered over, because it is the trade behind
-    "stop/start only" in docs/VAST_MIGRATION.md.
+    rather than a fault, and the only thing that helps is a different host.
+
+    The fallback is gated on the error actually being about capacity, and that
+    gate is the point: falling back on *any* resume failure would rent a
+    billing instance in response to a typo'd id or a rejected key.
+
+    It costs more here than it did on RunPod, and the difference is worth
+    stating. There, a new pod re-attached the network volume and came up warm.
+    Here nothing is baked into an image and the disk does not survive, so this
+    is a genuine cold start — venv, weights and all. That is the price of
+    "stop/start only" in docs/VAST_MIGRATION.md, and it is why
+    VAST_PREFERRED_HOST is worth setting.
     """
     _preflight_ssh_key()
     instance = _get_instance(instance_id)
@@ -1079,7 +1154,32 @@ def cmd_resume(instance_id: str) -> None:
     timer = BootTimer("Resume")
     timer.phase("resume")
     print("Starting instance {}...".format(instance_id))
-    _request("PUT", "/instances/{}/".format(instance_id), json={"state": "running"})
+    try:
+        _request("PUT", "/instances/{}/".format(instance_id),
+                 raise_on_error=True, json={"state": "running"})
+    except VastAPIError as exc:
+        if not _is_capacity_error(str(exc)):
+            print("ERROR: resume failed: {}".format(exc))
+            sys.exit(1)
+
+        print("Resume failed: {}".format(exc))
+        print("")
+        print("  A stopped instance stays on the host it was rented from, and")
+        print("  that host has no GPU free. Resume cannot move it; only a new")
+        print("  rental can be placed somewhere with capacity.")
+        print("")
+        print("  Falling back to `start`. Nothing is baked into an image, so")
+        print("  this is a COLD start: the venv and the model weights download")
+        print("  again. Expect minutes, not seconds.")
+        print("")
+        print("  Instance {} is left stopped and still billing for its".format(instance_id))
+        print("  disk. VAST_INSTANCE_ID is about to name the new one, so")
+        print("  `terminate` will no longer reach it — destroy it at")
+        print("  https://cloud.vast.ai/instances/ .")
+        print("")
+        cmd_start()
+        return
+
     _boot(instance_id, timer)
     timer.report()
 

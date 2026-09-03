@@ -10,8 +10,9 @@ Protocol:
   - Receive frames as binary: raw JPEG bytes
 
 Supports:
-  - PHANTOM_API_URL env var for remote/RunPod connections
-  - wss:// for secure connections
+  - PHANTOM_API_URL env var for remote connections
+  - wss:// with the instance's certificate pinned by PHANTOM_TLS_FINGERPRINT
+  - PHANTOM_API_TOKEN presented in the first frame, when the server wants one
   - 30-second connection timeout
   - Exponential backoff retry, indefinite; the delay is capped, not the count
   - expect_disconnect() to stop retrying when the pod was stopped on purpose
@@ -51,6 +52,65 @@ def _get_ws_url() -> str:
     if not url.startswith(('ws://', 'wss://')):
         url = f'ws://{url}/ws'
     return url
+
+
+def _pinned_ssl_context() -> Optional[Any]:
+    """
+    TLS context for a pipeline whose certificate we pin by fingerprint.
+
+    Hostname and CA verification are both off, and that is not a weakening —
+    it is the only shape available. The pipeline runs on a rented machine
+    reached by IP, and the IP changes with the host, so there is no name to
+    check and no CA that could vouch for it. What replaces both is stronger
+    than either: `_check_pin` compares the certificate's own SHA-256 against
+    the value the orchestrator recorded when it created the instance.
+
+    Returns None when no fingerprint is set, which leaves ordinary verification
+    in place — so a future deployment behind a real certificate keeps working
+    without a flag.
+    """
+    if not os.environ.get('PHANTOM_TLS_FINGERPRINT', '').strip():
+        return None
+    import ssl
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+def _check_pin(ws: Any) -> None:
+    """
+    Confirm the server presented the certificate we were told to expect.
+
+    Raises on mismatch, which sends the caller into its ordinary reconnect
+    path. That is the right outcome: a wrong certificate on this link means
+    either the instance was rebuilt — in which case `orchestrator.py start`
+    has a new fingerprint — or something is sitting in the middle of a video
+    call. Neither is a reason to carry on.
+    """
+    import hashlib
+    expected = os.environ.get('PHANTOM_TLS_FINGERPRINT', '').strip().lower()
+    if not expected:
+        return
+
+    sock = getattr(ws, 'socket', None)
+    getter = getattr(sock, 'getpeercert', None)
+    if getter is None:
+        raise RuntimeError(
+            'PHANTOM_TLS_FINGERPRINT is set but the connection is not TLS. '
+            'Check that PHANTOM_API_URL begins with wss://.'
+        )
+
+    der = getter(True)
+    if not der:
+        raise RuntimeError('server presented no certificate')
+
+    actual = hashlib.sha256(der).hexdigest()
+    if actual.lower() != expected:
+        raise RuntimeError(
+            'certificate fingerprint mismatch — expected {}..., got {}...'.format(
+                expected[:16], actual[:16])
+        )
 
 
 @dataclass
@@ -189,6 +249,11 @@ class PipelineClient:
         """Background thread: maintain WebSocket connection and receive messages."""
         from websockets.sync.client import connect as ws_connect
 
+        # Built once: the context is stateless and rebuilding it per attempt
+        # would re-read the environment on a reconnect loop that can run for
+        # hours.
+        _ssl = _pinned_ssl_context()
+
         retry_delay = 1.0
         # Caps the backoff exponent, not the number of attempts — the loop
         # below runs until stopped or until a disconnect we were told to
@@ -201,18 +266,28 @@ class PipelineClient:
                 with ws_connect(
                     self._ws_url,
                     # Short, because this is a *retry* loop and the timeout is
-                    # dead air. A pod that is still booting does not refuse the
-                    # connection — the RunPod proxy accepts it and holds — so
-                    # every attempt before the pipeline is listening costs the
-                    # full timeout, and the desktop can sit disconnected for
-                    # that long after the pipeline actually comes up. Ten
-                    # seconds is still ~28 round trips at the 350ms RTT this
-                    # deployment actually runs at.
+                    # dead air. An instance that is still booting may accept the
+                    # TCP connection and then hold — docker publishes the port
+                    # before the pipeline binds it — so every attempt before the
+                    # pipeline is listening costs the full timeout, and the
+                    # desktop can sit disconnected for that long after it
+                    # actually comes up.
                     open_timeout=10,
                     max_size=64 * 1024 * 1024,
                     ping_interval=30,
                     ping_timeout=120,  # generous timeout for high-latency / saturated links
+                    **({'ssl': _ssl} if _ssl is not None else {}),
                 ) as ws:
+                    # Both before the connection is announced. The pin decides
+                    # whether this is the pipeline at all, and the server drops
+                    # a client that does not present the token in its first
+                    # frame — so a socket that has done neither is not yet a
+                    # connection anyone should be told about.
+                    _check_pin(ws)
+                    token = os.environ.get('PHANTOM_API_TOKEN', '').strip()
+                    if token:
+                        ws.send(json.dumps({'action': 'health', 'token': token}))
+
                     with self._ws_lock:
                         self._ws = ws
                     self._set_connected(True)

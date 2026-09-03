@@ -197,7 +197,7 @@ def record(args: argparse.Namespace) -> int:
     print('Wrote {} — {} frames, {:.1f} MB'.format(out_path, frames, size_mb))
     print('')
     print('Next:')
-    print('  python runpod/orchestrator.py push {}'.format(os.path.basename(out_path)))
+    print('  python vast/orchestrator.py push {}'.format(os.path.basename(out_path)))
     print('  (push prints the sweep_levers command to run afterwards)')
     return 0
 

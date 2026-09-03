@@ -131,9 +131,17 @@ async def _run(args: argparse.Namespace) -> int:
     # helpers above are worth testing on a machine that has no
     # WebSocket client installed, and CI is one of them.
     import websockets
+    from pipeline_link import build, describe, opening_frame, warn_if_unprotected
 
-    url = 'ws://{}:{}/ws'.format(args.host, args.port)
-    async with websockets.connect(url, open_timeout=20, max_size=None) as ws:
+    url, kwargs = build(args.host, args.port)
+    warn_if_unprotected(url)
+    print('connecting to {}'.format(describe(url)))
+    async with websockets.connect(url, open_timeout=20, **kwargs) as ws:
+        # The token frame doubles as the readiness probe; the server dispatches
+        # it as an ordinary command once the credential checks out.
+        hello = opening_frame()
+        if hello:
+            await ws.send(hello)
         await ws.send(json.dumps({'action': 'get_stats'}))
 
         loop = asyncio.get_event_loop()
