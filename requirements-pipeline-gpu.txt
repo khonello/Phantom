@@ -26,7 +26,7 @@ opencv-contrib-python>=4.8.0
 # after onnxruntime-gpu below. Both write the same `onnxruntime/` directory,
 # so the CPU build silently replaces the GPU one and CUDAExecutionProvider
 # disappears. This file cannot express "resolve that dependency to the GPU
-# build" - runpod/startup.sh removes the CPU wheel afterwards and verifies
+# build" - vast/startup.sh removes the CPU wheel afterwards and verifies
 # the provider is back.
 insightface>=0.7.3
 onnxruntime-gpu>=1.15.0; sys_platform != 'darwin'

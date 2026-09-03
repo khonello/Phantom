@@ -2,7 +2,7 @@
 """
 Print the directory holding the cuDNN shared libraries, or exit non-zero.
 
-Used by both deploy paths — the Docker build and runpod/startup.sh — to point
+Used by vast/startup.sh to point
 the dynamic linker at the cuDNN that `nvidia-cudnn-cu12` installs into
 site-packages. onnxruntime-gpu needs `libcudnn.so.9` on the loader path;
 without it every ONNX model falls back to CPU, silently.

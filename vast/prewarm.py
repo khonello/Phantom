@@ -2,7 +2,7 @@
 Pre-warm every model the pipeline needs, so none of them download or
 initialise on the first frame of a paid session.
 
-Run by runpod/startup.sh. Each model is independent: one failing must not
+Run by vast/startup.sh. Each model is independent: one failing must not
 stop the others, because a missing optional model degrades the pipeline
 while a missing required one is worth knowing about before a customer waits.
 
