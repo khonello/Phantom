@@ -674,6 +674,15 @@ GPU work can reach.
   (provision / setup / pip / model load), labelled warm or empty volume
 - **Latency budget**: reported per preset when a stream stops — p50/p95/p99 per
   stage against the frame deadline, with a HOLDS/MISSES verdict
+- **Realism readings**: reported beside it under a `REALISM` scope.
+  `detail_ratio` is the correction `_match_detail` *wanted* before its clamp,
+  with the share of frames that hit it — the only way to see a clamped quantity,
+  since percentiles of the clamped value cannot exceed the clamp. **This is the
+  reading that decides how much of the texture work was necessary**: if 1.6 binds
+  on most frames, part of the 0.42 face/frame detail gap is the clamp rather than
+  the swap, and raising a constant is the cheapest lever in the project.
+  `texture_headroom` and `texture_confidence` say whether the texture layer had
+  anything to spend and whether pose let it spend it
 - **Guard calibration**: `python pipeline.py --stream --guard-observe --guard-report r.json`
 - **Realism**: `python pipeline.py --stream --debug-frames clip/` then
   `python tools/compare_frames.py clip/ [--against clip2/]`
@@ -1147,17 +1156,24 @@ when the answer was "no headroom, add nothing".
 
 Two things it deliberately does **not** do, both recorded rather than forgotten:
 
-- **It does not correct pose.** Canonical space is a similarity transform, so
-  composing source->canonical->target has identical error to source->target in
-  one step. What canonical space buys is that extraction runs *once* — the
-  caching, not the accuracy. An angled source yields a foreshortened map, which
-  is why selection scores frontality and why the confidence mask (not built) has
-  to fall off with pose distance.
-- **It does not remove texture swimming.** The map's content is fixed, so there
-  is no content flicker; but fixed content warped by a per-frame affine slides
-  across the face as the head turns, and that is caused by *correct* landmark
-  motion rather than by noise, so `LandmarkStabilizer` does not address it. Low
-  strength is the mitigation until the confidence mask exists.
+- **It does not correct pose — it withdraws instead.** Canonical space is a
+  similarity transform, so composing source->canonical->target has identical
+  error to source->target in one step. What canonical space buys is that
+  extraction runs *once* — the caching, not the accuracy. An angled source
+  yields a foreshortened map, so `_pose_confidence` scales the layer down from
+  full at 12° of disagreement with the source photograph to nothing at 45°.
+  Magnitude only: the directional term (it is the cheek turning *away* whose
+  pores stretch) needs `face.pose`'s sign convention pinned against footage
+  first, and applied backwards it would attenuate the good half of the face. A
+  pack without `pose` gets **full** confidence, never zero — a capability gap
+  must not become a silent behaviour change.
+- **It does not remove texture swimming**, but pose confidence is the one lever
+  against it that is not "turn the strength down". The map's content is fixed, so
+  there is no content flicker; but fixed content warped by a per-frame affine
+  slides across the face as the head turns, and that is caused by *correct*
+  landmark motion rather than by noise, so `LandmarkStabilizer` does not address
+  it. Swimming is worst where the pose has moved furthest from the source, which
+  is exactly where the confidence term takes the detail away.
 
 ### Realism knobs (`FaceSwapConfig`)
 | Field | Default | Effect |
@@ -1842,6 +1858,7 @@ back to the other backend or off — rather than failing.
 - `pipeline/services/face_tracking.py`: `LandmarkStabilizer` EMA on kps/106 landmarks, resets on identity change
 - `pipeline/services/database.py`: `FaceDatabase` embedding cache, averaging, `review_sources`
 - `pipeline/services/guards.py`: Source and runtime input guards, threshold validation
+- `pipeline/services/readings.py`: `Readings` — per-frame realism scalars, reported as distributions when a stream stops
 
 ### Processing Pipeline
 - `pipeline/processing/pipeline.py`: `ProcessingPipeline` orchestrator (batch & stream modes)

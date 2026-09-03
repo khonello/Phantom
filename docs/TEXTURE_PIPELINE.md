@@ -4,7 +4,8 @@ Assessment of the proposed texture pipeline: reintroducing real, identity-specif
 skin detail into the swapped face rather than accepting what restoration leaves
 behind.
 
-**Status: phases A0, A (bar A3) and B1-B2 of §11 are built and unjudged.** Selection, extraction and the
+**Status: phases A0, A (bar A3) and B of §11 are built and unjudged, and C2's
+instrumentation is in place waiting for a run.** Selection, extraction and the
 frame-space blend ship behind `texture_strength`, which defaults to **0**.
 Nothing here has been looked at on footage.
 
@@ -598,8 +599,39 @@ Worth recording as verified rather than assumed: a detail field that stopped
 over 1.4px would be a seam made of pores, landing exactly on the boundary A2
 just fixed.
 
-**B3. Confidence mask.** Yaw distance from the source pose, plus XSeg coverage.
-Also the only real mitigation for texture swimming (§4.3) short of low strength.
+**B3. Confidence mask.** **Done**, as `FaceCompositor._pose_confidence` — with
+one half deliberately left out.
+
+Yaw distance from the source pose scales the layer: full strength while the
+frame is within `_POSE_FULL` (12°) of the photograph the map came from, falling
+to nothing by `_POSE_LIMIT` (45°). Ramped rather than switched, because a head
+does not sit still and a texture layer appearing and vanishing is more visible
+than one that is slightly wrong. This is also the only mitigation for swimming
+that is not "turn the strength down": swimming is worst exactly where the pose
+has moved furthest from the source, so a term falling off with pose distance
+removes the detail at the moment it would start to crawl.
+
+**XSeg coverage needed no new code.** The occlusion mask is already multiplied
+into the compositing alpha by `FaceMasker`, and `_add_texture` already multiplies
+by that alpha, so texture never lands on a hand or a microphone. Recorded as
+verified rather than assumed.
+
+**The directional half is not built, on purpose.** At yaw it is the cheek
+turning *away* whose pores are stretched, so the correct term falls off across
+the face rather than uniformly. Building it needs the sign convention of
+`face.pose` pinned against real footage, and a directional term applied with the
+sign backwards would attenuate the half of the face that is still good — worse
+than not having it. The uniform version is the conservative form of the same
+idea, and the sign is one frame of a debug capture away.
+
+A capability note that is easy to get wrong the other way: a model pack without
+`pose` returns **full** confidence, not none. Silently attenuating to zero there
+would turn "we cannot measure the angle" into "the layer does nothing", which is
+a behaviour change hiding inside a capability gap.
+
+`texture_confidence` is published to the realism readings, because a layer doing
+nothing because every frame is off-pose looks identical to one whose strength is
+set too low.
 
 ### Phase C — judge it
 
@@ -607,10 +639,27 @@ Also the only real mitigation for texture swimming (§4.3) short of low strength
 `compare_frames.py` (once A1 has made its seam metric trustworthy) and a person
 looking at a face — the metric will not see swimming.
 
-**C2. The `_DETAIL_RATIO` clamp reading**, which was §10 item 1 and has still not
-been taken. Log the pre-clamp ratio over a real clip. If 1.6 binds routinely,
-part of the 0.42 gap is the existing stage not being allowed to correct far
-enough, and raising a constant is a cheaper lever than any of this.
+**C2. The `_DETAIL_RATIO` clamp reading**, which was §10 item 1. **The
+instrumentation is built; the run has not happened.**
+
+`pipeline/services/readings.py` accumulates per-frame scalars and reports
+distributions when a stream stops, beside the latency budget under a `REALISM`
+scope. `FaceCompositor.last_detail_ratio` publishes the correction
+`_match_detail` *wanted*, before its clamp — which is the only way to see this,
+since percentiles of the clamped value cannot exceed the clamp. The report says
+what share of frames sat at the limit and names the next action rather than
+printing a number nobody can interpret:
+
+- clamped on **>50%** of frames: part of the 0.42 detail gap is the clamp rather
+  than the swap. Raise `_DETAIL_RATIO` and re-measure **before building anything
+  else** — it is a one-constant change and a cheaper lever than this whole
+  document.
+- clamped on **<5%**: the high band holds nothing more to amplify, and the case
+  for extracting real detail is made outright.
+
+`texture_headroom` and `texture_confidence` ride the same mechanism, so one
+stream answers whether the texture layer had anything to spend and whether pose
+let it spend it.
 
 ### Phase D — pose
 
@@ -672,6 +721,10 @@ Carried from the proposal, with two added.
   remaining cost is the warp and the multiply-add over the face's area, which is
   inherent rather than reducible by sampling.
 - ~~**Added: overshoot is unbounded**~~ — closed by B1.
+- **Added: the pose confidence has no direction**, only magnitude, so a frame
+  turned away from the source is attenuated uniformly rather than across the
+  cheek that is actually stretched. Conservative, and it costs some good detail
+  on the near side of an off-pose frame.
 - **Added: the seam knobs are two more interacting parameters**, on top of the
   three §12 already warned about. `mask_feather` and `mask_erode` pull against
   each other by construction — erode moves the transition in, feather spreads it

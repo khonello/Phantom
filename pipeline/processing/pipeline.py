@@ -60,6 +60,7 @@ from pipeline.services import execution
 from pipeline.services.latency import LatencyBudget
 
 from pipeline.processing.compositor import FaceCompositor
+from pipeline.services.readings import Readings
 from pipeline.processing.frame_processor import (
     DetectionProcessor,
     SwappingProcessor,
@@ -149,6 +150,12 @@ class ProcessingPipeline:
         self._guard_starved = 0
         self._telemetry = guards.GuardTelemetry()
         self._latency = LatencyBudget()
+        # Realism diagnostics, reported beside the latency budget when a stream
+        # stops. Separate from it deliberately: one asks whether the preset
+        # holds, the other asks whether a limit is binding, and folding a ratio
+        # into a structure judged against a millisecond deadline would make
+        # both harder to read.
+        self._readings = Readings()
 
         # Set by WebSocketAPIServer to enable push mode: desktop sends JPEG
         # frames via WebSocket instead of the pipeline capturing a local device.
@@ -518,6 +525,7 @@ class ProcessingPipeline:
         # lives on the pipeline, which outlives any one stream, so without
         # this every measurement is diluted by every measurement before it.
         self._latency.reset()
+        self._readings.reset()
         self._build_processors()
         self._warm_up_models()
         emit_status('Stream pipeline started', scope='PIPELINE')
@@ -718,6 +726,7 @@ class ProcessingPipeline:
 
         emit_status(self._telemetry.format_report(self.config), scope='GUARD')
         emit_status(self._latency.format_report(self.config), scope='PERF')
+        emit_status(self._readings.format_report(), scope='REALISM')
 
         path = self.config.guard_report
         if path and self._telemetry.write(path, self.config):
@@ -886,6 +895,7 @@ class ProcessingPipeline:
         # stages it names did not run.
         stages = self._compositor.last_stage_ms if self._compositor else None
         self._latency.record(detect_ms, swap_ms, total_ms, dict(stages) if stages else None)
+        self._record_readings()
 
         if self.config.log_level != 'debug' or seq % self._TIMING_INTERVAL:
             return
@@ -894,6 +904,32 @@ class ProcessingPipeline:
             'seq=%d detect=%.0fms swap+composite=%.0fms total=%.0fms',
             seq, detect_ms, swap_ms, total_ms,
         )
+
+    def _record_readings(self) -> None:
+        """
+        Collect the compositor's realism readings for this frame.
+
+        Only what the compositor actually computed: a guarded frame, or one
+        where a stage declined to run, leaves its reading as None and
+        contributes nothing rather than contributing a zero. A zero would be a
+        claim about that frame, and the frame has no such reading.
+        """
+        if self._compositor is None:
+            return
+
+        ratio = self._compositor.last_detail_ratio
+        if ratio is not None:
+            self._readings.record(
+                'detail_ratio', ratio, limit=self._compositor._DETAIL_RATIO[1],
+            )
+
+        headroom = self._compositor.last_texture_headroom
+        if headroom is not None:
+            self._readings.record('texture_headroom', headroom)
+
+        confidence = self._compositor.last_texture_confidence
+        if confidence is not None:
+            self._readings.record('texture_confidence', confidence)
 
     @staticmethod
     def _unpack_timestamped_frame(

@@ -168,6 +168,25 @@ class FaceCompositor:
     # 4% of it is under two pixels has no transition to speak of otherwise.
     _FEATHER_FLOOR = 2.0
 
+    # Pose agreement between the source photograph and the frame, in degrees of
+    # yaw. Below the first the map is used at full strength; above the second it
+    # is not used at all.
+    #
+    # This is the term that answers a real limitation rather than a hypothetical
+    # one. Canonical space is a *similarity* transform, so it does not correct
+    # pose at any strength — a source shot at an angle yields a map whose pores
+    # are foreshortened on one cheek, and warping it onto a target at a
+    # different angle stretches that error rather than removing it. The only
+    # honest responses are to attenuate, which is this, or to fit in 3D, which
+    # is docs/TEXTURE_PIPELINE.md phase D.
+    #
+    # It is also the one lever against texture swimming that is not "turn the
+    # strength down": swimming is worst exactly where the pose has moved
+    # furthest from the source, so a term that falls off with pose distance
+    # takes the detail away at the moment it would start to crawl.
+    _POSE_FULL = 12.0
+    _POSE_LIMIT = 45.0
+
     # Edge of the window the headroom statistics are taken over. A standard
     # deviation converges on a few thousand pixels, so measuring every pixel of
     # a large face buys nothing and costs everything: at a 500px region the full
@@ -227,6 +246,21 @@ class FaceCompositor:
         # zero means detail matching has already taken the face to the target's
         # texture level and the texture layer has nothing left to add.
         self.last_texture_headroom: Optional[float] = None
+
+        # The correction `_match_detail` *wanted* on the last frame, before its
+        # clamp, or None when the stage did not run. This is the reading that
+        # decides how much of the texture work was necessary: if the clamp is
+        # binding, part of the face/frame detail gap is the stage not being
+        # allowed to correct far enough, and raising a constant is a cheaper
+        # lever than any of it. Percentiles of the *clamped* value cannot answer
+        # that, because they cannot exceed the clamp.
+        self.last_detail_ratio: Optional[float] = None
+
+        # Pose agreement on the last frame, in [0, 1], or None when it could not
+        # be measured. Published for the same reason as the others: a texture
+        # layer that quietly does nothing because every frame is off-pose looks
+        # identical to one whose strength is set too low.
+        self.last_texture_confidence: Optional[float] = None
 
         # Per-stage milliseconds for the frame just composited, read by the
         # pipeline's latency budget. Same pattern as `masker.last_coverage`:
@@ -869,6 +903,8 @@ class FaceCompositor:
         necessary here: the swap is softer than the frame before enhancement
         and sharper after it.
         """
+        self.last_detail_ratio = None
+
         binary = (mask > 0.5).astype(np.uint8)
         if cv2.countNonZero(binary) < 64:
             return fake
@@ -897,7 +933,9 @@ class FaceCompositor:
         if fake_energy < 1e-3:
             return fake
 
-        ratio = float(np.clip(real_energy / fake_energy, *self._DETAIL_RATIO))
+        wanted = real_energy / fake_energy
+        self.last_detail_ratio = float(wanted)
+        ratio = float(np.clip(wanted, *self._DETAIL_RATIO))
 
         # fake_low + (fake - fake_low) * ratio, rearranged so it is one fused
         # pass rather than a multiply and an add over separate temporaries.
@@ -1062,11 +1100,14 @@ class FaceCompositor:
         lens, under the right light, which is a better statement of "what skin
         looks like here" than anything the background could offer.
 
-        Two masks apply and both are needed. The skin mask is baked into the map
-        at extraction, keeping detail off eyes, nostrils and mouth. The
-        compositing alpha is applied here, keeping it inside the swap — and
-        because that alpha is the feathered one, texture fades out exactly where
-        the swap does rather than stopping at a hard edge of its own.
+        Three things gate it, and none of them is new machinery. The skin mask is
+        baked into the map at extraction, keeping detail off eyes, nostrils and
+        mouth. The compositing alpha is applied here, keeping it inside the swap
+        — and because that alpha is the feathered one, and already carries the
+        XSeg occlusion term the masker applied, texture fades out exactly where
+        the swap does and never lands on a hand or a microphone. Pose agreement
+        scales the whole thing, because the map is only as good as the angle it
+        was taken at matches the angle it is being used at.
 
         Args:
             blended: The composited ROI, float32
@@ -1084,9 +1125,15 @@ class FaceCompositor:
             shipped before it existed.
         """
         self.last_texture_headroom = None
+        self.last_texture_confidence = None
 
         strength = float(np.clip(getattr(self.config, 'texture_strength', 0.0), 0.0, 1.0))
         if strength <= 0.0 or self.source_texture is None:
+            return blended
+
+        confidence = self._pose_confidence(face)
+        self.last_texture_confidence = confidence
+        if confidence <= 0.0:
             return blended
 
         started = time.perf_counter()
@@ -1120,13 +1167,71 @@ class FaceCompositor:
         # `TEXTURE_MAX` as a backstop rather than as the control: the measurement
         # is what sets the level, and the constant only catches an estimate that
         # has gone wrong — a busy background inside the ROI, say.
-        amount = min(strength * headroom, texture.TEXTURE_MAX)
+        amount = min(strength * headroom * confidence, texture.TEXTURE_MAX)
         result: Frame = blended + (warped * amount)[:, :, None] * mask[:, :, None]
 
         # Contained within the `paste` bucket rather than added to it — the frame
         # total does not change, this just says how much of paste it was.
         self.last_stage_ms['texture'] = (time.perf_counter() - started) * 1000.0
         return result
+
+    def _pose_confidence(self, face: Face) -> float:
+        """
+        How far the frame's pose agrees with the source photograph's, in [0, 1].
+
+        Ramped rather than thresholded, for the reason every other ramp in this
+        module exists: a switch would snap on and off between frames as a head
+        drifts across the boundary, and a texture layer appearing and vanishing
+        is more visible than one that is slightly wrong.
+
+        **A missing reading means full confidence, not none.** A model pack
+        without `pose` cannot answer this, and silently attenuating to zero
+        there would turn "we cannot measure the angle" into "the layer does
+        nothing", which is a behaviour change hiding inside a capability gap.
+        `guards.probe_capabilities` already reports that pack difference at
+        startup; this must not also encode it.
+
+        Only the *magnitude* of the disagreement is used. The direction matters
+        too — at yaw it is the cheek turning away whose pores are stretched, so
+        the correct term falls off across the face rather than uniformly — but
+        that needs the sign convention of `face.pose` pinned against real
+        footage, and a directional term applied with the sign backwards would
+        attenuate the half of the face that is still good. Uniform is the
+        conservative version of the same idea; see docs/TEXTURE_PIPELINE.md.
+
+        Args:
+            face: Detection for this frame
+
+        Returns:
+            1.0 when the poses agree or cannot be compared, falling to 0.0 as
+            the disagreement reaches `_POSE_LIMIT`.
+        """
+        assert self.source_texture is not None
+        source_yaw = self.source_texture.yaw
+        if source_yaw is None:
+            return 1.0
+
+        pose = getattr(face, 'pose', None)
+        if pose is None:
+            return 1.0
+        try:
+            values = np.asarray(pose, dtype=np.float64).ravel()
+        except (TypeError, ValueError):
+            return 1.0
+        if values.size < 2 or not np.isfinite(values[1]):
+            return 1.0
+
+        # InsightFace orders this (pitch, yaw, roll) — the same field and index
+        # `guards.measure_yaw` prefers, so the two cannot disagree about what
+        # the number means.
+        delta = abs(float(values[1]) - source_yaw)
+        if delta <= self._POSE_FULL:
+            return 1.0
+
+        span = self._POSE_LIMIT - self._POSE_FULL
+        if span <= 1e-6:
+            return 0.0
+        return float(np.clip(1.0 - (delta - self._POSE_FULL) / span, 0.0, 1.0))
 
     def _texture_headroom(
         self,

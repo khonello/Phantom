@@ -51,6 +51,7 @@ import numpy as np
 from pipeline.config import FaceSwapConfig
 from pipeline.processing import texture
 from pipeline.services.masking import FaceMasker
+from pipeline.services.readings import Readings
 from pipeline.processing.geometry import (
     ALIGNED_STEPS,
     DETAIL_SIGMA,
@@ -441,6 +442,128 @@ check('the weights sum to one',
       abs(sum(__import__('pipeline.services.database', fromlist=['x'])
               ._TEXTURE_WEIGHTS.values()) - 1.0) < 1e-9)
 
+
+# ── Pose confidence ────────────────────────────────────────────────────
+print('\nPose confidence')
+
+
+def posed(yaw):
+    """A target face at a given yaw, everything else identical."""
+    f = make_face(x=150.0, y=150.0, size=100.0)
+    f.pose = np.array([0.0, yaw, 0.0], dtype=np.float32)
+    return f
+
+
+compositor.source_texture = extracted
+extracted.yaw = 0.0
+
+check('a matched pose is full confidence',
+      compositor._pose_confidence(posed(0.0)) == 1.0)
+check('a small disagreement is still full confidence',
+      compositor._pose_confidence(posed(10.0)) == 1.0,
+      'a head does not sit still; attenuating at every twitch would flicker')
+check('confidence falls as the poses diverge',
+      1.0 > compositor._pose_confidence(posed(25.0))
+      > compositor._pose_confidence(posed(38.0)) > 0.0,
+      '{:.2f} at 25 deg, {:.2f} at 38'.format(
+          compositor._pose_confidence(posed(25.0)),
+          compositor._pose_confidence(posed(38.0))))
+check('past the limit the map is not used at all',
+      compositor._pose_confidence(posed(60.0)) == 0.0,
+      'a source shot frontally says nothing about a profile')
+check('the sign of the disagreement does not matter',
+      compositor._pose_confidence(posed(30.0))
+      == compositor._pose_confidence(posed(-30.0)),
+      'only the magnitude is used — the directional term needs footage first')
+
+extracted.yaw = 20.0
+check('confidence is measured against the source, not against frontal',
+      compositor._pose_confidence(posed(20.0)) == 1.0,
+      'an angled source is fine for an equally angled frame')
+
+# Capability gaps must not silently become behaviour changes.
+extracted.yaw = None
+check('an unmeasurable source pose means full confidence, not none',
+      compositor._pose_confidence(posed(80.0)) == 1.0)
+extracted.yaw = 0.0
+check('an unmeasurable frame pose means full confidence, not none',
+      compositor._pose_confidence(make_face(150.0, 150.0, 100.0)) == 1.0,
+      'a pack without `pose` would otherwise disable the layer in silence')
+
+# And it actually gates the composite.
+config.grain = False
+config.texture_strength = 0.8
+off_pose = compositor._add_texture(
+    swap.copy(), real, alpha, posed(70.0), 100.0, ROI) - swap
+check('an off-pose frame gets no texture',
+      not np.any(off_pose),
+      'confidence {:.2f}'.format(compositor.last_texture_confidence or 0.0))
+check('confidence is published for the readings',
+      compositor.last_texture_confidence == 0.0)
+
+on_pose = compositor._add_texture(
+    swap.copy(), real, alpha, posed(0.0), 100.0, ROI) - swap
+check('a matched frame gets the full amount',
+      float(np.abs(on_pose).max()) > 0.5)
+half = compositor._add_texture(
+    swap.copy(), real, alpha, posed(28.5), 100.0, ROI) - swap
+check('a partly-disagreeing pose gets a partial amount',
+      0.0 < float(half[:, :, 0].std()) < float(on_pose[:, :, 0].std()),
+      'confidence scales the amount rather than switching it')
+
+# ── Readings ───────────────────────────────────────────────────────────
+print('\nReadings')
+
+readings = Readings()
+for value in (1.2, 1.4, 1.6, 1.6, 1.6):
+    readings.record('detail_ratio', value, limit=1.6)
+report = readings.report()['detail_ratio']
+
+check('a clamped reading reports what share reached the limit',
+      report['share_at_limit'] == 0.6, str(report['share_at_limit']))
+check('the unclamped value is what is recorded',
+      report['max'] == 1.6 and report['n'] == 5)
+check('the verdict says to raise the clamp when it binds',
+      any('CLAMPED' in n for n in readings.format_report().split('\n')),
+      'the whole point of the reading is that it names the next action')
+
+loose = Readings()
+for value in (0.9, 1.0, 1.1):
+    loose.record('detail_ratio', value, limit=1.6)
+check('a clamp that never binds says so instead',
+      'not clamp-bound' in loose.format_report(),
+      'which is the case for adding real detail rather than amplifying')
+
+empty = Readings()
+check('nothing recorded is not an error', 'none recorded' in empty.format_report())
+check('reset drops everything', (readings.reset() or readings.report()) == {})
+
+pinned = Readings()
+pinned.record('texture_headroom', 0.0)
+check('no headroom is called out, not left as a number',
+      'nothing to spend' in pinned.format_report(),
+      'a layer with no headroom looks exactly like one set too low')
+
+# ── The detail-ratio reading is real, not synthetic ────────────────────
+print('\nDetail ratio')
+
+compositor.last_detail_ratio = None
+sharp = rng.normal(128, 20, (128, 128, 3)).astype(np.float32)
+flat = cv2.GaussianBlur(sharp, (0, 0), 3.0)
+full = np.ones((128, 128), dtype=np.float32)
+compositor._match_detail(flat.astype(np.uint8), sharp.astype(np.uint8), full)
+check('the pre-clamp ratio is published, not the clamped one',
+      (compositor.last_detail_ratio or 0.0) > FaceCompositor._DETAIL_RATIO[1],
+      'wanted {:.2f} against a clamp of {:.2f} — a percentile of the clamped '
+      'value could never show this'.format(
+          compositor.last_detail_ratio or 0.0, FaceCompositor._DETAIL_RATIO[1]))
+
+compositor.last_detail_ratio = None
+compositor._match_detail(sharp.astype(np.uint8), sharp.astype(np.uint8),
+                         np.zeros((128, 128), dtype=np.float32))
+check('a stage that did not run records nothing',
+      compositor.last_detail_ratio is None,
+      'a zero would be a claim about a frame that has no reading')
 
 # ── Mask erode ─────────────────────────────────────────────────────────
 print('\nMask erode')
