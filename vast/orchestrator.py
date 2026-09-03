@@ -92,6 +92,10 @@ _SSH_CMD_TIMEOUT = 1800  # seconds for any single remote command (pip is slow)
 
 _PIPELINE_PORT = 9000
 
+# startup.sh reports the API token on its own line so the orchestrator can
+# read it out of the transcript. That line must never be printed.
+_TOKEN_LINE_RE = re.compile(r"(API_TOKEN\s+)\S+")
+
 # Remote paths. Vast images use /workspace like RunPod's did, which is why the
 # pipeline's own path handling needed no change at all.
 _REMOTE_PHANTOM_DIR = "/workspace/Phantom"
@@ -271,7 +275,12 @@ def _update_env_key(key: str, value: str) -> None:
     replacement = "{}={}".format(key, value)
 
     if re.search(pattern, text, re.MULTILINE):
-        new_text = re.sub(pattern, replacement, text, flags=re.MULTILINE)
+        # A lambda, so the value is inserted literally. A plain replacement
+        # string is interpreted: a value containing a backslash escape raises
+        # "invalid group reference" and takes the whole call down. That call
+        # runs *after* an instance is rented and running, so the failure would
+        # strand a billing machine with its address never written to .env.
+        new_text = re.sub(pattern, lambda _m: replacement, text, flags=re.MULTILINE)
     else:
         new_text = text.rstrip() + "\n{}\n".format(replacement)
 
@@ -351,10 +360,26 @@ def _request(method: str, path: str, auth: bool = True,
             raise VastAPIError("HTTP {}: {}".format(resp.status_code, resp.text[:400]))
         print("ERROR: {} {} → HTTP {}: {}".format(method, path, resp.status_code, resp.text[:400]))
         sys.exit(1)
+
     try:
-        return resp.json()
+        payload = resp.json()
     except ValueError:
         return {}
+
+    # Vast answers state changes with a SimpleBooleanSuccessResponse, so a
+    # refusal can arrive as HTTP 200 carrying {"success": false, "msg": ...}.
+    # Checking only the status code read that as success — which matters most
+    # in `resume`, where the capacity fallback exists precisely to notice a
+    # refusal, and would instead have gone on to boot an instance that never
+    # started.
+    if isinstance(payload, dict) and payload.get("success") is False:
+        detail = payload.get("msg") or payload.get("error") or resp.text[:300]
+        if raise_on_error:
+            raise VastAPIError("{} {}: {}".format(method, path, detail))
+        print("ERROR: {} {} refused: {}".format(method, path, detail))
+        sys.exit(1)
+
+    return payload
 
 
 class VastAPIError(Exception):
@@ -396,9 +421,11 @@ def _search_offers(
     """
     Ask Vast what is rentable, filtered server-side.
 
-    Search is the one endpoint that does not need a key, but we send one anyway
-    so a bad key fails here rather than three calls later with an instance
-    half-created.
+    This is the one endpoint that answers without a key, which is what lets
+    `offers` run from a clean checkout with no account. A key is still sent
+    when one is configured, but do not read that as validation: search does not
+    reject a bad key, so the first thing that actually checks it is whatever
+    call comes next.
 
     Two format traps, both of which return zero offers rather than an error, so
     neither announces itself:
@@ -629,16 +656,15 @@ def _wait_for_tcp(host: str, port: int, timeout: int, label: str) -> None:
     sys.exit(1)
 
 
-def _wait_for_pipeline(ws_address: str, fingerprint: Optional[str], token: Optional[str]) -> None:
+def _wait_for_pipeline(ws_address: str, context: Any, token: Optional[str]) -> None:
     """
     Poll the pipeline with a real WebSocket health check.
 
-    Over TLS, and the certificate is self-signed, so verification is off and
-    the fingerprint is what is actually checked — see `_ssl_context`. A plain
-    TCP connect would prove only that docker published a port, which it does
-    before the pipeline has loaded a single model.
+    `context` already pins the certificate, so by the time the token is sent
+    the peer has been proven. A plain TCP connect would prove only that docker
+    published a port, which it does before the pipeline has loaded a model.
     """
-    scheme = "wss" if fingerprint else "ws"
+    scheme = "wss" if context is not None else "ws"
     ws_url = "{}://{}/ws".format(scheme, ws_address)
 
     print("\nWaiting for pipeline at {} (up to {}s)...".format(ws_url, _PIPELINE_TIMEOUT))
@@ -656,8 +682,8 @@ def _wait_for_pipeline(ws_address: str, fingerprint: Optional[str], token: Optio
 
         try:
             kwargs: Dict[str, Any] = {"open_timeout": 5, "close_timeout": 2}
-            if fingerprint:
-                kwargs["ssl"] = _ssl_context()
+            if context is not None:
+                kwargs["ssl"] = context
             with connect(ws_url, **kwargs) as ws:
                 hello: Dict[str, Any] = {"action": "health"}
                 if token:
@@ -674,6 +700,17 @@ def _wait_for_pipeline(ws_address: str, fingerprint: Optional[str], token: Optio
                         print("  Unexpected health response: {}".format(reply))
                         break
         except Exception as exc:
+            # 1008 is the server refusing the credential, which no amount of
+            # waiting fixes. Retrying it for three minutes and then reporting a
+            # timeout describes a slow boot, which is the wrong problem.
+            if "1008" in str(exc) or "unauthorized" in str(exc).lower():
+                print("ERROR: the pipeline refused our token.")
+                print("  startup.sh reported one and the pipeline was launched")
+                print("  with it, so they have diverged — most likely an older")
+                print("  pipeline process survived `pkill` and is still holding")
+                print("  the port. Check with:")
+                print("    python vast/orchestrator.py run \"pgrep -af pipeline.py\"")
+                sys.exit(1)
             print("  Not ready: {}".format(exc))
             time.sleep(_POLL_INTERVAL)
 
@@ -682,49 +719,76 @@ def _wait_for_pipeline(ws_address: str, fingerprint: Optional[str], token: Optio
     sys.exit(1)
 
 
-def _ssl_context() -> Any:
+def _pinned_context(host: str, port: int, expected: str, deadline: float) -> Any:
     """
-    A TLS context that trusts the pinned fingerprint and nothing else.
+    A TLS context that will complete a handshake with one certificate and no
+    other, built by fetching that certificate and checking its fingerprint.
 
-    Hostname and CA checks are both off, deliberately: the certificate is
-    self-signed on an IP that changes with the host, so neither could pass and
-    turning them on would only mean turning verification off somewhere less
-    visible. The fingerprint is the check. `websockets` does not expose the
-    peer certificate before the handshake completes, so the pin is enforced by
-    connecting and comparing — see `_verify_fingerprint`.
+    The earlier version connected with verification off and checked the
+    fingerprint *afterwards*, in `_boot`, one call later. Two things were wrong
+    with that and only the second is obvious:
+
+      - **The token went first.** `_wait_for_pipeline` sends
+        `{"action": "health", "token": ...}` to prove the pipeline is up, so the
+        credential reached a peer whose certificate had not been checked yet.
+        Same shape as the server bug where a client joined the broadcast set
+        before authenticating: the ordering *is* the property.
+      - **A mismatch only warned.** It then wrote the fingerprint to `.env` and
+        printed "Done".
+
+    Loading the certificate as its own trust anchor makes the handshake do the
+    enforcing, so nothing can be sent to the wrong peer even by mistake. It is
+    the same approach `tools/pipeline_link.py` uses, for the same reason.
+
+    Retries until `deadline`, because docker publishes the port before the
+    pipeline binds it, so the first connections are refused as a matter of
+    course rather than as a fault.
     """
     import ssl
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
 
+    probe = ssl.create_default_context()
+    probe.check_hostname = False
+    probe.verify_mode = ssl.CERT_NONE
 
-def _verify_fingerprint(host: str, port: int, expected: str) -> bool:
-    """
-    Confirm the instance presents the certificate we recorded.
+    der = None
+    last = ""
+    while time.time() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=10) as raw:
+                with probe.wrap_socket(raw, server_hostname=host) as tls:
+                    der = tls.getpeercert(True)
+            if der:
+                break
+        except Exception as exc:
+            last = str(exc)
+            time.sleep(_POLL_INTERVAL)
 
-    Checked once, at the end of `start`, rather than on every connection: this
-    is the orchestrator, and the desktop does its own pin on every connect. The
-    value here is catching a mismatch while the operator is still looking at a
-    terminal, instead of at a call that will not connect.
-    """
-    import hashlib
-    import ssl
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    try:
-        with socket.create_connection((host, port), timeout=10) as raw:
-            with ctx.wrap_socket(raw, server_hostname=host) as tls:
-                der = tls.getpeercert(binary_form=True)
-    except Exception as exc:
-        print("  WARNING: could not read the certificate: {}".format(exc))
-        return False
     if not der:
-        return False
+        print("ERROR: no TLS certificate from {}:{} ({}).".format(host, port, last))
+        print("  The pipeline may not have started. Read the log:")
+        print("    python vast/orchestrator.py logs")
+        sys.exit(1)
+
+    import hashlib
     actual = hashlib.sha256(der).hexdigest()
-    return actual.lower() == expected.strip().lower()
+    if actual.lower() != expected.strip().lower():
+        print("ERROR: certificate fingerprint mismatch at {}:{}".format(host, port))
+        print("  expected {}...".format(expected[:16]))
+        print("  got      {}...".format(actual[:16]))
+        print("")
+        print("  startup.sh generates the certificate once and reuses it, so")
+        print("  this means something regenerated it after it was read, or")
+        print("  something is answering on that address that is not the")
+        print("  pipeline. Refusing to continue: writing this to .env would")
+        print("  hand the desktop a pin it cannot satisfy, and the token has")
+        print("  deliberately not been sent.")
+        sys.exit(1)
+
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_REQUIRED
+    context.load_verify_locations(cadata=ssl.DER_cert_to_PEM_cert(der))
+    return context
 
 
 # ── SSH ───────────────────────────────────────────────────────────────────────
@@ -809,9 +873,38 @@ def _connect_ssh(instance: Dict[str, Any]) -> Any:
     raise AssertionError("unreachable")
 
 
-def _ssh_run(client: Any, command: str, label: str, check: bool = True) -> str:
+def _redact(text: str, secrets: Optional[List[str]] = None) -> str:
+    """
+    Blank out anything that must not reach a terminal, a log or a screen share.
+
+    Two credentials travel through `_ssh_run`:
+
+      - `startup.sh` prints `API_TOKEN <hex>` for the orchestrator to read out
+        of the transcript, and that transcript is streamed to stdout.
+      - The launch command carries `PHANTOM_API_TOKEN` and a Vast API key —
+        the **account-wide** one whenever VAST_SCOPED_API_KEY is unset.
+
+    Both were printed in full. `_update_env_key` already masked them on the way
+    into `.env`, which shows the intent; it just did not cover the louder path.
+
+    Redaction is by value where the value is known, so a secret is hidden
+    wherever it appears rather than only in the shape it was expected in. The
+    token is also matched by pattern, because the first time it appears is the
+    line we are reading it from and it is not yet known.
+    """
+    for secret in (secrets or []):
+        if secret and len(secret) >= 8:
+            text = text.replace(secret, "<redacted>")
+    return _TOKEN_LINE_RE.sub(r"\1<redacted>", text)
+
+
+def _ssh_run(client: Any, command: str, label: str, check: bool = True,
+             secrets: Optional[List[str]] = None) -> str:
     """
     Run one command over SSH, streaming its output, and return the transcript.
+
+    The **returned** transcript is unredacted — the caller parses the token out
+    of it. Only what is printed is masked.
 
     This is `exec_command`, which is worth a note because the RunPod
     orchestrator could not use it: its proxy accepted the call and silently ran
@@ -819,7 +912,7 @@ def _ssh_run(client: Any, command: str, label: str, check: bool = True) -> str:
     a sentinel echo to recover the exit code. `ssh_direct` is a real sshd, so
     the exit status is just there.
     """
-    print("\n[{}] $ {}".format(label, command))
+    print("\n[{}] $ {}".format(label, _redact(command, secrets)))
     stdin, stdout, stderr = client.exec_command(command, timeout=_SSH_CMD_TIMEOUT, get_pty=False)
     stdin.close()
 
@@ -830,14 +923,14 @@ def _ssh_run(client: Any, command: str, label: str, check: bool = True) -> str:
         line = raw.rstrip("\n")
         chunks.append(raw)
         if line.strip():
-            sys.stdout.write("  " + line + "\n")
+            sys.stdout.write("  " + _redact(line, secrets) + "\n")
             sys.stdout.flush()
 
     exit_code = channel.recv_exit_status()
     err = stderr.read().decode("utf-8", errors="replace").strip()
     if err:
         for line in err.splitlines():
-            sys.stdout.write("  " + line + "\n")
+            sys.stdout.write("  " + _redact(line, secrets) + "\n")
         chunks.append(err)
 
     if check and exit_code != 0:
@@ -911,6 +1004,18 @@ def _setup_and_start(instance: Dict[str, Any], timer: Optional[BootTimer] = None
             print("  not meaningfully better than cleartext. Refusing to continue.")
             sys.exit(1)
 
+        if not token:
+            # An empty token is not "no token" to the server — it is
+            # authentication *disabled*, because that is how a local pipeline
+            # stays usable without one. On a public IP that is an open socket
+            # anyone who finds the port can start a stream on, and it would
+            # look exactly like a working deploy.
+            print("ERROR: startup.sh did not report an API token.")
+            print("  An empty PHANTOM_API_TOKEN disables authentication rather")
+            print("  than refusing connections, so this would deploy an open")
+            print("  WebSocket on a public IP and report success.")
+            sys.exit(1)
+
         _ssh_run(client, "pkill -f 'python.*pipeline.py' 2>/dev/null || true",
                  "kill-old-pipeline", check=False)
 
@@ -942,7 +1047,8 @@ def _setup_and_start(instance: Dict[str, Any], timer: Optional[BootTimer] = None
             pipeline=_REMOTE_PIPELINE,
             log=_PIPELINE_LOG,
         )
-        _ssh_run(client, launch, "pipeline-start")
+        _ssh_run(client, launch, "pipeline-start",
+                 secrets=[token, os.getenv("VAST_SCOPED_API_KEY") or "", _api_key()])
         print("\n  Pipeline started (log: {}).".format(_PIPELINE_LOG))
         print("  Read it with:  python vast/orchestrator.py logs")
         return fingerprint, token
@@ -1091,16 +1197,16 @@ def _boot(instance_id: str, timer: Optional[BootTimer] = None) -> None:
 
     if timer:
         timer.phase("pipeline-ready")
-    _wait_for_pipeline(ws_address, fingerprint, token)
 
+    # Pin first, then speak. Building the context proves the certificate before
+    # a single byte of credential leaves this machine, and exits rather than
+    # warning if it does not match.
     host, port_str = ws_address.rsplit(":", 1)
-    if _verify_fingerprint(host, int(port_str), fingerprint):
-        print("  Certificate matches the recorded fingerprint.")
-    else:
-        print("  WARNING: the certificate does not match what startup.sh reported.")
-        print("  The desktop will refuse this connection, which is the correct")
-        print("  behaviour — but it means something re-generated the cert after")
-        print("  it was read. Re-run `start`, and do not disable the pin.")
+    context = _pinned_context(host, int(port_str), fingerprint,
+                              time.time() + _PIPELINE_TIMEOUT)
+    print("  Certificate matches the recorded fingerprint.")
+
+    _wait_for_pipeline(ws_address, context, token)
 
     _update_env_key("PHANTOM_API_URL", "wss://{}/ws".format(ws_address))
     _update_env_key("PHANTOM_TLS_FINGERPRINT", fingerprint)

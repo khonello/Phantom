@@ -264,3 +264,125 @@ def test_ssh_prefers_the_direct_mapping_over_the_proxy():
 def test_ssh_falls_back_to_the_proxy_when_there_is_no_direct_port():
     instance = {'ssh_host': 'ssh123.vast.ai', 'ssh_port': 10600}
     assert orch._ssh_target(instance) == ('ssh123.vast.ai', 10600)
+
+
+# ── Secrets must not reach a terminal ────────────────────────────────────────
+# Two credentials travel through `_ssh_run` and both were printed in full:
+# startup.sh reports `API_TOKEN <hex>` on stdout for the orchestrator to parse,
+# and the launch command carries PHANTOM_API_TOKEN plus a Vast API key — the
+# account-wide one whenever VAST_SCOPED_API_KEY is unset. `_update_env_key`
+# already masked them on the way into .env, which is what made the louder path
+# an oversight rather than a decision.
+
+TOKEN = 'deadbeef' * 8
+
+
+def test_a_known_secret_is_masked_by_value():
+    out = orch._redact('export PHANTOM_API_TOKEN={};'.format(TOKEN), [TOKEN])
+    assert TOKEN not in out and '<redacted>' in out
+
+
+def test_the_token_line_is_masked_before_its_value_is_known():
+    """
+    The first time the token appears is the line we are reading it from, so
+    redaction by value cannot help there. That line is matched by shape.
+    """
+    assert TOKEN not in orch._redact('API_TOKEN {}'.format(TOKEN))
+
+
+def test_an_api_key_on_the_launch_command_is_masked():
+    key = 'vast-' + 'a' * 40
+    launch = "export VAST_API_KEY='{}'; nohup python pipeline.py &".format(key)
+    assert key not in orch._redact(launch, [key])
+
+
+def test_redaction_leaves_ordinary_output_alone():
+    """
+    Short values are skipped: redacting every occurrence of a three-letter
+    string would blank most of a deploy transcript.
+    """
+    assert orch._redact('the cat sat on the mat', ['cat']) == 'the cat sat on the mat'
+
+
+def test_redaction_survives_an_empty_secret_list():
+    assert orch._redact('nothing to hide') == 'nothing to hide'
+    assert orch._redact('nothing to hide', []) == 'nothing to hide'
+
+
+# ── Shell quoting ────────────────────────────────────────────────────────────
+
+def test_values_are_quoted_against_the_shell():
+    assert orch._shell_quote('a b; rm -rf /') == "'a b; rm -rf /'"
+    # Raw strings on both sides. In a POSIX shell a single quote inside
+    # single quotes is close, escaped-quote, reopen. Without r"" Python eats
+    # the backslash and the expectation quietly becomes a different string —
+    # which is how this test first failed against a correct function.
+    assert orch._shell_quote("it's") == r"'it'\''s'"
+
+
+# ── Writing .env cannot crash on the value it is given ───────────────────────
+
+def test_env_write_treats_the_value_as_literal(tmp_path, monkeypatch):
+    """
+    `re.sub` interprets its replacement, so a value containing a backslash
+    escape raised "invalid group reference" and took the call down.
+
+    That call runs *after* an instance is rented and running, so the crash
+    would strand a billing machine with its address never written to .env —
+    which is the expensive way to find out.
+    """
+    env = tmp_path / '.env'
+    env.write_text('PHANTOM_API_URL=ws://localhost:9000/ws\nOTHER=1\n')
+    monkeypatch.setattr(orch, '_ENV_PATH', env)
+
+    for value in (r'x\g<0>y\1z', 'wss://1.2.3.4:33526/ws', 'a1b2' * 16):
+        orch._update_env_key('PHANTOM_API_URL', value)
+        line = [ln for ln in env.read_text().splitlines()
+                if ln.startswith('PHANTOM_API_URL=')]
+        assert line == ['PHANTOM_API_URL=' + value]
+
+    # The rest of the file is left alone, and a new key is appended.
+    orch._update_env_key('BRAND_NEW', 'x')
+    text = env.read_text()
+    assert 'OTHER=1' in text and 'BRAND_NEW=x' in text
+
+
+# ── The API contract, as documented ──────────────────────────────────────────
+
+def test_a_200_carrying_success_false_is_a_failure(monkeypatch):
+    """
+    Vast answers state changes with a boolean envelope, so a refusal can arrive
+    as HTTP 200 with {"success": false}. Checking only the status code read
+    that as success — worst in `resume`, whose capacity fallback exists
+    precisely to notice a refusal and would instead have booted an instance
+    that never started.
+    """
+    class Resp:
+        status_code = 200
+        text = '{"success": false, "msg": "no gpus available"}'
+
+        @staticmethod
+        def json():
+            return {'success': False, 'msg': 'no gpus available'}
+
+    monkeypatch.setattr(orch.requests, 'request', lambda *a, **k: Resp())
+    monkeypatch.setenv('VAST_API_KEY', 'k')
+
+    with pytest.raises(orch.VastAPIError) as caught:
+        orch._request('PUT', '/instances/1/', raise_on_error=True, json={'state': 'running'})
+    assert orch._is_capacity_error(str(caught.value)), \
+        'the message must still reach the capacity gate, or resume cannot fall back'
+
+
+def test_a_200_carrying_success_true_is_returned(monkeypatch):
+    class Resp:
+        status_code = 200
+        text = '{"success": true}'
+
+        @staticmethod
+        def json():
+            return {'success': True, 'new_contract': 42}
+
+    monkeypatch.setattr(orch.requests, 'request', lambda *a, **k: Resp())
+    monkeypatch.setenv('VAST_API_KEY', 'k')
+    assert orch._request('PUT', '/asks/1/', json={})['new_contract'] == 42
