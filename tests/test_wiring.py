@@ -687,8 +687,8 @@ check('the dot is part of the match',
 for ext in ('.gif', '.heic', '.mp4', '.txt'):
     check('%s is refused' % ext, not ff_helpers.has_image_extension('x' + ext))
 
-# The list is a claim about what OpenCV can decode, and nothing was checking
-# it. `.gif` is excluded on exactly this basis, so the basis is worth proving.
+# The list is a claim about what OpenCV can decode on any build, and nothing
+# was checking it. See the gif case below for why that wording matters.
 import numpy as _np  # noqa: E402
 import cv2 as _cv2  # noqa: E402
 import tempfile as _tempfile  # noqa: E402
@@ -702,19 +702,35 @@ for _ext in ff_helpers.IMAGE_EXTENSIONS:
     _back = _cv2.imread(_path) if _wrote else None
     check('OpenCV round-trips %s' % _ext,
           _back is not None and _back.shape == _probe.shape,
-          'the list claims these are readable; .gif is excluded for failing this')
+          'the list is a claim about what OpenCV decodes on every build')
 
-# Hex rather than an escaped byte literal: this is the smallest valid GIF,
-# and the point is that OpenCV refuses a *well-formed* one.
+# GIF is the interesting case, and the reason it stays off the list has
+# changed. It used to be "OpenCV cannot read one". OpenCV 4.13 can, and older
+# builds cannot — so support now depends on which wheel is installed.
+#
+# That is a stronger reason to exclude it, not a weaker one. It is exactly the
+# bug `IMAGE_EXTENSIONS` was made a fixed tuple to kill: `.webp` resolved on
+# one machine and not the next, while the picker offered it either way, so
+# selecting one did nothing at all with no message. A format whose support
+# varies by environment must not be on a list that has to mean the same thing
+# everywhere.
+#
+# Hex rather than an escaped byte literal: this is the smallest valid GIF, so
+# whatever OpenCV does with it, it is not failing on a malformed file.
 _gif = _os.path.join(_work, 'x.gif')
 with open(_gif, 'wb') as _fh:
     _fh.write(bytes.fromhex(
         '47494638396101000100800000000000ffffff21f90401000000002c0000'
         '0000010001000002024401003b'
     ))
-check('and still cannot read a gif, which is why it is not on the list',
-      _cv2.imread(_gif) is None,
-      'if this ever passes, gif can be added rather than refused')
+_reads_gif = _cv2.imread(_gif) is not None
+print('     (this OpenCV {} {} read a gif)'.format(
+    _cv2.__version__, 'CAN' if _reads_gif else 'cannot'))
+check('gif is excluded regardless of what this OpenCV can decode',
+      '.gif' not in ff_helpers.IMAGE_EXTENSIONS
+      and not ff_helpers.has_image_extension('x.gif'),
+      'support varies by OpenCV build, which is the webp bug that made this '
+      'list a fixed tuple in the first place')
 
 check('both file dialogs offer the same list',
       bridge_photo_src.count('_IMAGE_FILTER') >= 3

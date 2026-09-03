@@ -36,6 +36,7 @@ the library, not the one listed first.
 import glob
 import os
 import sys
+from typing import List
 
 # What onnxruntime-gpu dlopens. Only used to choose between roots.
 _SONAME = 'libcudnn.so.9'
@@ -51,7 +52,7 @@ def cudnn_lib_dir() -> str:
     Raises:
         RuntimeError: if the package is missing or has no lib directory
     """
-    roots = []
+    roots: List[str] = []
 
     try:
         import nvidia.cudnn
@@ -76,8 +77,10 @@ def cudnn_lib_dir() -> str:
         if os.path.isdir(candidate):
             roots.append(candidate)
 
-    seen = set()
-    roots = [r for r in roots if not (r in seen or seen.add(r))]
+    # dict.fromkeys keeps the first occurrence and preserves order. The old
+    # `r in seen or seen.add(r)` idiom did the same by leaning on add()
+    # returning None, which is true but is not what the line appears to say.
+    roots = list(dict.fromkeys(roots))
 
     if not roots:
         if imported is None:
