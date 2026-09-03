@@ -217,12 +217,29 @@ Note `env` carries **both** environment variables and docker `-p` port flags,
 and that under `ssh_direct` the image's entrypoint is replaced — `onstart` is
 where the pipeline gets launched.
 
-## 6. Decisions still needing a call
+## 6. Decisions taken
 
-1. **TLS**: self-signed plus pinned fingerprint (recommended), or ship
-   cleartext and accept a worse risk than today.
-2. **Warm models**: stop/start only, baked image only, or both.
-3. **Host policy**: pin to one chosen UK host for a stable IP and warm disk, or
-   search each time and accept a cold start.
-4. **Auto-stop**: `destroy` (stops storage billing, loses the disk) or `stop`
-   (keeps the disk, keeps paying, may not restart).
+1. **TLS: self-signed certificate, fingerprint pinned.** The instance generates
+   a cert at startup and the orchestrator writes its fingerprint into `.env`
+   beside `PHANTOM_API_URL`; the desktop pins it. No third party in the path,
+   so nothing is added to the number this migration exists to reduce. A token
+   in the first frame goes in at the same time, which closes the
+   unauthenticated-WebSocket risk rather than deepening it.
+2. **Warm models: stop/start only.** No baked image for now. A stopped instance
+   keeps its disk, which is the same shape as a stopped RunPod pod, so the
+   resume path carries over directly. The accepted risk is that stopping frees
+   the GPU and a busy host may refuse to start it again — mitigated by (3)
+   rather than by an image build.
+3. **Host policy: pin preferred, search as fallback.** `VAST_PREFERRED_HOST`
+   names the chosen UK host, for a stable IP and a warm disk. When it is
+   unavailable the filtered search runs, which is the same shape as the
+   existing bounded wait in `_try_deploy_pass` — and the reasoning that put it
+   there holds here too: billing starts when an instance runs, not while you
+   are waiting for one.
+4. **Auto-stop: stop, not destroy.** Matches today's behaviour and keeps the
+   models warm. It keeps paying storage, which is why §3.3's disk sizing is not
+   a detail: at 25 GB on the lead candidate that is ~$10/month standing.
+
+Consequence worth stating plainly: (2) and (4) together mean **the disk is the
+only copy of the warm state**, and destroying the instance re-downloads
+everything. That is the trade taken for not maintaining an image build.
