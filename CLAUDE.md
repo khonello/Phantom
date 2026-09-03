@@ -1127,16 +1127,29 @@ kept rather than replaced by the cheaper monochrome-delta trick `_add_grain`
 uses: measured at 256, that variant is 2.29ms against 2.41ms — 5% — and drifts
 chroma three times as far.
 
+**Re-examining the CPU work found ~15ms a frame of waste, which was a better
+answer than moving anything to the GPU.** One LAB conversion now serves both
+shading stages instead of one each (a round trip is 1.9ms at 256, more than
+scatter's own work); the scatter feature weight is built at a quarter resolution
+since it is a smooth mask whose blur was running at sixteen times the pixels it
+needed; grain reuses a cached noise tile at a random offset rather than calling
+`np.random.normal` at region size every frame; and `_estimate_noise` bounds its
+sample *before* the colour conversion and Laplacian rather than striding the
+result afterwards. `_add_grain` also moved to `cv2` ops from numpy broadcasting,
+which `_paste` had already spelled out for the same reason. Net: scatter's
+marginal cost 3.18ms -> 0.07ms at 256, grain at a 500px region ~15ms -> 2.83ms.
+
 **The costs quoted for both new layers are laptop-CPU measurements, and the pod
 will print its own.** A GPU does not touch either of them — the models are ONNX
 on the card, the compositor is OpenCV on the CPU — so renting a faster card does
 not speed them up; but a pod's CPU is not this one, and the whole compositor
 bucket has already been recorded at ~20ms on an L4 against ~10.3ms on a 4090.
-Locally: scatter 0.61/1.96/3.18/4.74ms at aligned 128/192/256/320 and 0.004ms
-off; texture 0.90ms on a 101px face and 7.49ms on a 460px one. Both are their
+Locally: scatter costs 0.07ms marginal at aligned 256 with colour matching on
+(3.18ms in isolation, before the conversion was shared); texture 1.01ms on a
+101px face and 7.16ms on a 460px one. Both are their
 own line in the latency report, so **one stream on the pod replaces all of
-that**. Combined they are ~12ms with a large face, which `optimal`'s 50ms
-absorbs; treat `production`'s 33ms as a question for the report rather than a
+that**. Combined they are ~7ms with a large face, which `optimal`'s 50ms
+absorbs comfortably; treat `production`'s 33ms as a question for the report rather than a
 prediction. Judge realism at `optimal` either way.
 
 **The seam came first.** A live run reported the swap as "very noticeable, like

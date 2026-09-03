@@ -390,8 +390,10 @@ crop, so what scatter takes out of the texture band is restored and what it take
 out of the shading band stays out — which is exactly the split that was wanted.
 
 **Cost, measured on a laptop CPU** — see §9 on why that is indicative rather
-than predictive, and why the pod will print its own figure: 0.61 / 1.96 / 3.18 /
-4.74ms at aligned 128 / 192 / 256 / 320, and 0.004ms when off. About 0.8ms of that is rebuilding the feature-exclusion
+than predictive, and why the pod will print its own figure. **0.07ms at aligned
+256** as a marginal cost, because the LAB conversion it needs is shared with
+`_match_color` rather than paid twice; 0.65ms at 192 and 0.09ms at 320. In
+isolation, with a conversion of its own, it was 3.18ms at 256. About 0.8ms of that is rebuilding the feature-exclusion
 weight each frame, which the keypoints moving makes unavoidable without caching
 work nobody has justified yet.
 
@@ -445,6 +447,52 @@ CPU scaled with it.
 So the numbers here bound the *ratios* — texture grows with the face's area in
 frame, scatter grows with the aligned size, the headroom sample is flat — and
 say nothing reliable about the absolutes.
+
+**What re-examining the CPU work found.** Asked whether anything should move
+to the GPU, the answer turned out to be that ~15ms a frame was being *wasted* on
+the CPU, and removing waste beats moving work. Four changes, all measured:
+
+| at a large face | before | after |
+|---|---|---|
+| scatter, marginal cost with colour matching on | 3.18ms | **0.07ms** |
+| grain at a 500px region | ~15ms | **2.83ms** |
+| texture at a 460px face | 7.49ms | **7.16ms**, and now measured on skin |
+
+- **One LAB conversion for both shading stages.** `_scatter` and `_match_color`
+  are both LAB-domain, and each was converting for itself. A round trip is 1.9ms
+  at 256 — more than everything scatter does with it. The conversion moved up to
+  the caller, and scatter's marginal cost went to nearly nothing.
+- **The scatter feature weight is built at a quarter resolution.** It is a smooth
+  mask with five soft holes; the blur was running at sixteen times the pixels it
+  needed. 0.43ms to 0.08ms at 256, agreeing to within 0.17 on a [0, 1] weight.
+- **Grain reuses a cached noise tile** at a random per-frame offset instead of
+  calling `np.random.normal` at region size every frame — 1.5ms at 256, scaling
+  with area. The offset is what keeps it from reading as fixed-pattern noise,
+  which is a worse artefact than none.
+- **The noise estimate is bounded before its transform, not after.**
+  `_estimate_noise` already knew a sigma converges on far fewer pixels than a
+  face region carries — it strided the *result*, while the colour conversion and
+  the Laplacian still ran over every pixel. 4.6ms at a 500px region, now flat.
+  `_add_grain` also switched to `cv2` ops from numpy broadcasting, which `_paste`
+  had already spelled out for exactly this reason: 4.2ms to 2.4ms.
+
+**And the actual answer on the GPU.** It remains no, for now, and the reasons are
+unchanged by any of the above: [CLAUDE.md](../CLAUDE.md) records that the felt
+delay is dominated by a Romania round trip of ~350ms while compute has ~23ms of
+headroom, and that the non-GPU portion already scaled with the card (20ms on an
+L4, 10.3ms on a 4090) rather than being a fixed floor.
+
+What *is* now true and was not before: torch is on the pod — `pipeline/core.py`
+imports it unconditionally and the RunPod image supplies it — so the
+`affine_grid`/`grid_sample` route is a code change rather than a dependency one.
+The trigger to take it is the latency report showing compute as the largest term,
+which it does not.
+
+The one candidate worth naming if it ever is: **JPEG encode and decode**. It is
+CPU, it is on the critical path in both directions, and NVJPEG exists. It has
+never been measured on its own because it sat inside one bucket with the
+compositor — and now it can be, since every compositor stage is itemised and
+encode is the remainder.
 
 **None of which needs resolving by argument.** `scatter` is its own bucket in
 `LatencyBudget` and `texture` is recorded as a subset of `paste`, so the pod's
@@ -840,7 +888,7 @@ Carried from the proposal, with two added.
   cheek that is actually stretched. Conservative, and it costs some good detail
   on the near side of an off-pose frame.
 - **Added: texture and scatter together may miss the `production` deadline.**
-  ~12ms combined with a large face, on a laptop CPU. `optimal`'s 50ms against a
+  ~7ms combined with a large face after the §9 cuts, down from ~12ms. `optimal`'s 50ms against a
   ~27ms frame absorbs that comfortably; `production`'s 33ms would not. But the
   arithmetic is being done in the wrong units — the pod's CPU is faster than the
   one those were taken on (§9), so this is a flag to *read the latency report*

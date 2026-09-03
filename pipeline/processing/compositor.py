@@ -186,6 +186,14 @@ class FaceCompositor:
     _SCATTER_MOUTH = 0.40
     _SCATTER_NOSE = 0.30
 
+    # The feature-exclusion weight is built at 1/N and scaled back up, with a
+    # floor so a small crop does not lose the features entirely. It is a smooth
+    # field and the blur is most of its cost, so building it at sixteen times
+    # the pixels it needs was waste: 0.43ms against 0.08ms at 256, 1.10 against
+    # 0.13 at 320. The two agree to within 0.17 on a [0, 1] weight.
+    _WEIGHT_DOWNSCALE = 4
+    _WEIGHT_MIN = 48
+
     # Pose agreement between the source photograph and the frame, in degrees of
     # yaw. Below the first the map is used at full strength; above the second it
     # is not used at all.
@@ -205,13 +213,14 @@ class FaceCompositor:
     _POSE_FULL = 12.0
     _POSE_LIMIT = 45.0
 
-    # Edge of the window the headroom statistics are taken over. A standard
-    # deviation converges on a few thousand pixels, so measuring every pixel of
-    # a large face buys nothing and costs everything: at a 500px region the full
-    # measurement was 16ms, which is more than the whole rest of the frame and
-    # was paid even when the answer was "no headroom, add nothing". The region
-    # is centred on the face, so a centred window is face pixels.
-    _HEADROOM_SAMPLE = 160
+    # Edge of the window every distribution statistic is taken over. A standard
+    # deviation and a median both converge on a few thousand pixels, so
+    # measuring every pixel of a large face buys nothing and costs everything:
+    # the headroom measurement was 16ms at a 500px region, more than the whole
+    # rest of the frame, and was paid even when the answer was "no headroom, add
+    # nothing"; the noise estimate behind grain was another 4.6ms there. The
+    # region is centred on the face, so a centred window is face pixels.
+    _STAT_WINDOW = 160
 
     # Headroom below which the texture layer does not bother. Adding a fraction
     # of an 8-bit unit costs a warp and changes nothing anyone can see.
@@ -246,6 +255,17 @@ class FaceCompositor:
         self._prev_fake: Optional[Frame] = None
         self._prev_real: Optional[Frame] = None
         self._working_size: Optional[int] = None
+
+        # Unit-variance noise, reused across frames at a random offset rather
+        # than regenerated. `np.random.normal` at region size cost 1.5ms a frame
+        # at 256 and scales with area - around 5.9ms on a face filling a 500px
+        # region - which is a large slice of the compositor for a field whose
+        # only requirement is to look like sensor noise.
+        #
+        # A cache, not temporal state: it survives `reset()` deliberately, and
+        # the per-frame offset is what stops consecutive frames sharing a
+        # pattern. Fixed-pattern noise is a worse artefact than none.
+        self._noise: Optional[Frame] = None
 
         # Skin detail lifted from the operator's source photograph, set by the
         # pipeline when the source changes. Deliberately not built here: it is a
@@ -418,12 +438,24 @@ class FaceCompositor:
         # where the colour stages can still reconcile it against the target
         # rather than landing on top of a finished match — see
         # docs/TEXTURE_PIPELINE.md section 3.2.
-        fake = self._scatter(fake, mask, face, aligned_matrix)
-        elapsed('scatter')
+        scatter_on = float(getattr(self.config, 'diffuse_strength', 0.0)) > 0.0
+        if scatter_on or self.config.color_correction:
+            # One conversion for both stages rather than one each. A round trip
+            # is 1.9ms at 256, which was more than everything `_scatter` does
+            # with it, and paying it twice bought only a tidier signature.
+            fake_lab = cv2.cvtColor(fake, cv2.COLOR_BGR2LAB).astype(np.float32)
 
-        if self.config.color_correction:
-            fake = self._match_color(fake, real, mask)
+            if scatter_on:
+                fake_lab = self._scatter(fake_lab, mask, face, aligned_matrix)
+            elapsed('scatter')
+
+            if self.config.color_correction:
+                fake_lab = self._match_color(fake_lab, real, mask)
             elapsed('colour')
+
+            fake = cv2.cvtColor(
+                np.clip(fake_lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR,
+            )
 
         fake = self._match_detail(fake, real, mask)
         elapsed('detail')
@@ -788,7 +820,7 @@ class FaceCompositor:
 
     def _scatter(
         self,
-        fake: Frame,
+        fake_lab: Frame,
         mask: Mask,
         face: Face,
         matrix: Matrix,
@@ -804,7 +836,9 @@ class FaceCompositor:
         does not answer it.
 
         **Luminance only.** The pass runs on LAB's L channel and leaves a and b
-        untouched. Applied to full RGB it would drift skin tone as well as
+        untouched. It takes and returns LAB rather than BGR because
+        `_match_color` needs the same space immediately afterwards, and a second
+        round trip cost more than everything this does put together. Applied to full RGB it would drift skin tone as well as
         shading, and applied without the feature exclusions below it would
         soften eyes and mouth — which is precisely the identity-softening
         failure this whole pipeline exists to route around in full-strength
@@ -819,44 +853,33 @@ class FaceCompositor:
         shading band stays out — which is the split that was wanted.
 
         Args:
-            fake: The swap in aligned space
+            fake_lab: The swap in aligned space, LAB float32
             mask: Compositing mask, so nothing outside the swap is touched
             face: Detection, for the five keypoints the exclusions are built on
             matrix: frame -> aligned affine
 
         Returns:
-            `fake` with softened shading, or unchanged when the layer is off.
+            `fake_lab` with softened shading, or unchanged when the layer
+            is off or has nothing to act on.
         """
         strength = float(np.clip(getattr(self.config, 'diffuse_strength', 0.0), 0.0, 1.0))
         if strength <= 0.0:
-            return fake
+            return fake_lab
 
-        size = fake.shape[0]
+        size = fake_lab.shape[0]
         weight = self._scatter_weight(mask, face, matrix, size)
         if weight is None or not weight.any():
-            return fake
+            return fake_lab
 
-        # Note the LAB round trip below is not bit-exact: pixels the weight
-        # leaves alone still come back +/-1 from the colour-space conversion.
-        # That is harmless where it happens — those pixels are outside the
-        # compositing mask and are multiplied by an alpha of zero at paste — but
-        # it is why the guard above is `any()` rather than a strength check. A
-        # frame with nothing to soften must come back untouched, exactly.
-
-        lab = cv2.cvtColor(fake, cv2.COLOR_BGR2LAB).astype(np.float32)
-        luma = lab[:, :, 0]
+        luma = fake_lab[:, :, 0]
 
         sigma = self._SCATTER_SIGMA * size / self._SCATTER_REFERENCE
         soft = cv2.GaussianBlur(luma, (0, 0), max(sigma, 0.6))
 
         # luma + (soft - luma) * w, which moves the shading toward its blurred
         # self by `w` and leaves it alone where `w` is zero.
-        lab[:, :, 0] = luma + (soft - luma) * (weight * strength)
-
-        result: Frame = cv2.cvtColor(
-            np.clip(lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR,
-        )
-        return result
+        fake_lab[:, :, 0] = luma + (soft - luma) * (weight * strength)
+        return fake_lab
 
     def _scatter_weight(
         self,
@@ -896,29 +919,39 @@ class FaceCompositor:
         if span < 1e-3:
             return None
 
-        weight = mask.copy()
+        small = max(self._WEIGHT_MIN, size // self._WEIGHT_DOWNSCALE)
+        ratio = small / float(size)
+        weight = cv2.resize(mask, (small, small), interpolation=cv2.INTER_AREA)
+
         for index, scale in (
             (0, self._SCATTER_EYE), (1, self._SCATTER_EYE),
             (2, self._SCATTER_NOSE),
             (3, self._SCATTER_MOUTH), (4, self._SCATTER_MOUTH),
         ):
-            centre = points[index]
+            centre = points[index] * ratio
             cv2.circle(
                 weight,
                 (int(round(centre[0])), int(round(centre[1]))),
-                max(1, int(round(span * scale))),
+                max(1, int(round(span * scale * ratio))),
                 (0.0,),
                 -1,
             )
 
         # Feather the exclusions, or each one is a visible disc of "sharp"
         # sitting in softened skin — a seam of its own, at the eyes.
-        blur = max(1.0, size * 0.02)
-        return cv2.GaussianBlur(weight, (0, 0), blur)
+        weight = cv2.GaussianBlur(weight, (0, 0), max(1.0, small * 0.02))
+        resized: Mask = cv2.resize(
+            weight, (size, size), interpolation=cv2.INTER_LINEAR,
+        )
+        return resized
 
-    def _match_color(self, fake: Frame, real: Frame, mask: Mask) -> Frame:
+    def _match_color(self, fake_lab: Frame, real: Frame, mask: Mask) -> Frame:
         """
         Match the swap's colour distribution to the target's, in LAB.
+
+        Takes and returns LAB float32; the conversion belongs to the caller,
+        because the scatter pass needs the same space immediately before this
+        one and a round trip between them cost more than either stage's work.
 
         Statistics are sampled *inside the mask only*. Sampling a bounding
         box instead pulls in hair and background, which is how a bright
@@ -934,13 +967,12 @@ class FaceCompositor:
         """
         binary = (mask > 0.5).astype(np.uint8)
         if int(binary.sum()) < 64:
-            return fake
+            return fake_lab
 
         color_strength = float(np.clip(self.config.color_strength, 0.0, 1.0))
         if color_strength <= 0.0:
-            return fake
+            return fake_lab
 
-        fake_lab = cv2.cvtColor(fake, cv2.COLOR_BGR2LAB)
         real_lab = cv2.cvtColor(real, cv2.COLOR_BGR2LAB)
 
         fake_mean, fake_std = cv2.meanStdDev(fake_lab, mask=binary)
@@ -953,7 +985,7 @@ class FaceCompositor:
             (delta - self._COLOR_FLOOR) / self._COLOR_RANGE, 0.0, 1.0,
         ))
 
-        result = fake_lab.astype(np.float32)
+        result = fake_lab
 
         if global_strength > 0.0:
             # Per channel the transfer is affine — scale then shift — so the
@@ -985,12 +1017,9 @@ class FaceCompositor:
             result *= gain
             result += offset
 
-        result = self._match_illumination(
+        return self._match_illumination(
             result, real_lab.astype(np.float32), mask, color_strength,
         )
-
-        corrected = np.clip(result, 0, 255).astype(np.uint8)
-        return cv2.cvtColor(corrected, cv2.COLOR_LAB2BGR)
 
     def _match_illumination(
         self,
@@ -1324,7 +1353,7 @@ class FaceCompositor:
         if canonical is None:
             return blended
 
-        headroom = self._texture_headroom(blended, target, mask, extent)
+        headroom = self._texture_headroom(blended, target, mask, extent, face, roi)
         self.last_texture_headroom = headroom
         if headroom <= self._TEXTURE_FLOOR:
             return blended
@@ -1410,12 +1439,41 @@ class FaceCompositor:
             return 0.0
         return float(np.clip(1.0 - (delta - self._POSE_FULL) / span, 0.0, 1.0))
 
+    def _stat_window(
+        self,
+        shape: Tuple[int, ...],
+    ) -> Tuple[slice, slice]:
+        """
+        A centred window of at most `_STAT_WINDOW` on a side.
+
+        Cropping rather than downscaling, deliberately: a downscale is itself a
+        low-pass, and both callers are measuring high-frequency content, so
+        shrinking the image first would measure a different band than the one in
+        question.
+
+        Args:
+            shape: (height, width) of the region
+
+        Returns:
+            Row and column slices to apply to anything over that region
+        """
+        cap = self._STAT_WINDOW
+        height, width = int(shape[0]), int(shape[1])
+        top = max(0, (height - cap) // 2)
+        left = max(0, (width - cap) // 2)
+        return (
+            slice(top, top + min(height, cap)),
+            slice(left, left + min(width, cap)),
+        )
+
     def _texture_headroom(
         self,
         blended: Frame,
         target: Frame,
         mask: Mask,
         extent: float,
+        face: Face,
+        roi: Tuple[int, int, int, int],
     ) -> float:
         """
         How much high-frequency deviation the face can still take, in 8-bit units.
@@ -1433,11 +1491,21 @@ class FaceCompositor:
         expressed here in frame pixels: `DETAIL_SIGMA` is specified at a 256px
         face, so at `extent` pixels it is that fraction of it.
 
+        **Measured on skin, not over everything inside the mask.** The window
+        below sits at the centre of the region, and for a large face that centre
+        is nose, mouth and eyes — whose high-frequency content is *structure*
+        rather than skin texture. Reading that as "what a real face carries
+        here" overstates the headroom and lets the layer add more than the
+        cheeks justify. The same exclusions the scatter pass uses, built after
+        the crop so their cost is flat in face size rather than growing with it.
+
         Args:
             blended: The composited ROI, float32
             target: The original frame over the same ROI, float32
             mask: Compositing alpha over the ROI
             extent: The face's extent in frame pixels
+            face: Detection, for the keypoints the exclusions are placed on
+            roi: (x0, y0, width, height) of the region in frame space
 
         Returns:
             Deviation still available, in 8-bit units. Zero when the swap has
@@ -1447,16 +1515,21 @@ class FaceCompositor:
         # `_HEADROOM_SAMPLE`. Cropping rather than downscaling, because a
         # downscale is itself a low-pass and would measure a different band than
         # the one being added.
-        cap = self._HEADROOM_SAMPLE
-        height, width = mask.shape[:2]
-        if height > cap or width > cap:
-            top = max(0, (height - cap) // 2)
-            left = max(0, (width - cap) // 2)
-            rows = slice(top, top + min(height, cap))
-            cols = slice(left, left + min(width, cap))
-            mask = mask[rows, cols]
-            blended = blended[rows, cols]
-            target = target[rows, cols]
+        rows, cols = self._stat_window(mask.shape)
+        mask = mask[rows, cols]
+        blended = blended[rows, cols]
+        target = target[rows, cols]
+
+        # Frame keypoints into window coordinates: the region's own origin, plus
+        # wherever the window starts inside it.
+        x0, y0 = roi[0], roi[1]
+        offset = np.array([
+            [1.0, 0.0, -float(x0 + cols.start)],
+            [0.0, 1.0, -float(y0 + rows.start)],
+        ], dtype=np.float32)
+        skin = self._scatter_weight(mask, face, offset, max(mask.shape))
+        if skin is not None:
+            mask = skin
 
         binary = (mask > 0.5).astype(np.uint8)
         if cv2.countNonZero(binary) < 64:
@@ -1507,8 +1580,41 @@ class FaceCompositor:
         if sigma <= 0.1:
             return blended
 
-        noise = np.random.normal(0.0, sigma, mask.shape).astype(np.float32)
-        return blended + noise[:, :, None] * mask[:, :, None]
+        # `cv2.merge` and `cv2.add` rather than `mask[:, :, None]`
+        # broadcasting, for the same reason `_paste` spells its own composite
+        # out: numpy expands the broadcast into a full-size temporary on every
+        # frame, and at a 500px region that was 4.2ms against 2.4ms.
+        field = cv2.multiply(self._noise_field(mask.shape), mask) * sigma
+        return cv2.add(blended, cv2.merge([field, field, field]))
+
+    def _noise_field(self, shape: Tuple[int, ...]) -> Frame:
+        """
+        A unit-variance noise window, cut from a cached tile at a random offset.
+
+        The tile is grown to twice the largest region asked for, so there are
+        many distinct windows and consecutive frames do not share one. Only the
+        offset changes per frame, which is what keeps this from reading as
+        fixed-pattern noise - a static grain overlay is a worse tell than no
+        grain at all.
+
+        Args:
+            shape: (height, width) of the region needing noise
+
+        Returns:
+            A float32 view of that size, unit standard deviation
+        """
+        height, width = int(shape[0]), int(shape[1])
+        tile = self._noise
+        if tile is None or tile.shape[0] < height * 2 or tile.shape[1] < width * 2:
+            tile = np.random.normal(
+                0.0, 1.0, (height * 2, width * 2),
+            ).astype(np.float32)
+            self._noise = tile
+
+        top = int(np.random.randint(0, tile.shape[0] - height + 1))
+        left = int(np.random.randint(0, tile.shape[1] - width + 1))
+        window: Frame = tile[top:top + height, left:left + width]
+        return window
 
     def _estimate_noise(self, region: Frame) -> float:
         """
@@ -1517,7 +1623,17 @@ class FaceCompositor:
         A median-based estimator is used rather than a mean-based one so that
         genuine facial detail and edges do not inflate the result.
         """
-        gray = cv2.cvtColor(np.clip(region, 0, 255).astype(np.uint8), cv2.COLOR_BGR2GRAY)
+        # Bounded before the transform, not after. The stride below already
+        # said a sigma converges on far fewer pixels than a face region carries,
+        # but it was applied to the *result* — so the colour conversion and the
+        # Laplacian still ran over every pixel, which was 4.6ms at a 500px
+        # region. Cropping first makes the whole estimate flat in region size.
+        rows, cols = self._stat_window(region.shape)
+        sample_region = region[rows, cols]
+
+        gray = cv2.cvtColor(
+            np.clip(sample_region, 0, 255).astype(np.uint8), cv2.COLOR_BGR2GRAY,
+        )
         laplacian = cv2.Laplacian(gray, cv2.CV_32F)
 
         # Estimate from a subsample. Both medians are sorts, and a noise sigma

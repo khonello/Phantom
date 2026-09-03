@@ -580,9 +580,25 @@ crop = np.clip(shade + grain, 0, 255).astype(np.uint8)
 full_mask = np.ones((ALIGNED, ALIGNED), dtype=np.float32)
 
 
-def scatter(strength):
+def to_lab(image):
+    return cv2.cvtColor(image, cv2.COLOR_BGR2LAB).astype(np.float32)
+
+
+def from_lab(lab):
+    return cv2.cvtColor(np.clip(lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR)
+
+
+def scatter(strength, mask=None):
+    """Run the pass the way the compositor does: LAB in, LAB out.
+
+    The colour conversion is the caller's since `_match_color` needs the same
+    space straight afterwards, so the test owns it too.
+    """
     config.diffuse_strength = strength
-    return compositor._scatter(crop, full_mask, scatter_face, scatter_matrix)
+    return from_lab(compositor._scatter(
+        to_lab(crop), full_mask if mask is None else mask,
+        scatter_face, scatter_matrix,
+    ))
 
 
 def band(image, sigma):
@@ -592,9 +608,15 @@ def band(image, sigma):
 
 
 check('scatter defaults to off', FaceSwapConfig().diffuse_strength == 0.0)
+off_lab = to_lab(crop)
+config.diffuse_strength = 0.0
 check('at strength 0 the crop is untouched',
-      np.array_equal(scatter(0.0), crop),
-      'the layer must cost nothing and change nothing when off')
+      np.array_equal(
+          compositor._scatter(off_lab.copy(), full_mask, scatter_face,
+                              scatter_matrix),
+          off_lab),
+      'checked in LAB, the space the stage is handed: the BGR round trip in '
+      'this helper belongs to the test and would mask an exact no-op')
 
 softened = scatter(0.6)
 check('scatter changes the crop when on', not np.array_equal(softened, crop))
@@ -627,26 +649,28 @@ check('the eyes are excluded from the softening',
       'eye moved {:.0f}, cheek {:.0f} — softening a feature is the exact '
       'identity loss this routes around'.format(eye_delta, cheek_delta))
 
+empty = to_lab(crop)
 check('a fully masked-out frame comes back exactly untouched',
       np.array_equal(
-          compositor._scatter(crop, np.zeros_like(full_mask), scatter_face,
-                              scatter_matrix),
-          crop),
-      'no weight means no work, not a lossy colour round trip for nothing')
+          compositor._scatter(empty.copy(), np.zeros_like(full_mask),
+                              scatter_face, scatter_matrix),
+          empty),
+      'no weight means no work at all, in the space it was handed')
 
 half_mask = np.zeros_like(full_mask)
 half_mask[:, :ALIGNED // 2] = 1.0
-gated = compositor._scatter(crop, half_mask, scatter_face, scatter_matrix)
+gated = scatter(0.9, mask=half_mask)
 outside = np.abs(gated[:, ALIGNED // 2 + 40:].astype(np.int16)
                  - crop[:, ALIGNED // 2 + 40:].astype(np.int16)).max()
 inside = np.abs(gated[:, :40].astype(np.int16)
                 - crop[:, :40].astype(np.int16)).max()
 # Sampled 40px clear of the midline, well past the weight blur's 3-sigma of
-# ~15px, so what is left is the uint8 BGR->LAB->BGR round trip and nothing else.
+# ~15px, so what is left is the uint8 BGR->LAB->BGR round trip the test itself
+# performs — the stage no longer does one of its own.
 check('the mask gates the softening',
       outside <= 2 < inside,
-      'outside moved {} (colour round trip only; alpha is zero there at '
-      'paste), inside moved {}'.format(int(outside), int(inside)))
+      'outside moved {} (the test\'s own colour round trip), inside moved '
+      '{}'.format(int(outside), int(inside)))
 
 check('unusable keypoints decline rather than soften blind',
       np.array_equal(
@@ -665,6 +689,34 @@ check('the sigma scales with the working resolution',
       'otherwise "soft" is a different distance when the operator leans in')
 
 config.diffuse_strength = 0.0
+
+# -- Grain noise ----------------------------------------------------------
+print('\nGrain noise')
+
+field_a = compositor._noise_field((64, 64))
+field_b = compositor._noise_field((64, 64))
+check('the noise field is unit variance',
+      abs(float(field_a.std()) - 1.0) < 0.15,
+      'std {:.3f} — the caller scales it by the measured sigma'.format(
+          float(field_a.std())))
+check('consecutive frames do not share a pattern',
+      not np.array_equal(field_a, field_b),
+      'a fixed grain overlay is a worse artefact than none')
+check('the tile is cached, not regenerated',
+      compositor._noise is not None
+      and compositor._noise.shape[0] >= 128,
+      'twice the largest region asked for, so there are windows to choose from')
+
+before = compositor._noise
+compositor._noise_field((40, 40))
+check('a smaller region reuses the same tile', compositor._noise is before)
+compositor._noise_field((400, 400))
+check('a larger region grows it', compositor._noise is not before)
+
+compositor._prev_fake = np.zeros((4, 4, 3), dtype=np.uint8)
+compositor.reset()
+check('the tile survives reset — it is a cache, not temporal state',
+      compositor._noise is not None)
 
 # ── Stale readings ─────────────────────────────────────────────────────
 print('\nStale readings')
