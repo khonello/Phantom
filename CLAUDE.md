@@ -28,6 +28,44 @@ isolation. When changing anything here, judge it on real footage, not stills.
 Development is focused on the **live call** path; batch follows and reuses the
 same compositor.
 
+### Start here in a new session
+
+Two things are queued, and they are queued in this order because the first is
+free and the second is not.
+
+**1. The pod run.** Everything realism-related is built, off by default, and
+unjudged: the texture layer, the scatter pass, the widened seam. Nothing more
+should be built until a stream has been watched. The runbook is
+[docs/PENDING_WORK.md](docs/PENDING_WORK.md); take §2.3b (the uplink test —
+**mind the `guard_min_frame_px` trap in it**, it will otherwise produce nothing
+but guarded frames) and then the `REALISM` block, whose `detail_ratio` reading
+decides how much of the texture work was necessary at all.
+
+**2. Finish the performance audit.** [docs/PERFORMANCE_AUDIT.md](docs/PERFORMANCE_AUDIT.md)
+§3 is **done** — measured end to end at 0.74ms saved at `optimal` and 6.77ms at
+`production`, and that is *net* of a correctness fix in §3.7 which cost ~3.3ms,
+so the optimisations themselves were worth about 11ms there.
+
+§4 and §5 are **not done**. §4 is worth **~1.3ms at `optimal` and ~4.6ms at
+`production`**, measured:
+
+| | `optimal` | `production` |
+|---|---|---|
+| `real_lab` converted at half size (statistics only) | 0.63ms | 0.63ms |
+| region-of-interest padding 3σ → 2σ | ~0.6ms | ~3.5ms |
+| drop `frame.copy()` in `_paste` | 0.09ms | 0.48ms |
+
+One correction to that document: the padding item is filed under "safe" and is
+not quite. At 2σ the feather's tail truncates at ~5% of peak rather than ~0.1%,
+so the mask does not fully reach zero at the region border. Probably invisible —
+but it is the seam again, and the seam is the thing footage just complained
+about. Judge it, do not assume it.
+
+**Do §4 after the pod run, not before.** At `optimal` it turns 7.8ms into 6.5ms
+of a 50ms budget, which changes nothing anyone can feel; at `production` it takes
+48.8ms to 44ms against a 33ms deadline, which does not fit either way. Neither is
+worth spending a session on ahead of the one measurement that is.
+
 **Next actions live in [docs/PENDING_WORK.md](docs/PENDING_WORK.md)** — a runbook
 from starting the pod through to the outstanding implementation work.
 [docs/TODO.md](docs/TODO.md) remains the backlog, and

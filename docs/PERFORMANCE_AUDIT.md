@@ -69,7 +69,23 @@ Restoration is excluded — it is GPU work and is not what this audit is about.
 
 ---
 
-## 3. Acted on
+## 3. Acted on — measured end to end
+
+Same profiler against the pre-audit commit and against now:
+
+| | before | after | saved |
+|---|---|---|---|
+| `optimal` baseline | 7.21ms | 6.47ms | **0.74ms (10%)** |
+| `optimal` + texture/scatter | 8.59ms | 7.78ms | **0.81ms (9%)** |
+| `production` baseline | 47.24ms | 40.47ms | **6.77ms (14%)** |
+| `production` + texture/scatter | 56.58ms | 48.75ms | **7.83ms (14%)** |
+
+The "after" column is paying for §3.7 while it does that. The extent fix made the
+feather three times wider and the texture map four times larger — about 3.3ms at
+`production` — so the optimisations were worth roughly **11ms gross** there and
+absorbed a correctness fix out of it.
+
+
 
 Each was measured before and after, and each leaves the output either identical
 or different by an amount stated below.
@@ -155,14 +171,27 @@ rather than a few milliseconds.
 
 - **`_match_color` converts `real` to LAB at full size** and uses it for two
   things: masked mean/std, and a residual that `_match_illumination` immediately
-  downscales to 1/8. Neither needs full resolution. ~0.8ms at 320.
+  downscales to 1/8. Neither needs full resolution. Measured: **0.63ms** saved at
+  either 256 or 320, by converting a half-size copy instead.
 - **The region of interest is padded by 3 sigma** of the feather, which at a
   400px face is 52px on each side — making every frame-space operation run over
-  1.5x the pixels. 2 sigma captures 95% of a Gaussian and would cut that.
+  1.5x the pixels. 2 sigma would take the region from 504px to 472px, 88% of the
+  area: **~3.5ms at `production`**, ~0.6ms at `optimal`.
+
+  **Filed here wrongly, and corrected:** this is not free. At 2 sigma the
+  feather's tail truncates at ~5% of peak rather than ~0.1%, so the mask does not
+  quite reach zero at the region border. Probably invisible — but it is the seam
+  again, and the seam is what footage just complained about. It belongs in §6
+  with the others until somebody has looked at it.
 - **`frame.copy()` in `_paste`** duplicates the whole frame (1.5MB at 960x540) to
   write back a region. Writing into a view of the input would avoid it, at the
   cost of mutating a caller's array — which the current signature promises not
-  to do.
+  to do. Measured: **0.48ms** at 960x540, 0.09ms at 640x360.
+
+**Total for this section: ~1.3ms at `optimal`, ~4.6ms at `production`** — which
+is why none of it has been done. At `optimal` it turns 7.8ms into 6.5ms of a 50ms
+budget; at `production` it takes 48.8ms to 44ms against a 33ms deadline. Neither
+changes an outcome.
 
 ---
 
