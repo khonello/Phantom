@@ -121,6 +121,12 @@ _BASE: Dict[str, Any] = {
     'restore_size': 512,
     'restore_min_face': 0,
     'swapper_model': 'inswapper_128',
+    # No entry sets this, and it is here anyway: it is an appearance lever with
+    # a per-frame cost, so a sweep started after someone A/B'd it live would
+    # measure it in every configuration without saying so.
+    'texture_strength': 0.0,
+    'mask_feather': 0.04,
+    'mask_erode': 0.03,
 }
 
 # The pipeline prints the latency budget as a STATUS_CHANGED with this scope

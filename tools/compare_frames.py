@@ -65,6 +65,19 @@ _LAPLACIAN_GAIN = float(np.sqrt(20.0))
 _SEAM_BAND = 3
 _SEAM_CONTEXT = 12
 
+# Rings for the seam *step*, in pixels from the mask edge. Near starts clear of
+# the feather itself, far stops before the sample wanders off the face.
+_STEP_NEAR = 4
+_STEP_FAR = 10
+
+# Blur applied before the rings are sampled. A seam is a low-frequency event —
+# the eye integrates over an area to see a tone change — and without this the
+# measurement responds to *noise* instead: LAB's transfer is non-linear, so a
+# region carrying more grain reports a shifted median even when its underlying
+# tone matches exactly. That is a texture mismatch, which `noise_ratio` and
+# `hf_ratio` already answer for, and it is not a step.
+_STEP_BLUR = 2.0
+
 # Mean absolute frame-to-frame difference above which a frame counts as motion.
 _MOTION_THRESHOLD = 2.0
 
@@ -204,13 +217,62 @@ def blur_anisotropy(gray: np.ndarray, mask: np.ndarray) -> float:
     return (high / low) if low > 1e-6 else 1.0
 
 
+def seam_step(image: np.ndarray, mask: np.ndarray) -> float:
+    """
+    Median LAB step across the mask boundary, in LAB units.
+
+    This is the measurement `seam_ratio` should have been. A seam is a
+    *discontinuity in the mean* — the swap ends and the tone changes — and
+    `seam_ratio` measures gradient *magnitude*, which is a texture statistic. A
+    3-unit step spread over two pixels raises |grad| by about as much as ordinary
+    pores do, so a seam a person sees plainly barely moves that number. It read
+    1.03 on footage later reported as "like the face pasted on target".
+
+    Medians rather than means, per channel: the outer ring inevitably clips hair
+    at the temples and neck below the chin, and a mean would report that contrast
+    as a seam on every frame.
+
+    Read it with `seam_excess`, never alone. A face has real steps at its own
+    boundary — a jaw shadow, a hairline — and this measures those too. What
+    indicts a composite is the step it *adds*.
+
+    Args:
+        image: BGR frame
+        mask: uint8 region selector
+
+    Returns:
+        Euclidean LAB distance between the medians either side of the edge
+    """
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB).astype(np.float32)
+    lab = cv2.GaussianBlur(lab, (0, 0), _STEP_BLUR)
+
+    def ring(radius: int) -> np.ndarray:
+        return np.ones((radius * 2 + 1,) * 2, np.uint8)
+
+    inner = cv2.subtract(cv2.erode(mask, ring(_STEP_NEAR)),
+                         cv2.erode(mask, ring(_STEP_FAR)))
+    outer = cv2.subtract(cv2.dilate(mask, ring(_STEP_FAR)),
+                         cv2.dilate(mask, ring(_STEP_NEAR)))
+
+    if cv2.countNonZero(inner) < 64 or cv2.countNonZero(outer) < 64:
+        return 0.0
+
+    inside = lab[inner > 0]
+    outside = lab[outer > 0]
+    step = np.median(inside, axis=0) - np.median(outside, axis=0)
+    return float(np.linalg.norm(step))
+
+
 def seam_ratio(gray: np.ndarray, mask: np.ndarray) -> float:
     """
     Gradient across the mask boundary, relative to the region just outside it.
 
-    A composite that hands back to the frame cleanly has no more gradient at its
-    edge than the surrounding skin does. Near 1.0 means the edge is invisible; a
-    large value means there is a line where the swap ends.
+    **Retained, demoted, and not to be read as a seam verdict.** It measures
+    gradient magnitude, which a step barely moves, and its denominator is the
+    ring *outside* the mask — which contains hair, and so is often the larger of
+    the two whatever the composite does. Both effects push it toward 1.0.
+    `seam_excess` is the number to read; this one stays for continuity with the
+    measurements already recorded in CLAUDE.md.
 
     Args:
         gray: Single-channel image
@@ -295,6 +357,13 @@ def measure_pair(
     inside_hf = high_frequency_energy(out_gray, mask, face_px)
     outside_hf = high_frequency_energy(out_gray, outside, face_px)
 
+    # The step the swap *added*, which is the only part it is answerable for.
+    # The same rings on the untouched input carry whatever step the face has of
+    # its own — a jaw shadow, a hairline — so differencing them leaves the
+    # composite's own contribution and nothing else.
+    step_out = seam_step(output, mask)
+    step_in = seam_step(source, mask)
+
     motion = 0.0
     if previous is not None and previous.shape == source.shape:
         motion = float(cv2.absdiff(source, previous).mean())
@@ -307,6 +376,8 @@ def measure_pair(
         ),
         'hf_ratio': round(inside_hf / outside_hf, 4) if outside_hf > 1e-6 else None,
         'seam_ratio': round(seam_ratio(out_gray, mask), 4),
+        'seam_step': round(step_out, 4),
+        'seam_excess': round(step_out - step_in, 4),
         'anisotropy_in': round(blur_anisotropy(out_gray, mask), 4),
         'anisotropy_out': round(blur_anisotropy(out_gray, outside), 4),
         'motion': round(motion, 3),
@@ -355,6 +426,8 @@ def summarise(records: List[Dict[str, Any]]) -> Dict[str, Any]:
         'noise_ratio': stat('noise_ratio', records),
         'hf_ratio': stat('hf_ratio', records),
         'seam_ratio': stat('seam_ratio', records),
+        'seam_step': stat('seam_step', records),
+        'seam_excess': stat('seam_excess', records),
         'coverage_pct': stat('coverage_pct', records),
         'anisotropy_in_motion': stat('anisotropy_in', moving),
         'anisotropy_out_motion': stat('anisotropy_out', moving),
@@ -406,6 +479,25 @@ def verdict(summary: Dict[str, Any]) -> List[str]:
             notes.append('Softer than the frame ({:.2f}x).'.format(hf))
         else:
             notes.append('Detail matches the frame ({:.2f}x).'.format(hf))
+
+    excess = (summary.get('seam_excess') or {}).get('p95')
+    if excess is not None:
+        # Uncalibrated on purpose. 2.0 LAB units is roughly where a step at a
+        # boundary stops being deniable, but the honest calibration is footage:
+        # run this against a clip somebody has already judged by eye and move the
+        # number to wherever their verdict flips. Until then it reports rather
+        # than rules, which is more than its predecessor managed.
+        if excess > 2.0:
+            notes.append(
+                'VISIBLE SEAM: the composite adds {:.1f} LAB units of step at '
+                'its boundary (p95) that the input did not have.'.format(excess))
+        elif excess > 1.0:
+            notes.append(
+                'Borderline seam: {:.1f} LAB units of added step (p95). Look at '
+                'a frame before trusting this.'.format(excess))
+        else:
+            notes.append('No added step at the boundary ({:.1f} LAB units p95).'
+                         .format(excess))
 
     seam = (summary.get('seam_ratio') or {}).get('p95')
     if seam is not None:
@@ -498,7 +590,9 @@ def print_summary(summary: Dict[str, Any]) -> None:
     rows = [
         ('noise_ratio', 'sensor noise, face / frame', '1.00'),
         ('hf_ratio', 'high-freq detail, face / frame', '1.00'),
-        ('seam_ratio', 'gradient at mask edge / around', '1.00'),
+        ('seam_excess', 'LAB step the swap adds at its edge', '0.00'),
+        ('seam_step', 'LAB step across the edge, absolute', '-'),
+        ('seam_ratio', 'gradient at mask edge / around (demoted)', '1.00'),
         ('coverage_pct', 'face as % of frame', '-'),
         ('anisotropy_in_motion', 'blur anisotropy, face (moving)', 'match'),
         ('anisotropy_out_motion', 'blur anisotropy, frame (moving)', 'match'),
@@ -548,7 +642,7 @@ def main() -> int:
         print('\n' + '=' * 68)
         print('Change: {} -> {}'.format(args.directory, args.against))
         print('=' * 68)
-        for key in ('noise_ratio', 'hf_ratio', 'seam_ratio'):
+        for key in ('noise_ratio', 'hf_ratio', 'seam_excess', 'seam_ratio'):
             first, second = summary.get(key), other.get(key)
             if first and second:
                 print('{:<24} {:+.3f}  ({:.3f} -> {:.3f})'.format(

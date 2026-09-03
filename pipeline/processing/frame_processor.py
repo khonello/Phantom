@@ -33,6 +33,8 @@ from pipeline.services.face_detection import FaceDetector
 from pipeline.services.face_swapping import FaceSwapper
 from pipeline.services.database import FaceDatabase, SourceReview
 from pipeline.services import templates
+from pipeline.processing import texture
+from pipeline.processing.texture import SourceTexture
 from pipeline.logging import emit_status, emit_warning
 
 
@@ -175,6 +177,10 @@ class SwappingProcessor(FrameProcessor):
         # Outcome of the last set_source, kept so the API can report which image
         # was refused and why rather than a bare failure.
         self.last_review: Optional[SourceReview] = None
+        # Skin detail from the single best source image, for the compositor's
+        # texture layer. Built here rather than there because it is a property
+        # of the source photographs, which the compositor never sees.
+        self.source_texture: Optional[SourceTexture] = None
 
     def set_source(self, paths: List[str]) -> bool:
         """
@@ -217,6 +223,8 @@ class SwappingProcessor(FrameProcessor):
                 emit_warning('No face found in source paths', scope='SWAPPER')
                 return False
 
+            self._load_texture(review.accepted)
+
             emit_status(
                 f'Source face loaded from {len(review.accepted)} of '
                 f'{len(paths)} image(s)',
@@ -226,6 +234,41 @@ class SwappingProcessor(FrameProcessor):
         except Exception as e:
             emit_warning(f"Failed to load source: {e}", scope='SWAPPER')
             return False
+
+    def _load_texture(self, accepted: List[str]) -> None:
+        """
+        Extract skin texture from the best of the accepted source images.
+
+        **One image, not the average.** Every accepted image feeds the identity
+        embedding, because identity is a distributed representation. Texture is
+        not — it is spatially localised, so averaging detail maps taken at
+        different angles and focal lengths makes misaligned pores cancel instead
+        of reinforce. `select_texture_source` picks the single best on scores the
+        source review already computed.
+
+        Failure is silent and non-fatal by design. This layer is off by default
+        and decorative when on; a source set that yields no texture (all `.npy`
+        embeddings, an unreadable file, unusable keypoints) must still swap.
+
+        Args:
+            accepted: Source paths that passed the guards
+        """
+        self.source_texture = None
+
+        best = self.database.select_texture_source(accepted)
+        if best is None:
+            return
+
+        path, face = best
+        self.source_texture = texture.extract(path, face)
+        if self.source_texture is None:
+            return
+
+        emit_status(
+            f'Texture source: {os.path.basename(path)} '
+            f'({self.source_texture.native_px}px face)',
+            scope='TEXTURE',
+        )
 
     def process(self, frame: Frame) -> Frame:
         """

@@ -130,6 +130,15 @@ def parse_args() -> None:
                         dest='enhancer_weight', type=float, default=_env_float('ENHANCER_WEIGHT'))
     program.add_argument('--enhance-strength', help='how much of the restored face to keep (0.0-1.0)',
                         dest='enhance_strength', type=float, default=_env_float('ENHANCE_STRENGTH'))
+    program.add_argument('--mask-feather',
+                        help='frame-space seam feather, as a fraction of face size (0.0-0.25)',
+                        dest='mask_feather', type=float, default=_env_float('MASK_FEATHER'))
+    program.add_argument('--mask-erode',
+                        help='pull the mask in before feathering, fraction of aligned size',
+                        dest='mask_erode', type=float, default=_env_float('MASK_ERODE'))
+    program.add_argument('--texture-strength',
+                        help='source skin detail added over the swap (0.0-1.0, 0 disables)',
+                        dest='texture_strength', type=float, default=_env_float('TEXTURE_STRENGTH'))
     program.add_argument('--aligned-size', help='ceiling on compositing resolution (128-512); actual size follows face size',
                         dest='aligned_size', type=int, default=_env_int('ALIGNED_SIZE'))
     program.add_argument('--restore-size', help='FFHQ crop edge fed to the restorer (128-512); '
@@ -224,6 +233,9 @@ def parse_args() -> None:
         ('enhancer_model', args.enhancer_model),
         ('enhancer_weight', args.enhancer_weight),
         ('enhance_strength', args.enhance_strength),
+        ('mask_feather', args.mask_feather),
+        ('mask_erode', args.mask_erode),
+        ('texture_strength', args.texture_strength),
         ('aligned_size', args.aligned_size),
         ('restore_size', args.restore_size),
         ('restore_min_face', args.restore_min_face),

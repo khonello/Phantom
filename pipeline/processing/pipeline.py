@@ -253,6 +253,32 @@ class ProcessingPipeline:
             identity_sim=self.config.guard_identity_sim,
         )
 
+    def _load_source(self, sources: List[str]) -> bool:
+        """
+        Set the source identity, and hand its skin texture to the compositor.
+
+        The two travel together because they come from the same review pass and
+        would otherwise disagree: a compositor still holding the previous
+        identity's texture would paint one person's pores onto another's face,
+        which is the confidently-wrong output the source guards exist to
+        prevent, arriving underneath them.
+
+        Args:
+            sources: Source image or `.npy` paths
+
+        Returns:
+            True if a source face was built. Texture is optional and its absence
+            never fails this — the layer is off by default and decorative when
+            on, and an all-`.npy` source set has no pixels to extract from.
+        """
+        assert self._swapping_proc is not None
+        loaded = self._swapping_proc.set_source(sources)
+        if self._compositor is not None:
+            self._compositor.source_texture = (
+                self._swapping_proc.source_texture if loaded else None
+            )
+        return loaded
+
     def _reset_temporal_state(self) -> None:
         """
         Drop everything that smooths across frames.
@@ -310,7 +336,7 @@ class ProcessingPipeline:
             if sources and self._swapping_proc is None:
                 self._build_processors()
             if self._swapping_proc:
-                self._swapping_proc.set_source(sources)
+                self._load_source(sources)
 
         # Landmark smoothing factor or identity floor changed -> rebuild the
         # stabilizer. Both are constructor arguments, and the identity floor is
@@ -502,7 +528,7 @@ class ProcessingPipeline:
             [self.config.source_path] if self.config.source_path else []
         )
         if sources:
-            if not self._swapping_proc.set_source(sources):
+            if not self._load_source(sources):
                 emit_error(
                     'No face detected in source image(s) — stream will run '
                     'without face swapping until a valid source is set',
@@ -1023,7 +1049,7 @@ class ProcessingPipeline:
         sources = self.config.source_paths or (
             [self.config.source_path] if self.config.source_path else []
         )
-        if not sources or not self._swapping_proc.set_source(sources):
+        if not sources or not self._load_source(sources):
             emit_error('No valid source face', scope='PIPELINE')
             return
 

@@ -912,6 +912,14 @@ _REALISM_FIELDS: Dict[str, Any] = {
     'restore_min_face': lambda v: max(0, int(v)),
     'temporal_alpha': lambda v: min(1.0, max(0.0, float(v))),
     'color_strength': lambda v: min(1.0, max(0.0, float(v))),
+    # The two seam levers. Clamped well short of absurd: a feather a quarter of
+    # the face wide is not a seam fix, it is a dissolve.
+    'mask_feather': lambda v: min(0.25, max(0.0, float(v))),
+    'mask_erode': lambda v: min(0.25, max(0.0, float(v))),
+    # The additive skin-detail layer. Live-switchable for the same reason the
+    # restoration knobs are: whether it reads as skin or as noise is a footage
+    # question, and A/B on one clip is the only way to answer it.
+    'texture_strength': lambda v: min(1.0, max(0.0, float(v))),
     'grain': lambda v: bool(v),
     'occluder': lambda v: bool(v),
     # Restoration on/off. It has its own `set_enhance` command and is

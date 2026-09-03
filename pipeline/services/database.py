@@ -15,9 +15,100 @@ import cv2
 import numpy as np
 
 from pipeline.config import FaceSwapConfig
-from pipeline.types import Face
+from pipeline.types import Bbox, Detection, Face, Frame
 from pipeline.services import guards
 from pipeline.services.face_detection import FaceDetector
+
+
+# Weights for `_texture_score`. **Starting points chosen on the design target,
+# not measured** — the same footing the restoration presets are on. Sharpness
+# leads because a soft photograph has no high-frequency band to extract at all,
+# and size follows it because a small face has one that is real but thin.
+# Frontality matters less than either: the canonical warp is a similarity
+# transform and does not correct yaw, so an angled source yields a foreshortened
+# map — but selection can only choose among what was uploaded, and refusing an
+# angled source is the guards' job, not this one's.
+_TEXTURE_WEIGHTS = {
+    'sharpness': 0.40,
+    'size': 0.30,
+    'frontality': 0.20,
+    'exposure': 0.10,
+}
+
+# Laplacian variance at which the sharpness term is worth half its weight. Ten
+# times `guard_min_sharpness`'s default floor of 40 — the guard asks "is this
+# photo usable at all", and this asks "which of these usable photos is best",
+# which is a question about the top of the range rather than the bottom.
+_SHARPNESS_HALF = 400.0
+
+# Face extent, shorter side, at which the size term saturates. Beyond this the
+# canonical crop is downsampling real detail rather than gaining any.
+_SIZE_FULL = 400.0
+
+
+def _texture_score(frame: Frame, detection: Detection) -> float:
+    """
+    How suitable one source image is as the texture donor, in [0, 1].
+
+    Called from `_review_image`, where the frame has just been read and the
+    detection has just been made — see `select_texture_source` for why it lives
+    there rather than in a selector of its own.
+
+    Occlusion is **not** scored, and its absence is deliberate rather than
+    pending: the source guards do not run XSeg, so there is no occlusion signal
+    on this path to reuse, and inventing one here would mean a second masking
+    definition that could disagree with the one the extractor uses.
+
+    Args:
+        frame: The source image, BGR
+        detection: Its primary detection
+
+    Returns:
+        Weighted score in [0, 1]; higher is a better texture donor
+    """
+    bbox = detection.bbox
+
+    # The face, not the frame — `guards.sharpness` already takes the bbox for
+    # exactly this reason, since a portrait's blurred background is the point of
+    # the photograph rather than a defect in it.
+    variance = guards.sharpness(frame, bbox)
+    sharpness = variance / (variance + _SHARPNESS_HALF)
+
+    size = min(1.0, min(bbox.w, bbox.h) / _SIZE_FULL)
+
+    yaw = guards.estimate_yaw(detection)
+    # An unreadable pose scores as neutral rather than as frontal. Scoring it
+    # frontal would let a model pack without `pose` promote every image to the
+    # top of this term, which is a silent change of behaviour with the pack.
+    frontality = 0.5 if yaw is None else max(0.0, 1.0 - abs(yaw) / 90.0)
+
+    return float(
+        _TEXTURE_WEIGHTS['sharpness'] * sharpness
+        + _TEXTURE_WEIGHTS['size'] * size
+        + _TEXTURE_WEIGHTS['frontality'] * frontality
+        + _TEXTURE_WEIGHTS['exposure'] * _exposure_score(frame, bbox)
+    )
+
+
+def _exposure_score(frame: Frame, bbox: Bbox) -> float:
+    """
+    How much of the face is neither crushed nor blown out, in [0, 1].
+
+    Clipped pixels carry no texture in either direction — a blown-out cheek is
+    flat white and a crushed shadow is flat black, and no amount of high-pass
+    recovers detail from either. This is the cheapest possible proxy for
+    "well lit" and is not a substitute for looking at the photograph.
+    """
+    height, width = frame.shape[:2]
+    box = bbox.clip_to_frame((height, width))
+    if box.w < 8 or box.h < 8:
+        return 0.5
+
+    gray = cv2.cvtColor(
+        frame[box.y:box.y + box.h, box.x:box.x + box.w], cv2.COLOR_BGR2GRAY,
+    )
+    clipped = int(np.count_nonzero((gray <= 4) | (gray >= 251)))
+    return float(1.0 - clipped / gray.size)
 
 
 @dataclass
@@ -101,6 +192,14 @@ class FaceDatabase:
         self.config = config
         self._cache: Dict[str, Face] = {}
 
+        # Texture suitability per accepted source, recorded during the review
+        # that already read and detected every image. Scoring here rather than
+        # in a selector of its own is the whole reason this is thirty lines:
+        # the frame is in hand, the detection is in hand, and re-reading four
+        # photos to ask a question the review could have answered is work for
+        # nothing. Keyed by path, cleared with the cache.
+        self._texture_scores: Dict[str, float] = {}
+
     @staticmethod
     def _cache_key(image_path: str) -> str:
         """
@@ -178,6 +277,48 @@ class FaceDatabase:
             return faces[0]
 
         return self._average_faces(faces)
+
+    def select_texture_source(
+        self,
+        paths: List[str],
+    ) -> Optional[Tuple[str, Face]]:
+        """
+        Pick the single image to lift skin texture from.
+
+        **Deliberately not the averaged identity.** Every accepted image feeds
+        the embedding, because identity is a distributed representation and
+        averaging it is sound. High-frequency texture is not — it is spatially
+        localised, so blending detail maps taken at different angles, focal
+        lengths and expressions makes misaligned pores cancel rather than
+        reinforce. One image, chosen on its own merits.
+
+        The merits are already measured. `_review_image` had the frame and the
+        detection in hand and recorded a score there; this is the `max()` over
+        them. Nothing is re-read and nothing is re-detected.
+
+        Args:
+            paths: Accepted source paths, from `SourceReview.accepted`
+
+        Returns:
+            (path, face) for the best image, or None if none of them is an
+            image this can score — an all-`.npy` source set is the ordinary
+            case, and it has no pixels to extract from.
+        """
+        best: Optional[Tuple[str, Face]] = None
+        best_score = -1.0
+
+        for path in paths:
+            score = self._texture_scores.get(path)
+            if score is None:
+                continue
+            face = self._cache.get(self._cache_key(path))
+            if face is None:
+                continue
+            if score > best_score:
+                best_score = score
+                best = (path, face)
+
+        return best
 
     def review_sources(self, paths: List[str]) -> SourceReview:
         """
@@ -266,6 +407,7 @@ class FaceDatabase:
 
         # Cache it so `get_source_face` does not detect the same file twice.
         self._cache[self._cache_key(image_path)] = primary.face
+        self._texture_scores[image_path] = _texture_score(frame, primary)
         return guards.GuardResult.passed(), primary.face
 
     def _review_identity(
@@ -439,3 +581,4 @@ class FaceDatabase:
     def clear(self) -> None:
         """Clear all cached embeddings."""
         self._cache.clear()
+        self._texture_scores.clear()

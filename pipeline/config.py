@@ -182,6 +182,45 @@ class FaceSwapConfig:
     # makes it askable without a new model.
     restore_min_face: int = 0
     color_strength: float = 1.0     # scales the LAB colour transfer
+
+    # Seam. Both are the direct levers on failure mode 2 and both were reported
+    # wrong on footage -- "like the face pasted on target" -- so they are knobs
+    # rather than constants: this is exactly the kind of question only an A/B on
+    # a real call can settle. See docs/TEXTURE_PIPELINE.md section 13.
+    #
+    # `mask_feather` is the frame-space transition width as a fraction of the
+    # face's extent in frame. It was 0.01 of the region of interest, which on a
+    # 101px face is 1.1px -- combined with the aligned-space feather scaled down,
+    # a total transition of ~1.4% of the face's width. That is a hard edge.
+    #
+    # `mask_erode` pulls the mask in, in aligned space, *before* it is feathered.
+    # Without it the hull is expanded 10% radially and then blurred, so the
+    # midpoint of the transition sits outside the landmark silhouette -- on neck
+    # at the chin, on hair at the temples, which is where the material either
+    # side differs most. Eroding first puts the soft part on skin. Deliberately
+    # not "extend the mask": growing the *coverage* puts swapped skin where hair
+    # should be, which docs/ENHANCEMENT.md records as the worse tell.
+    mask_feather: float = 0.04
+    mask_erode: float = 0.03
+
+    # Skin detail lifted from the operator's own source photograph and warped
+    # onto the face every frame. The swapped face carries 58% of the frame's
+    # high-frequency energy against an ideal of 1.00, and restoration was
+    # measured to close 7% of that gap — this is the layer aimed at the rest.
+    #
+    # **The fraction of the measured gap to close**, not a gain. The compositor
+    # measures how much high-frequency energy the operator's real face has in
+    # these very pixels, subtracts what the swap already carries and what grain
+    # is about to add, and this is the share of what remains. So 1.0 lands at
+    # parity with the real face and cannot overshoot it, and one setting means
+    # the same thing on any clip rather than tracking whichever had most
+    # contrast. `texture.TEXTURE_MAX` survives only as a backstop against an
+    # estimate gone wrong.
+    #
+    # **Defaults off.** It has never been judged on footage, and a realism knob
+    # that arrives switched on is one nobody chose. 0.3-0.5 is the expected
+    # working range; see docs/TEXTURE_PIPELINE.md.
+    texture_strength: float = 0.0
     grain: bool = True              # match sensor noise on the composited face
     occluder: bool = True           # XSeg mask so hands/mics are not overpainted
 
@@ -414,6 +453,9 @@ class FaceSwapConfig:
             'temporal_alpha': self.temporal_alpha,
             'color_correction': self.color_correction,
             'color_strength': self.color_strength,
+            'mask_feather': self.mask_feather,
+            'mask_erode': self.mask_erode,
+            'texture_strength': self.texture_strength,
             'grain': self.grain,
             'occluder': self.occluder,
             'buffer_size': self.buffer_size,

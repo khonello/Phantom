@@ -636,10 +636,13 @@ GPU work can reach.
 - **Lint**: `flake8 pipeline.py pipeline desktop`
 - **Type check**: `mypy pipeline desktop` — clean, keep it that way (CI runs `mypy pipeline` only)
 - **Unit tests**: `python -m pytest tests/ -q` — ~32s, no GPU or model weights
-  needed (the ML layer is stubbed in `tests/conftest.py`). Ten modules;
+  needed (the ML layer is stubbed in `tests/conftest.py`). Eleven modules;
   `test_photo_batch.py` covers the photo path, including that a refused photo
-  leaves no output file behind, and `test_templates.py` covers the bundled
-  library and the face its manifest names
+  leaves no output file behind, `test_templates.py` covers the bundled
+  library and the face its manifest names, and `test_texture.py` covers the
+  source-texture layer — including that its band follows the *target* face's
+  size rather than the crop it was cached at, which is the mistake that would
+  make the whole layer a silent no-op
 - **Validate templates**: `python tools/validate_templates.py` — runs the real
   guards over the library, non-zero if any scene would be refused
 - **End-to-end**: `python pipeline.py -s=.github/examples/source.jpg -t=.github/examples/target.mp4 -o=/tmp/output.mp4`
@@ -1039,6 +1042,123 @@ rule also removes the ability to test it, since three of the four cells in
 {inswapper, hyperswap} x {restore, don't} would become unreachable. The graded
 version already exists in `enhance_strength`; leave the binary to the footage.
 
+### Source skin texture
+
+The swapped face carries **58% of the frame's high-frequency energy** against an
+ideal of 1.00. That deficit is what reads as plastic, and **restoration is not
+what causes it**: turning restoration off entirely moves the number by 0.03, 7%
+of a 0.42 gap. The detail was never there — the swapper generates at 128 or 256
+native and everything downstream resamples that.
+
+So it is taken from where it does exist: the operator's own source photograph.
+`pipeline/processing/texture.py` high-passes one source image, stores it in
+canonical FFHQ framing, and `FaceCompositor._add_texture` warps it onto the face
+every frame. Full reasoning, and the assessment of the design it came from, in
+[docs/TEXTURE_PIPELINE.md](docs/TEXTURE_PIPELINE.md).
+
+Four properties carry it:
+
+- **It runs in frame space, inside `_paste`, not in aligned space.** This is the
+  one that decides whether the layer exists at all. The compositor works at
+  128-320 and `_paste` warps the finished crop down onto a face that is often
+  ~100px; a high-frequency field added before that warp is decimated by it —
+  pores land under the destination's Nyquist limit and average away. The
+  codebase already made this argument about a field with the same spectral
+  character: `_add_grain` says grain "would filter into blobs" if it were added
+  earlier. **Pores are grain with structure.** Same place, texture first.
+- **The band is chosen at the size it will be displayed at.** The *crop* is
+  cached at 512; the *map* is derived per working size and memoised, with the
+  high-pass sigma scaled against the same 256px reference `_match_detail` uses.
+  Both stages therefore mean the same physical detail — one adds to the band the
+  other scales, and stages describing adjacent-but-different bands would fight.
+- **One source image, not the average.** Every accepted photo feeds the identity
+  embedding, because identity is a distributed representation. Texture is not —
+  it is spatially localised, so blending maps taken at different angles and focal
+  lengths makes misaligned pores cancel instead of reinforce.
+  `FaceDatabase.select_texture_source` picks the best on sharpness, size,
+  frontality and clipping, all scored during the review that already read and
+  detected every image. The weights are starting points chosen on the design
+  target, not measured.
+- **Bounded by measurement, not by a constant.** `_match_detail` runs in
+  aligned space *before* `_paste`, so nothing downstream ever saw what texture
+  added and the knob was an open-ended gain — past parity the face becomes
+  noisier than the camera that supposedly shot it, which is failure mode 1
+  approached from the other side. `_texture_headroom` measures the operator's
+  real face in the same pixels (a real face, right size, right lens, right
+  light — a better statement of "what skin looks like here" than the background
+  could give), subtracts what the swap already carries and what grain is about
+  to add, and `texture_strength` is the fraction of what remains. Independent
+  fields add in quadrature, so the arithmetic is `f² + g² + t² = r²`.
+- **Monochrome, masked to skin, normalised.** Monochrome for the reason grain is:
+  independent per-channel high frequency reads as coloured speckle. Masked with
+  the landmark hull minus eye, nose and mouth exclusions taken from the FFHQ
+  template — reprojected eyelashes over the swap's own eyes are worse than no
+  texture. Normalised to unit deviation inside that mask, so `texture_strength`
+  means the same thing for a contrasty photograph and a flat one.
+
+**Off by default, and it has never been judged on footage.** 0.3-0.5 is the
+expected working range; A/B it with
+`tools/realism.py --host ... texture_strength=0.4`.
+
+**The seam came first.** A live run reported the swap as "very noticeable, like
+the face pasted on target" — failure mode 2, seen rather than measured, and the
+thing the eye finds before it finds texture. Three causes were arithmetic rather
+than hypothesis, and two are fixed:
+
+- **The transition was ~1.4% of the face's width.** Both feathers were fractions
+  of *their own space* and both spaces are bigger than the face: 5% of a 256
+  aligned crop lands as 0.91px on a 101px face, and the frame-space blur was 1%
+  of the region. Neither constant was wrong alone; nothing was looking at the
+  product. `mask_feather` now measures against the face's own extent — the only
+  length the eye compares against — and the ROI pad grows with it, since a blur
+  wider than its padding reflects off the border and never reaches zero.
+  Measured on a 100px face: **5px → 10px** at the new default.
+- **The 50%-alpha line sat outside the face.** `_HULL_EXPAND` grows the hull 10%
+  radially *before* the blur, putting the midpoint of the transition on neck at
+  the chin and hair at the temples — exactly where the material either side
+  differs most. `mask_erode` pulls it back onto skin first. Deliberately not
+  "extend the mask": growing *coverage* puts swapped skin where hair should be,
+  which is the worse tell.
+- **A convex hull has no concave points** and so cannot follow a jawline at any
+  expansion. Not yet addressed — phase A3, held back deliberately so it is not
+  confounded with the two changes above.
+
+The colour deadband went with them: `_COLOR_FLOOR` was 4.0, so a sub-4-unit LAB
+mean difference got **zero** global correction and a 10-unit one only half. The
+anti-snapping property that floor was protecting is delivered by the *ramp*, so
+it only has to clear estimator noise — now 1.5, with the range 12.0 → 8.0.
+
+**`compare_frames.py` said there was no seam.** It reported gradient 1.028 and
+"no seam detected" on the footage in question, because it measures gradient
+*magnitude* — a texture statistic that a 3-unit step over two pixels barely
+moves — and divides by the ring *outside* the mask, which contains hair. It now
+reports **`seam_excess`**: the LAB step across the boundary in the output, less
+the step the untouched input already had at the same rings, so it measures what
+the composite *added*. Medians, and blurred first, so grain and hair do not
+register as a seam. `seam_ratio` is retained and demoted.
+
+Measured cost of the texture layer on CPU: **0.90ms** per frame on a 101px face,
+**7.49ms** on a 460px one — it scales with face size, so at the `production`
+preset with an operator close to the camera it is not free. Extraction is 28.2ms
+once per source, off the live path. The headroom statistics are taken over a
+bounded 160px window rather than the whole region: measuring every pixel of a
+500px face cost **16.1ms**, more than the rest of the frame, and was paid even
+when the answer was "no headroom, add nothing".
+
+Two things it deliberately does **not** do, both recorded rather than forgotten:
+
+- **It does not correct pose.** Canonical space is a similarity transform, so
+  composing source->canonical->target has identical error to source->target in
+  one step. What canonical space buys is that extraction runs *once* — the
+  caching, not the accuracy. An angled source yields a foreshortened map, which
+  is why selection scores frontality and why the confidence mask (not built) has
+  to fall off with pose distance.
+- **It does not remove texture swimming.** The map's content is fixed, so there
+  is no content flicker; but fixed content warped by a per-frame affine slides
+  across the face as the head turns, and that is caused by *correct* landmark
+  motion rather than by noise, so `LandmarkStabilizer` does not address it. Low
+  strength is the mitigation until the confidence mask exists.
+
 ### Realism knobs (`FaceSwapConfig`)
 | Field | Default | Effect |
 |-------|---------|--------|
@@ -1048,6 +1168,9 @@ version already exists in `enhance_strength`; leave the binary to the footage.
 | `enhance_strength` | `0.7` | How much of the restored face to keep. Full strength reads as AI; partial keeps believable imperfection |
 | `restore_size` | `512` | Edge of the FFHQ crop fed to the restorer. A model with fixed spatial dims overrides it and says so once — see below |
 | `restore_min_face` | `0` | Skip restoration below this face size (px, shorter side). `0` never skips |
+| `texture_strength` | `0.0` | Skin detail lifted from the operator's own source photo and warped onto the face each frame. **The fraction of the measured gap to close** — the compositor measures the real face's high-frequency energy in the same pixels, less what the swap and grain already carry, so `1.0` is parity and overshoot is impossible. **Off by default, never judged on footage.** 0.3-0.5 expected |
+| `mask_feather` | `0.04` | Frame-space seam transition, as a fraction of the face's extent in frame (floor 2px). Was effectively 1%, giving a ~1.4px transition on a 101px face — a hard edge, and the reported "pasted on" look |
+| `mask_erode` | `0.03` | Pulls the mask in, in aligned space, **before** it is feathered, so the transition sits on skin rather than straddling the expanded hull onto neck and hair |
 | `aligned_size` | `256` | **Ceiling** on compositing resolution (clamped 128–512). The size actually used follows the face's own size in frame, in steps, with hysteresis — a distant face is not upsampled to detail its webcam never captured, and costs proportionally less |
 | `temporal_alpha` | `0.6` | EMA on aligned pixels, kills shimmer (`1.0` disables) |
 | `color_correction` | `True` | LAB transfer, sampled inside the mask, ramped by colour distance |
@@ -1611,7 +1734,7 @@ alternating detections would zero a consecutive counter every other frame. See
 Three ways to set them:
 - **Quality preset** — the desktop dropdown; see the table above.
 - **CLI / env** — `--enhancer-model`, `--enhancer-weight`, `--enhance-strength`,
-  `--aligned-size`, `--restore-size`, `--restore-min-face`, `--temporal-alpha`, `--color-strength`, `--no-enhance`,
+  `--aligned-size`, `--restore-size`, `--restore-min-face`, `--temporal-alpha`, `--color-strength`, `--texture-strength`, `--no-enhance`,
   `--no-grain`, `--no-occluder`. Each also reads an env var
   (`ENHANCER_MODEL`, `ENHANCER_WEIGHT`, …) since the pod is configured via `.env`.
   Precedence: preset first, then CLI/env overrides.
@@ -1724,6 +1847,8 @@ back to the other backend or off — rather than failing.
 - `pipeline/processing/pipeline.py`: `ProcessingPipeline` orchestrator (batch & stream modes)
 - `pipeline/processing/frame_processor.py`: `FrameProcessor` ABC + 4 implementations
 - `pipeline/processing/compositor.py`: `FaceCompositor` aligned-space compositing
+- `pipeline/processing/geometry.py`: FFHQ template, Umeyama similarity fit, the detail band's sigma — shared by the compositor and the texture extractor
+- `pipeline/processing/texture.py`: `SourceTexture` — skin detail extracted once per identity, reprojected per frame
 
 ### I/O & API
 - `pipeline/io/capture.py`: Input sources (webcam, file, network)

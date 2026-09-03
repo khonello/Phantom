@@ -125,9 +125,27 @@ class FaceMasker:
                 self.last_coverage = guards.hull_coverage(hull, occlusion)
                 mask *= occlusion
 
-        # Feather. Blurring a hard-edged mask here plus a second, smaller blur
-        # in frame space (applied by the compositor) is what keeps the seam
-        # smooth regardless of how large the face is in the frame.
+        # Erode before feathering, so the transition falls *inside* the face
+        # rather than straddling its edge.
+        #
+        # `_expand_hull` grows the hull 10% radially, and blurring that directly
+        # leaves the 50%-alpha line outside the landmark silhouette: neck below
+        # the chin, hair at the temples. A boundary is most visible exactly where
+        # the material either side of it differs, and that placed it there. The
+        # erode moves the midpoint back onto skin while leaving the outer extent
+        # of the transition roughly where it was, so coverage is preserved and
+        # only the softness moves.
+        erode = float(getattr(self.config, 'mask_erode', 0.0) or 0.0)
+        erode_px = int(round(size * max(0.0, min(erode, 0.25))))
+        if erode_px >= 1:
+            kernel = np.ones((erode_px * 2 + 1,) * 2, np.uint8)
+            mask = cv2.erode(mask, kernel, iterations=1)
+
+        # Feather. Blurring a hard-edged mask here plus a second, larger blur in
+        # frame space (applied by the compositor) is what keeps the seam smooth
+        # regardless of how large the face is in the frame. This one is the
+        # anti-aliasing half; the frame-space blur is what the eye actually sees,
+        # because it is the only one measured against the face's real size.
         ksize = int(size * self._FEATHER) | 1
         mask = cv2.GaussianBlur(mask, (ksize, ksize), 0)
 
