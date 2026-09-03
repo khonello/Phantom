@@ -54,6 +54,11 @@ image. Destroying an instance means the next `start` downloads everything again.
 The cost of staying in the loop is storage. Vast bills it per host, while the
 instance exists, stopped or not — see `VAST_DISK` below.
 
+> **Doing this for the first time?**
+> [docs/VAST_MANUAL_SETUP.md](docs/VAST_MANUAL_SETUP.md) is the same ground as
+> a tick-list, and it leads with the billing setting that protects the only
+> copy of your model weights. This file is the reference; that one is the run.
+
 ## Part 1 — The account
 
 ### 1a — API key → `VAST_API_KEY`

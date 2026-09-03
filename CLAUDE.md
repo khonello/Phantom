@@ -633,6 +633,13 @@ Lives in `_search_offers`, `_rank`, `_find_offer` and `_create_instance` in
 ## Quick Commands
 
 ### Machine setup
+
+**[docs/VAST_MANUAL_SETUP.md](docs/VAST_MANUAL_SETUP.md)** — everything on
+Vast.ai that no script here can do: account, credit, the two API keys, the SSH
+key, and the four ongoing duties the orchestrator cannot take over. Leads with
+autobilling, because a zero balance with no card on file destroys the instance
+disk — which is the only copy of the venv and weights.
+
 **[docs/SETUP_CHECKLIST.md](docs/SETUP_CHECKLIST.md)** — what has to be
 installed **on which machine**, and where every output file lands.
 
