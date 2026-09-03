@@ -32,6 +32,8 @@ Phantom is a modern, event-driven face-swapping application refactored for compo
 - `pipeline/processing/pipeline.py` — Main orchestrator (batch & stream modes)
 - `pipeline/processing/frame_processor.py` — Composable processor chain
 - `pipeline/processing/compositor.py` — FaceCompositor (aligned-space compositing)
+- `pipeline/processing/geometry.py` — FFHQ template, Umeyama similarity fit, detail-band sigma
+- `pipeline/processing/texture.py` — SourceTexture (skin detail, extracted once per identity)
 - `pipeline/processing/async_processor.py` — Background processing wrapper
 
 **I/O Layer:**

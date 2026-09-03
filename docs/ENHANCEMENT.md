@@ -100,13 +100,25 @@ missing model is never fatal.
 
 ## Killing the seam
 
-The seam is the failure the eye catches fastest, and four separate things work
+The seam is the failure the eye catches fastest, and five separate things work
 on it.
+
+It is also the failure that was **reported on real footage** — "very noticeable,
+like the face pasted on target" — after everything below was already in place,
+which is why items 4 and 5 read the way they do. Two of the three causes were
+arithmetic rather than hypothesis, and the third is not fixed yet. The full
+diagnosis is in [TEXTURE_PIPELINE.md](TEXTURE_PIPELINE.md) §13.
 
 **1. The mask follows the real face.** `FaceMasker` builds a convex hull from
 the 106 landmarks InsightFace already computes, so the boundary tracks the actual
 jawline instead of assuming an ellipse. The hull is expanded 10% radially, with
 an extra upward push of 16% of hull height to recover forehead.
+
+A **convex** hull, though, and that is a limitation rather than a detail: a
+convex hull has no concave points by definition, so it cannot follow an
+under-chin or the notch at a temple at any expansion. Those are the two places a
+"pasted on" impression usually comes from, and it is the one reported cause of
+the seam that is still open.
 
 That forehead push is deliberately moderate. Masking up past the hairline hides
 the hairline seam, but produces a much worse tell: swapped skin where hair should
@@ -121,10 +133,32 @@ composite.
 microphones and hair crossing the face from the mask, so they are not painted
 over with swapped skin. Degrades to hull-only if the model is unavailable.
 
-**4. The edge is feathered twice.** Once in aligned space (5% of crop size), and
-again in frame space (1% of ROI width) after warping back. Blurring only at the
-aligned resolution leaves a stair-stepped edge as soon as the face in frame is
-larger than the aligned crop.
+**4. The mask is eroded before it is feathered** (`mask_erode`, 3% of the
+aligned crop). Without this the hull is expanded 10% and then blurred, which puts
+the *midpoint* of the transition outside the landmark silhouette — on neck below
+the chin, on hair at the temples. A boundary is most visible exactly where the
+material either side of it differs, and that placed it there. Eroding first moves
+the soft part onto skin while leaving the outer extent of the transition roughly
+where it was, so coverage is preserved and only the softness moves.
+
+Note this is not "extend the mask". Growing the *coverage* is the half that
+backfires, for the reason item 1 gives about the forehead: swapped skin where
+hair should be is the worse tell.
+
+**5. The edge is feathered twice.** Once in aligned space (5% of crop size) as
+anti-aliasing, and again in frame space after warping back — and the second one
+is what the eye actually sees, because it is the only one measured against the
+face's real size.
+
+That distinction was got wrong once and is worth keeping. Both feathers used to
+be fractions of *their own space*, and both spaces are larger than the face: 5%
+of a 256 aligned crop lands as 0.91px on a 101px face, and the frame-space blur
+was 1% of the region of interest, or 1.1px. Neither constant was wrong alone.
+Their product was a **1.4px transition on a 101px face** — 1.4% of its width, a
+hard edge, and nothing was looking at the product. `mask_feather` (4%, floored at
+2px) now measures against the face's own extent, and the region of interest's
+padding grows with it, since a blur wider than its padding reflects off the
+border and leaves the mask never reaching zero along it.
 
 ---
 
@@ -141,7 +175,12 @@ shifting their skin tone.
 
 **Global** — a mean/std transfer in LAB. Ramps continuously with measured colour
 distance rather than triggering on a threshold, so it can never snap on and off
-between frames. The L-channel standard deviation is damped to 50%: matching L
+between frames. The ramp starts at 1.5 LAB units and reaches full at 9.5. It
+used to start at 4.0, which left a sub-4-unit mean difference corrected by
+*nothing* — and a difference that small is invisible across a face and plainly
+visible across a boundary, which is where the eye compares hardest. The
+anti-snapping property the floor looked like it was protecting is delivered by
+the ramp; the floor only has to clear estimator noise. The L-channel standard deviation is damped to 50%: matching L
 *mean* fixes brightness and matters; forcing L *std* flattens facial contrast.
 
 **Illumination** — a global shift is only correct when the light is flat, and a

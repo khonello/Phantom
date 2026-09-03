@@ -683,18 +683,73 @@ transform cannot do at any strength (§3.3).
 After B3, because the confidence mask is the cheap version of the same idea:
 attenuate where the pose disagrees, rather than correct for it.
 
-### Phase E — unchanged deferrals
+### Phase E — open, but unjustified until footage says otherwise
 
-Procedural fallback (proposal decision 5), the diffuse/light-scatter pass
-(decision 7, §7), and low-frequency tonal variation (§5 — narrowest band, most
-existing machinery to fight).
+Three items from the source document are neither built nor rejected. What they
+share is that **nothing has yet shown they are needed**, and each would add a
+layer to a stack that is already three deep and entirely unjudged. Each is
+listed with the observation that would justify it, so the decision has a trigger
+rather than a mood.
 
-Two items from the source document remain **undefined rather than deferred**, and
-need a sentence each before they can be assessed: **"identity / feature
-augmentation"**, which appears in the pipeline diagram with no module and no
-description; and **"final color grading"**, which has no pipeline-side equivalent
-here — the desktop's filters are a separate client-side decorative layer that
-[CLAUDE.md](../CLAUDE.md) says to keep off while judging.
+**Procedural micro-texture fallback** (source decision 5). Justified if footage
+shows low-confidence regions reading *worse* than the surrounding face. Note
+what B3 already does there: pose confidence reduces the *amount* of real texture
+as the angle diverges, so a low-confidence region now gets less detail rather
+than wrong detail. That may simply be the right answer, and synthetic fill is
+only better if "less texture here" reads worse than "invented texture here" —
+which is exactly the generic look this design exists to avoid.
+
+**Diffuse / light-scatter pass** (source decision 7, §7). Justified if someone
+says the skin reads *hard* — not plastic, which is the texture problem, but
+lacking the soft light falloff real skin has. It is the highest-risk item in the
+source document by its own admission (identity softening), it belongs in a
+different frequency band at a different insertion point (§3.2), and no
+observation yet points at it.
+
+**Low-frequency tonal variation** (§5). Last, always. It has the narrowest band
+to live in — between `_match_illumination`'s 8x downscale and `_match_detail`'s
+sigma — and two existing stages actively normalise what it would add. Justified
+only if the face still reads as *evenly toned* after everything above.
+
+### Phase F — the operator surface, after C1
+
+**Not before C1**, and the reason is the same one that governs the restoration
+dropdown: named steps are a promise about what the steps mean. `subtle` and
+`balanced` for a layer nobody has looked at would be guesses wearing the clothes
+of a calibration, and the operator would trust them.
+
+When it does land, three decisions are already made:
+
+**Fold texture into the existing restoration control, do not add a second one.**
+Restoration removes skin texture and this layer puts it back: to the operator
+they are one axis — "how synthetic does this look" — and two dropdowns that
+interact is a worse control than one that does not. That is a *UX* coupling and
+must not leak into the API: §4.2 measured the mechanical coupling at ~7%, so
+`enhance_strength` and `texture_strength` stay independent under `set_realism`,
+which is where the A/B happens. Presets pick a look; `set_realism` does the
+science. This is the same split `PRESETS` and the model profiles already use.
+
+**Do not expose the seam knobs.** `mask_feather` and `mask_erode` are
+correctness, not preference — the same category as `color_correction`, which
+CLAUDE.md records as removed from the header because "turning it off never makes
+output better". There is one right transition width for a given face size and it
+is computed from it. If a default is wrong, the fix is the default. They stay on
+`set_realism` and the CLI for calibration, which is what that surface is for.
+
+**Do not add a second source picker.** The tempting version — let the operator
+choose which photo supplies texture — solves a problem nobody has had: the
+scorer has never been watched picking badly, and building an override for a
+failure that has not happened is how a UI acquires controls nobody understands.
+The pipeline already emits `Texture source: <name> (<N>px face)` under a
+`TEXTURE` scope, so the choice is visible before it is overridable, which is the
+right order.
+
+If footage does show it picking badly, the affordance is a **selection within
+`review.accepted`**, never an independent upload. That constraint is not a
+detail: the accepted set has been through the identity-outlier guard, and a
+freely chosen texture donor could carry a different person's pores into the face
+— a subtle identity leak underneath the guards that exist to prevent exactly
+that. The cheaper fix, if the scorer is wrong, is its weights.
 
 ## 12. Open risks
 
@@ -763,3 +818,52 @@ said there was no seam.** `compare_frames.py` reported gradient-at-mask-edge
 1.028 and 1.038 in the two configurations measured, both reading as "no seam
 detected", and a person then saw one. Until A1 resolves that, treat the seam row
 of §1's table as carrying no information — not as evidence the seam is mild.
+
+---
+
+## 14. What will not be built
+
+Kept as a list rather than deleted, because the reasons are the useful part: a
+rejected idea that comes back without its reason is a rediscovery, not a
+decision. Everything here is closed unless the evidence behind it changes.
+
+**From the source document**
+
+- **"Identity / feature augmentation."** It appears in the pipeline diagram
+  between structural cleanup and colour transformation, with no module, no
+  description and no stated effect. Not rejected on its merits — it has none
+  stated. One sentence about what it augments would reopen it.
+- **"Final colour grading."** There is no pipeline-side equivalent and there
+  should not be. The desktop's filters already occupy that slot deliberately
+  *client-side*, so a look can be auditioned without reaching a call, and
+  [CLAUDE.md](../CLAUDE.md) says to keep them off while judging a swap. A
+  pipeline-side grade would compete for the latency budget and be judged on a
+  rented GPU, which is the wrong place for a preference.
+- **The conditional second restorer** (CodeFormer after GPEN, §4.1). Two
+  restoration models in series on the live path, for a stage measured at +0.03
+  on the only metric it moves, gated by an artifact detector that does not
+  exist. The fidelity weight was also specified backwards, at the
+  maximum-hallucination end.
+- **The strength-coupling assumption** (§4.2). Measured at ~7%. Independent
+  toggles stay; the assumed direction goes.
+- **A true UV unwrap.** Superseded rather than refused — the 68-point mesh in
+  phase D uses a correspondence `buffalo_l` already computes every frame, where
+  a 3DMM fit would be a new model on the live path for a coarser gain.
+
+**From the source document's performance section** (§9)
+
+- **BiSeNet on the live path.** A new per-frame ONNX inference, which is the one
+  thing the design promised not to add. The landmark hull minus template feature
+  exclusions, intersected with the XSeg pass that already runs, covers it.
+- **Batching across frames** (#3). Trades latency for throughput; the live call
+  is a latency problem, and the source document says so itself. Still open for
+  RENDER.
+- **Mixed precision and `torch.compile`** (#6, #7). There is no torch in this
+  path and none should be added — the compositor is OpenCV on the CPU, and
+  moving it would cost two device transfers around ~2ms of work.
+
+**From this document**
+
+- **Poisson / gradient-domain seam blending.** The textbook answer, already
+  rejected in this codebase: it pulses frame to frame, trading failure mode 2
+  for failure mode 3.
