@@ -176,9 +176,11 @@ rather than a few milliseconds.
 - **JPEG per frame, twice each way.** The desktop encodes, the pod decodes,
   processes, encodes, and the desktop decodes. At 640x360 q70 that is ~30KB a
   frame, ~4.8Mbps up — and CLAUDE.md already records the uplink as the untested
-  hypothesis for the latency that did not go away when compute halved. A video
-  codec would cut that 5-10x. It is the largest single item in this document and
-  it is not a compositor change.
+  hypothesis for the latency that did not go away when compute halved. It is the
+  largest single item in this document and it is not a compositor change. See
+  [§9](#9-why-the-wire-format-is-jpeg-and-what-should-replace-it) for why the
+  answer is a video codec rather than sending frames raw, which is 23x the
+  bytes.
 
 ---
 
@@ -247,9 +249,97 @@ has never been measured on its own because it sat in one bucket with the
 compositor. It can be now — every compositor stage is itemised, so encode is the
 remainder.
 
+
 ---
 
-## 9. How to reproduce
+## 9. Why the wire format is JPEG, and what should replace it
+
+The obvious question about a 2ms encode and a 1.3ms decode is why they happen at
+all: WebSocket carries binary, so why not send the frame raw and skip both?
+
+Because the codec is not what costs. Measured on the same machine as everything
+else, on a face-like frame rather than noise (noise is the worst case for any
+codec and would flatter raw):
+
+| preset | encode | decode | JPEG/frame | raw/frame | **JPEG** | **raw** |
+|---|---|---|---|---|---|---|
+| `fast` 480x270 q60 | 0.52ms | 0.57ms | 12.6 KB | 379.7 KB | 1.6 Mbps | **46.7 Mbps** |
+| `optimal` 640x360 q70 | 0.76ms | 1.32ms | 29.3 KB | 675.0 KB | 4.8 Mbps | **110.6 Mbps** |
+| `production` 960x540 q85 | 2.20ms | 3.61ms | 126.7 KB | 1518.8 KB | 31.1 Mbps | **373.2 Mbps** |
+
+**Raw trades 2.1ms of CPU for 23x the bytes**, on the one leg already suspected
+of being the bottleneck. The decisive number is not bandwidth but *serialisation
+time* — how long the bytes take to leave the machine, which is latency whatever
+the round trip does afterwards. One `optimal` frame, raw:
+
+    20 Mbps uplink (a good home connection)   276 ms   per frame
+    100 Mbps                                   55 ms
+    1 Gbps                                      5.5 ms
+
+against a 50ms frame budget. Raw needs a sustained **>110 Mbps upstream** merely
+to keep pace with the frame rate, before any margin for the round trip. The same
+frame as JPEG is 12ms on that 20 Mbps link. So raw is not a smaller overhead, it
+is the same overhead moved from a place that costs 2ms to a place that costs
+hundreds — and CLAUDE.md already records the uplink as the untested hypothesis
+for the latency that did not go away when compute halved.
+
+Bitmap, PNG and lossless WebP all land the same way or worse: PNG is slower to
+encode than JPEG *and* several times larger than JPEG on photographic content,
+and lossless anything is within a small factor of raw.
+
+### What is actually worth doing
+
+**1. Skip the codec entirely when there is no network.** When the pipeline runs
+on the operator's own machine there is no wire, and a frame still goes
+JPEG -> socket -> JPEG for a trip between two processes. The desktop already has
+`update_from_numpy` for the filtered path, so the receiving half exists. This is
+the one case where the question's instinct is exactly right, and it matters
+because [LOCAL_GPU_SETUP.md](LOCAL_GPU_SETUP.md) records that a local GPU is not
+faster than a rented one, it is *closer* — removing the ~350ms round trip is the
+largest single latency improvement available.
+
+**2. Replace JPEG with a video codec, not with raw.** JPEG compresses each frame
+alone. A video call is the best case there is for inter-frame prediction: the
+background does not move, and most of the frame is identical to the last one.
+H.264 at the same perceptual quality runs 5-10x smaller than per-frame JPEG —
+4.8 Mbps becomes roughly 0.5-1 Mbps. That is the item that would actually test
+the uplink hypothesis, and on the return leg the pod has NVENC sitting idle on a
+card it is already renting.
+
+Three things to get right if it is built: **zero-latency tuning** (B-frames
+reorder output and would add a frame or more of delay, which is the opposite of
+the goal), **keyframe policy** for reconnects and for a client joining mid-stream,
+and a **dependency** — PyAV or ffmpeg on the desktop, where the pipeline's
+requirements do not currently reach.
+
+**3. Move the codec to the GPU (NVJPEG/NVENC) on the pod.** Keeps the wire
+format, removes 2.2ms of encode and 3.6ms of decode from the pod's CPU at
+`production`. Modest at `optimal`, and it only helps the pod's half.
+
+### One realism note before anything changes
+
+**The JPEG round trip is partly aligned with the design target, not opposed to
+it.** CLAUDE.md names compression artefacts as part of what a real video call
+looks like, and the swap currently runs on a JPEG-decoded frame — so the
+compositor matches colour, detail and grain against a frame that already carries
+those artefacts, and the output inherits them. Switching to H.264 changes the
+artefact *character*: blocking and mosquito noise become different blocking and
+different temporal smearing. That is not obviously worse and may be better, since
+it is what every other participant's video actually looks like. But it changes
+what `_match_detail` and `_add_grain` are matching to, so it is a realism change
+wearing a bandwidth change's clothes and belongs on footage before it is
+believed.
+
+### Not a finding: the return leg is already careful
+
+The desktop decodes each received frame **once** and shares it between the
+display and the virtual camera, and when no filter is enabled it does not decode
+at all — Qt loads the JPEG directly. There is no redundant codec work to remove
+there.
+
+---
+
+## 10. How to reproduce
 
 The per-stage numbers come from `FaceCompositor.last_stage_ms`, which the
 pipeline already records for every frame and reports when a stream stops. To take
