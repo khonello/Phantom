@@ -661,31 +661,95 @@ class ProcessingPipeline:
             self._log_timing(seq, started, detected, time.perf_counter())
             return
 
+        # Nothing detected. **Hold the last swapped frame; never emit this one.**
+        #
+        # `check_frame` deliberately passes a frame with no faces, and is right
+        # to for batch: a video of an empty room should come back as a video of
+        # an empty room. On the live path it is the wrong default, because the
+        # pipeline cannot tell the two cases apart. "Stepped out of shot" and
+        # "still sitting there, but the light dropped and detection failed" both
+        # arrive here as zero detections — and the second puts the operator's
+        # real face on the call, which is the one outcome this product exists to
+        # prevent.
+        #
+        # The risk is asymmetric, so the tie goes to holding: a frozen face
+        # reads as a network hiccup, and a real one cannot be taken back. Live
+        # only — `_swap_frame_detail` serves batch and still passes frames
+        # through, which is what a rendered video should do.
+        #
+        # Deliberately not gated on `guard_observe`, unlike the guards above.
+        # Observe mode exists so a calibration run can see what a guard *would*
+        # have done while the swap still happens; here there is no swap to let
+        # through, so honouring it would mean transmitting the operator's face
+        # in order to measure a threshold.
         if not detections:
             self._stabilizer.mark_missing()
-        elif self._swapping_proc.source_face is not None:
-            for detection in detections:
-                face = detection.face
-                # Landmark smoothing needs a stable subject identity; with
-                # several faces the per-frame detection order is not stable.
-                if not self.config.many_faces:
-                    face = self._stabilizer.stabilize(face)
+            self._guard_frame(guards.NO_FACE, '')
+            self._emit_guarded(seq, capture_ts, debug_input)
+            self._log_timing(seq, started, detected, time.perf_counter())
+            return
 
-                swapped_frame = self._swap_face(frame, face)
-                if swapped_frame is None:
-                    # Occlusion guard, or a compositing failure. Either way there
-                    # is no swapped frame for this face, and the partially
-                    # composited result must not be emitted.
-                    self._guard_frame(guards.OCCLUDED, '')
-                    self._emit_guarded(seq, capture_ts, debug_input)
-                    self._log_timing(seq, started, detected, time.perf_counter())
-                    return
+        # More than one face. `check_frame` already refuses this as
+        # MULTIPLE_FACES and holds, so on default settings the frame never
+        # reaches here — but that guard is switchable, by `guards` and by
+        # `guard_multi_face`, and on the live path the consequence of switching
+        # it off is not a quality regression. Outside `many_faces` the detection
+        # list has been trimmed to one, so exactly one face is swapped and
+        # everybody else in shot keeps their real face — including the operator,
+        # if someone walks in closer to the camera and becomes the largest face.
+        #
+        # So the live path decides this for itself rather than asking the guard
+        # config. `many_faces` is the one exemption and a real one: it means
+        # "swap all of them", and when they are all swapped nobody is exposed.
+        #
+        # A named `target_face_point` is deliberately *not* consulted. It is a
+        # photo and template concept — someone clicking a face in a still they
+        # chose — and honouring stale config from an earlier job as permission
+        # to swap one face out of two on a live call is precisely the
+        # wrong-person swap the guards exist to prevent.
+        #
+        # `all_detections`, not the trimmed list: the count is the whole point.
+        if not self.config.many_faces and len(self._detection_proc.all_detections) > 1:
+            self._guard_frame(
+                guards.MULTIPLE_FACES,
+                f'{len(self._detection_proc.all_detections)} faces',
+            )
+            self._emit_guarded(seq, capture_ts, debug_input)
+            self._log_timing(seq, started, detected, time.perf_counter())
+            return
 
-                frame = swapped_frame
+        # A face, but nothing to put on it. The same exposure with a different
+        # cause: the source failed to load, or was cleared mid-session. A stream
+        # is allowed to start before a source is set and says so in the log, but
+        # "no swap yet" must still not mean "show them as they are".
+        if self._swapping_proc.source_face is None:
+            self._guard_frame(guards.NO_SOURCE, '')
+            self._emit_guarded(seq, capture_ts, debug_input)
+            self._log_timing(seq, started, detected, time.perf_counter())
+            return
 
-            self._clear_guard()
-            self._last_good_frame = frame
-            self.bus.emit(DETECTION, detection=detections[0].to_dict(), seq=seq)
+        for detection in detections:
+            face = detection.face
+            # Landmark smoothing needs a stable subject identity; with
+            # several faces the per-frame detection order is not stable.
+            if not self.config.many_faces:
+                face = self._stabilizer.stabilize(face)
+
+            swapped_frame = self._swap_face(frame, face)
+            if swapped_frame is None:
+                # Occlusion guard, or a compositing failure. Either way there
+                # is no swapped frame for this face, and the partially
+                # composited result must not be emitted.
+                self._guard_frame(guards.OCCLUDED, '')
+                self._emit_guarded(seq, capture_ts, debug_input)
+                self._log_timing(seq, started, detected, time.perf_counter())
+                return
+
+            frame = swapped_frame
+
+        self._clear_guard()
+        self._last_good_frame = frame
+        self.bus.emit(DETECTION, detection=detections[0].to_dict(), seq=seq)
 
         swapped = time.perf_counter()
 

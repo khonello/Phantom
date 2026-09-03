@@ -636,13 +636,15 @@ GPU work can reach.
 - **Lint**: `flake8 pipeline.py pipeline desktop`
 - **Type check**: `mypy pipeline desktop` — clean, keep it that way (CI runs `mypy pipeline` only)
 - **Unit tests**: `python -m pytest tests/ -q` — ~32s, no GPU or model weights
-  needed (the ML layer is stubbed in `tests/conftest.py`). Eleven modules;
+  needed (the ML layer is stubbed in `tests/conftest.py`). Twelve modules;
   `test_photo_batch.py` covers the photo path, including that a refused photo
   leaves no output file behind, `test_templates.py` covers the bundled
   library and the face its manifest names, and `test_texture.py` covers the
   source-texture layer — including that its band follows the *target* face's
   size rather than the crop it was cached at, which is the mistake that would
-  make the whole layer a silent no-op
+  make the whole layer a silent no-op, and `test_live_exposure.py` pins the one
+  rule the product exists for — while a stream runs, a frame leaves the pipeline
+  only if it was swapped or is a held swapped frame
 - **Validate templates**: `python tools/validate_templates.py` — runs the real
   guards over the library, non-zero if any scene would be refused
 - **End-to-end**: `python pipeline.py -s=.github/examples/source.jpg -t=.github/examples/target.mp4 -o=/tmp/output.mp4`
@@ -1304,6 +1306,45 @@ on it, since it reaches every participant on the call. Guards fail closed, and
 never update temporal state. `FaceCompositor.composite` returns `None` rather than
 the untouched frame when it cannot produce a swap: on the live path the untouched
 frame is the operator's real face.
+
+**On the live path that rule is absolute, and covers cases the guards do not.**
+While a stream is running, a frame leaves the pipeline only if it was swapped, or
+it is a previously swapped frame held unchanged. There is no third option — no
+face detected, no source loaded, occlusion, a compositing failure all hold, and
+if nothing has been swapped yet then nothing is emitted at all.
+
+Two of those used to leak the raw camera. `check_frame` passes a frame with zero
+faces on purpose — correctly, for batch — and the live path emitted it unswapped,
+reasoning that someone stepping out of shot should not leave a stale face over an
+empty chair. Sound reasoning, wrong conclusion: nothing distinguishes the two
+cases that produce zero detections.
+
+    stepped out of shot            -> 0 detections -> raw frame is an empty room
+    light dropped, still sitting   -> 0 detections -> raw frame is their face
+
+The pipeline cannot tell them apart, so the tie goes to the survivable outcome —
+a frozen face reads as a network hiccup, a real one cannot be taken back. The
+same held-frame path now covers a detected face with **no source loaded**
+(`guards.NO_SOURCE`), which is the same exposure with a different cause: the
+source failed to load, or was cleared mid-session.
+
+**And more than one face.** `check_frame` already refuses a crowd, so on default
+settings the frame never gets that far — but that guard is switchable, by
+`guards` and by `guard_multi_face`, and on a live call the consequence of
+switching it off is not a quality regression. Outside `many_faces` the detection
+list is trimmed to one, so exactly one face is swapped and everyone else keeps
+their real face — **including the operator**, if a bystander walks in closer to
+the camera and becomes the largest face. So the live path decides this itself
+rather than asking the guard config, and a stale `target_face_point` left over
+from a photo job is not consulted: that is someone clicking a face in a still
+they chose, not permission to swap one face out of two on a call. `many_faces` is
+the one real exemption — when all of them are swapped, nobody is exposed.
+
+Deliberately **not** gated on `guard_observe`. That mode exists so a calibration
+run can see what a guard would have done while the swap still happens; with no
+face there is no swap to let through, so honouring it would mean transmitting the
+operator to measure a threshold. **Batch is untouched** — `_swap_frame_detail`
+still passes frames through. `tests/test_live_exposure.py` pins all of it.
 
 Batch splits by what an unswapped output would mean, and **multiple faces is
 the one guard that splits again**:

@@ -436,6 +436,42 @@ Expect hyperswap to need its knobs re-swept afterwards. The profile
 (`enhance_strength` 0.5, `enhancer_weight` 0.8) is a mechanically-reasoned
 starting point, not a measured one.
 
+### 2.3b Is the uplink the bottleneck? (one minute, run it early)
+
+**The question:** compute halved and the felt lag did not move, so CLAUDE.md
+suspects the uplink. `fast` sends a third of the bytes `optimal` does (1.6 Mbps
+against 4.8), so switching preset and watching the readout answers it.
+
+**The trap that would waste the run.** `guard_min_frame_px` is 80, and the
+measured session had a **101px** face at 640x360. At `fast`'s 480x270 that same
+operator at the same distance is **76px — under the guard**. Every frame gets
+refused, a held frame goes out, and it reads as "the swap broke" while telling
+you nothing about latency. Either sit closer, or drop the threshold first:
+
+    python tools/realism.py --host <ip> --port <port> guard_min_frame_px=60
+
+**How to read it.** Switching preset moves bandwidth *and* compute together, but
+the readout separates them: the viewport badge gives RTT p50/p95 and uplink Mbps,
+and the pipeline's `PERF` block gives per-stage compute. The difference between
+them is network and encode.
+
+The compute saving at `fast` is smaller than CLAUDE.md assumed. The compositor is
+**6.02ms at `optimal` against 5.82ms at `fast`** — two tenths of a millisecond,
+because it already scales with the face's real size. What actually gets cheaper
+is the detector (320 against 448 input) and the XSeg pass, which `fast` turns
+off: roughly **5-6ms on a 4090**, not ~10ms. So:
+
+- RTT falls far more than ~6ms  ->  the uplink is saturated. The codec question
+  in [PERFORMANCE_AUDIT.md](PERFORMANCE_AUDIT.md) §9 becomes live, and the
+  datacenter move is the cheaper first answer.
+- RTT falls about 6ms  ->  the uplink is fine. A video codec would buy nothing
+  on latency, and the remaining delay is distance.
+
+**Do not judge realism from this run.** `fast` turns occlusion masking **off**, so
+a hand or a microphone crossing the face gets overpainted with swapped skin, and
+480x270 is genuinely soft. The heavier EMA (0.7) is not a quality cut — it is
+compensating for 15fps, since the same factor reaches twice as far back in time.
+
 ### 2.4 Guard calibration and latency, in one stream run
 
 `--guard-observe` evaluates every guard and records what it *would* have done

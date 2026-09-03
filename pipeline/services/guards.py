@@ -43,6 +43,7 @@ BLURRED = 'blurred'
 EXTREME_POSE = 'extreme_pose'
 LOW_CONFIDENCE = 'low_confidence'
 OCCLUDED = 'occluded'
+NO_SOURCE = 'no_source'
 IDENTITY_OUTLIER = 'identity_outlier'
 UNREADABLE = 'unreadable'
 NOT_EVALUABLE = 'not_evaluable'
@@ -51,6 +52,7 @@ NOT_EVALUABLE = 'not_evaluable'
 # person deciding which photo to replace, so they name the fix, not the rule.
 _MESSAGES = {
     NO_FACE: 'no face found',
+    NO_SOURCE: 'no source face loaded - upload a photo of the face to wear',
     MULTIPLE_FACES: 'more than one face — use a photo of one person alone',
     TOO_SMALL: 'face too small — use a closer or higher-resolution photo',
     BLURRED: 'too blurred — a soft source gives a soft swap on every frame',
@@ -491,10 +493,17 @@ def check_frame(
     which only exist once alignment has been computed. `coverage_ok` handles it
     at that point.
 
-    Zero faces is deliberately *not* a guarded frame. It is the ordinary case of
-    someone stepping out of shot, the pipeline already handles it by marking the
-    stabilizer missing and emitting the frame unswapped, and treating it as a
-    guard would hold a stale face over an empty chair.
+    Zero faces is deliberately *not* a guarded frame **here**, because this
+    function serves batch as well, and a rendered video of an empty room should
+    come back as a video of an empty room.
+
+    The live path decides differently and does so itself, in
+    `ProcessingPipeline._process_and_emit`: while a stream is running it holds
+    the last swapped frame rather than emitting an unswapped one. Nothing
+    distinguishes "stepped out of shot" from "still sitting there, but the light
+    dropped and detection failed" — both arrive as zero detections, and the
+    second puts the operator's real face on the call. See
+    `tests/test_live_exposure.py`.
 
     Args:
         config: Thresholds
