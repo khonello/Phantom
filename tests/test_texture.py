@@ -356,13 +356,12 @@ WHITE = np.full((256, 256, 3), 255, dtype=np.uint8)
 disc = np.zeros((256, 256), dtype=np.float32)
 cv2.circle(disc, (128, 128), 90, (1.0,), -1)
 seam_matrix = canonical_from_frame(TARGET, 256).astype(np.float32)
-seam_scale = float(np.sqrt(abs(float(np.linalg.det(seam_matrix[:, :2])))))
 
 
 def transition_px(feather):
     """Width in frame pixels over which the composite fades in."""
     config.mask_feather = feather
-    out = compositor._paste(FRAME, WHITE, disc, seam_matrix, TARGET, 256, seam_scale)
+    out = compositor._paste(FRAME, WHITE, disc, seam_matrix, TARGET, 100.0)
     # One edge only. A whole scanline crosses the disc twice, and the span
     # between the two crossings is its diameter rather than its softness.
     row = out[200, :200, 0].astype(np.float32)

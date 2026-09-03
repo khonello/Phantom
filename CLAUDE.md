@@ -1909,6 +1909,7 @@ back to the other backend or off — rather than failing.
 - `pipeline/processing/frame_processor.py`: `FrameProcessor` ABC + 4 implementations
 - `pipeline/processing/compositor.py`: `FaceCompositor` aligned-space compositing
 - `pipeline/processing/geometry.py`: FFHQ template, Umeyama similarity fit, the detail band's sigma — shared by the compositor and the texture extractor
+- **[docs/PERFORMANCE_AUDIT.md](docs/PERFORMANCE_AUDIT.md)**: per-stage compositor profile, what was found wasteful and fixed, and a realism risk register for the optimisations that would *not* be free. Headline: `optimal` is 7.4ms of a 50ms budget with every realism layer on; **`production` is 39ms against a 33ms deadline before detection, swap, restoration or encode**, and no CPU-side work closes that
 - `pipeline/processing/texture.py`: `SourceTexture` — skin detail extracted once per identity, reprojected per frame
 
 ### I/O & API
