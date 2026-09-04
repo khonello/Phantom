@@ -502,6 +502,30 @@ class WebSocketAPIServer:
 
     # ── Push helpers ──────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _peer(websocket: Any) -> str:
+        """
+        A client's address, safely, for an error message about that client.
+
+        `remote_address` reads the underlying socket. In the one place it was
+        used — the except block of a failed send — the socket has just been
+        proven dead, so reading it raised `OSError: Bad file descriptor` in
+        turn. That second exception escaped the broadcast loop, which meant:
+
+          - the dead client was never added to `disconnected`, so it was never
+            removed, so it failed again on the very next frame, forever;
+          - the loop aborted part-way, so every client after the dead one in
+            the set stopped receiving frames.
+
+        One stale socket therefore froze the stream for everybody, and the only
+        symptom was `event handler for 'detection' failed` repeating in the log
+        while the desktop sat on "starting stream".
+        """
+        try:
+            return str(websocket.remote_address)
+        except Exception:
+            return '<closed>'
+
     def _broadcast_text(self, payload: Dict[str, Any]) -> None:
         """
         Broadcast a JSON message to all connected clients.
@@ -516,8 +540,15 @@ class WebSocketAPIServer:
                 try:
                     ws.send(message)
                 except Exception as e:
-                    emit_error(f'Broadcast text failed ({ws.remote_address}): {type(e).__name__}: {e}', scope='API_SERVER')
+                    # Marked dead FIRST. Anything after this that could raise
+                    # would otherwise leave the client in the set to fail again
+                    # on every subsequent frame.
                     disconnected.add(ws)
+                    emit_error(
+                        f'Broadcast text failed ({self._peer(ws)}): '
+                        f'{type(e).__name__}: {e}',
+                        scope='API_SERVER',
+                    )
             for ws in disconnected:
                 self._clients.discard(ws)
 
@@ -534,8 +565,12 @@ class WebSocketAPIServer:
                 try:
                     ws.send(data)
                 except Exception as e:
-                    emit_error(f'Broadcast binary failed ({ws.remote_address}): {type(e).__name__}: {e}', scope='API_SERVER')
                     disconnected.add(ws)
+                    emit_error(
+                        f'Broadcast binary failed ({self._peer(ws)}): '
+                        f'{type(e).__name__}: {e}',
+                        scope='API_SERVER',
+                    )
             for ws in disconnected:
                 self._clients.discard(ws)
 
