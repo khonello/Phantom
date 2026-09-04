@@ -298,7 +298,7 @@ class BootTimer:
         total = time.time() - self.start
 
         print("\n" + "=" * 58)
-        print("{} — {:.0f}s total, disk: {}".format(
+        print("{} - {:.0f}s total, disk: {}".format(
             self.label, total, self.disk_state))
         print("=" * 58)
 
@@ -416,7 +416,7 @@ def _request(method: str, path: str, auth: bool = True,
     if resp.status_code >= 400:
         if raise_on_error:
             raise VastAPIError("HTTP {}: {}".format(resp.status_code, resp.text[:400]))
-        print("ERROR: {} {} → HTTP {}: {}".format(method, path, resp.status_code, resp.text[:400]))
+        print("ERROR: {} {} -> HTTP {}: {}".format(method, path, resp.status_code, resp.text[:400]))
         sys.exit(1)
 
     try:
@@ -787,7 +787,7 @@ def _wait_for_pipeline(ws_address: str, context: Any, token: Optional[str]) -> N
             print("  WARNING: websockets not installed; falling back to a TCP check.")
             host, port = ws_address.rsplit(":", 1)
             _wait_for_tcp(host, int(port), _PIPELINE_TIMEOUT, "pipeline port")
-            print("  Port reachable (TCP only — health not verified).")
+            print("  Port reachable (TCP only - health not verified).")
             return
 
         try:
@@ -816,7 +816,7 @@ def _wait_for_pipeline(ws_address: str, context: Any, token: Optional[str]) -> N
             if "1008" in str(exc) or "unauthorized" in str(exc).lower():
                 print("ERROR: the pipeline refused our token.")
                 print("  startup.sh reported one and the pipeline was launched")
-                print("  with it, so they have diverged — most likely an older")
+                print("  with it, so they have diverged - most likely an older")
                 print("  pipeline process survived `pkill` and is still holding")
                 print("  the port. Check with:")
                 print("    python vast/orchestrator.py run \"pgrep -af pipeline.py\"")
@@ -978,7 +978,7 @@ def _connect_ssh(instance: Dict[str, Any]) -> Any:
             if attempt == attempts:
                 print("ERROR: SSH failed after {} attempts: {}".format(attempts, exc))
                 sys.exit(1)
-            print("  Not ready ({}) — retrying in 10s...".format(exc))
+            print("  Not ready ({}) - retrying in 10s...".format(exc))
             time.sleep(10)
     raise AssertionError("unreachable")
 
@@ -1311,7 +1311,7 @@ def _create_instance(offer: Dict[str, Any]) -> str:
     bw = _hourly_bandwidth_cost(offer)
     print("  ${:.3f}/hr GPU + ~${:.3f}/hr bandwidth at the optimal preset".format(
         offer.get("dph_total") or 0.0, bw))
-    print("  storage ${:.3f}/GB/month → ~${:.2f}/month standing while stopped".format(
+    print("  storage ${:.3f}/GB/month -> ~${:.2f}/month standing while stopped".format(
         offer.get("storage_cost") or 0.0, (offer.get("storage_cost") or 0.0) * disk))
 
     resp = _request("PUT", "/asks/{}/".format(offer["id"]), json=body)
@@ -1427,7 +1427,7 @@ def cmd_resume(instance_id: str) -> None:
         print("")
         print("  Instance {} is left stopped and still billing for its".format(instance_id))
         print("  disk. VAST_INSTANCE_ID is about to name the new one, so")
-        print("  `terminate` will no longer reach it — destroy it at")
+        print("  `terminate` will no longer reach it - destroy it at")
         print("  https://cloud.vast.ai/instances/ .")
         print("")
         cmd_start()
@@ -1443,7 +1443,7 @@ def cmd_stop(instance_id: str) -> None:
     _request("PUT", "/instances/{}/".format(instance_id), json={"state": "stopped"})
     disk = _env_int("VAST_DISK", _DEFAULT_DISK)
     print("Stopped. The disk survives, so the venv and models stay warm.")
-    print("Storage still bills — roughly {} GB at this host's rate.".format(disk))
+    print("Storage still bills - roughly {} GB at this host's rate.".format(disk))
     print("To stop paying entirely:  python vast/orchestrator.py terminate")
 
 
@@ -1572,7 +1572,7 @@ def cmd_offers() -> None:
     eligible_machines = {o.get("machine_id") for o in eligible}
 
     if eligible:
-        print("Eligible — `start` takes the first of these:")
+        print("Eligible - `start` takes the first of these:")
         header = "  {:<3} {:<14} {:<17} {:>7} {:>6} {:>5} {:>5} {:>7} {:>10}"
         print(header.format("", "GPU", "location", "$/hr", "dlperf",
                             "GHz", "cores", "$/mo st", "host"))
@@ -1672,7 +1672,7 @@ def cmd_push(instance_id: str, local: str, remote: Optional[str] = None) -> bool
     try:
         sftp = client.open_sftp()
         size = os.path.getsize(local)
-        print("  {} → {} ({:.1f} MB)".format(local, target, size / 1e6))
+        print("  {} -> {} ({:.1f} MB)".format(local, target, size / 1e6))
         sftp.put(local, target)
         sftp.close()
         print("  Done.")
@@ -1702,7 +1702,7 @@ def cmd_pull(instance_id: str, remote: str, local: Optional[str] = None) -> bool
     client = _connect_ssh(instance)
     try:
         sftp = client.open_sftp()
-        print("  {} → {}".format(remote, target))
+        print("  {} -> {}".format(remote, target))
         sftp.get(remote, target)
         sftp.close()
         print("  Done ({:.1f} KB).".format(os.path.getsize(target) / 1e3))

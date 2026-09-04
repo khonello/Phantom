@@ -85,7 +85,7 @@ def _render(data: Dict[str, Any]) -> List[str]:
     else:
         # Saying so matters: it is CodeFormer's fidelity input and inert on
         # every other model, so the number looks configured while doing nothing.
-        out.append(_line('enhancer_weight', '{}  (inert — model has no weight input)'.format(weight)))
+        out.append(_line('enhancer_weight', '{}  (inert - model has no weight input)'.format(weight)))
     out.append(_line('aligned floor/ceiling', '{} / {}'.format(
         realism.get('aligned_floor'), realism.get('aligned_ceiling'))))
     out.append(_line('temporal_alpha', realism.get('temporal_alpha')))
@@ -188,7 +188,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     except KeyboardInterrupt:
         return 130
     except OSError as exc:
-        print('ERROR: could not reach {}:{} — {}'.format(args.host, args.port, exc))
+        print('ERROR: could not reach {}:{} - {}'.format(args.host, args.port, exc))
         return 1
 
 

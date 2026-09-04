@@ -127,7 +127,7 @@ async def _run(args: argparse.Namespace) -> int:
 
         values = _parse_settings(args.settings)
         if not values:
-            print('nothing to set — pass key=value pairs, or --show')
+            print('nothing to set - pass key=value pairs, or --show')
             return 2
 
         print('sending: {}'.format(', '.join(
@@ -136,7 +136,7 @@ async def _run(args: argparse.Namespace) -> int:
 
         reply = await collect('set_realism')
         if reply is None:
-            print('no acknowledgement within 10s — is the pipeline running?')
+            print('no acknowledgement within 10s - is the pipeline running?')
             return 1
 
         data = reply.get('data') or {}
@@ -171,7 +171,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     except KeyboardInterrupt:
         return 130
     except OSError as exc:
-        print('ERROR: could not reach {}:{} — {}'.format(args.host, args.port, exc))
+        print('ERROR: could not reach {}:{} - {}'.format(args.host, args.port, exc))
         return 1
 
 
