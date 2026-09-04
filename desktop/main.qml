@@ -1450,7 +1450,7 @@ Window {
                 Item {
                     anchors {
                         fill: parent
-                        bottomMargin: filterStrip.reserved
+                        bottomMargin: filterStrip.reserved + tuningStrip.reserved
                         rightMargin: effectRail.reserved
                     }
                     visible: bridge.currentMode === "realtime"
@@ -1756,7 +1756,7 @@ Window {
                 Item {
                     anchors {
                         fill: parent
-                        bottomMargin: filterStrip.reserved
+                        bottomMargin: filterStrip.reserved + tuningStrip.reserved
                         rightMargin: effectRail.reserved
                     }
                     visible: bridge.currentMode !== "realtime"
@@ -2208,7 +2208,7 @@ Window {
 
                         Text {
                             anchors.centerIn: parent
-                            text: bridge.filtersEnabled ? "APPLIED" : "APPLY"
+                            text: bridge.filtersEnabled ? "ENABLED" : "ENABLE"
                             color: bridge.filtersEnabled ? "#86efac" : "#c4b5fd"
                             font.pixelSize: 9; font.letterSpacing: 1.0
                         }
@@ -2221,6 +2221,128 @@ Window {
                                      || bridge.filtersEnabled
                             onClicked: bridge.toggleFilters()
                             cursorShape: Qt.PointingHandCursor
+                        }
+                    }
+                }
+
+                // == REALISM TUNING STRIP ===================================
+                // Operator-facing, not consumer-facing, and the distinction is
+                // the whole reason this is toggles rather than a dropdown.
+                //
+                // The question it answers is "which of these two is doing the
+                // work", and that can only be answered by flipping one off and
+                // on while the eye stays on the same face in the same light. A
+                // dropdown is three actions and a broken comparison. Named
+                // steps would be worse still: neither layer has ever been
+                // judged, so "subtle" and "balanced" would be names for a
+                // guess, and the names would outlive the guess.
+                //
+                // Sits under the body for the same reason the filter strip
+                // does: whatever the mode was already showing is what a change
+                // is judged against.
+                Item {
+                    id: tuningStrip
+                    property int reserved: bridge.tuningPanel ? height + 12 : 0
+
+                    anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
+                    height: 76
+                    visible: bridge.tuningPanel
+
+                    Row {
+                        anchors { left: parent.left; leftMargin: 20; verticalCenter: parent.verticalCenter }
+                        spacing: 14
+
+                        // One chip per layer. Off is 0.0; on restores the
+                        // strength that was last looked at, which is what makes
+                        // this an A/B rather than two experiments.
+                        Column {
+                            spacing: 5
+                            Rectangle {
+                                width: 96; height: 28; radius: 6
+                                color: bridge.textureOn ? "#1a1a30" : (th.containsMouse ? "#111120" : "#0d0d18")
+                                border.color: bridge.textureOn ? "#2e2e55" : "#14142a"
+                                border.width: 1
+                                Behavior on color { ColorAnimation { duration: 120 } }
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "TEXTURE"
+                                    color: bridge.textureOn ? "#c4b5fd" : "#475569"
+                                    font.pixelSize: 10; font.letterSpacing: 0.8
+                                }
+                                HoverHandler { id: th }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    onClicked: bridge.toggleTexture()
+                                    cursorShape: Qt.PointingHandCursor
+                                }
+                            }
+                            Slider {
+                                width: 96
+                                from: 0.0; to: 1.0
+                                value: bridge.textureStrength
+                                onMoved: bridge.setTextureStrength(value)
+                            }
+                        }
+
+                        Column {
+                            spacing: 5
+                            Rectangle {
+                                width: 96; height: 28; radius: 6
+                                color: bridge.diffuseOn ? "#1a1a30" : (dh.containsMouse ? "#111120" : "#0d0d18")
+                                border.color: bridge.diffuseOn ? "#2e2e55" : "#14142a"
+                                border.width: 1
+                                Behavior on color { ColorAnimation { duration: 120 } }
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "DIFFUSE"
+                                    color: bridge.diffuseOn ? "#c4b5fd" : "#475569"
+                                    font.pixelSize: 10; font.letterSpacing: 0.8
+                                }
+                                HoverHandler { id: dh }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    onClicked: bridge.toggleDiffuse()
+                                    cursorShape: Qt.PointingHandCursor
+                                }
+                            }
+                            Slider {
+                                width: 96
+                                from: 0.0; to: 1.0
+                                value: bridge.diffuseStrength
+                                onMoved: bridge.setDiffuseStrength(value)
+                            }
+                        }
+
+                        // The reading, because a slider position is not a
+                        // number and the value is what gets written down.
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "tex " + bridge.textureStrength.toFixed(2)
+                                  + "   dif " + bridge.diffuseStrength.toFixed(2)
+                            color: "#475569"
+                            font.pixelSize: 11
+                        }
+
+                        // Back to baseline in one click. Every comparison is
+                        // against it, so returning must not take two clicks and
+                        // a moment working out where each knob was.
+                        Rectangle {
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 76; height: 28; radius: 6
+                            color: bh.containsMouse ? "#111120" : "#0d0d18"
+                            border.color: "#14142a"; border.width: 1
+                            Text {
+                                anchors.centerIn: parent
+                                text: "BYPASS"
+                                color: "#475569"
+                                font.pixelSize: 10; font.letterSpacing: 0.8
+                            }
+                            HoverHandler { id: bh }
+                            MouseArea {
+                                anchors.fill: parent
+                                onClicked: bridge.bypassRealism()
+                                cursorShape: Qt.PointingHandCursor
+                            }
                         }
                     }
                 }
@@ -2272,6 +2394,49 @@ Window {
                                 }
                             }
                         }
+                    }
+                }
+
+                // == TUNING TOGGLE ==========================================
+                // Beside the filter control, because they are the same kind of
+                // thing: a panel that borrows space from the body and gives it
+                // back. Different audiences though -- filters are a look the
+                // operator chooses, this is an instrument for deciding what the
+                // realism defaults should be.
+                Rectangle {
+                    anchors { right: parent.right; bottom: parent.bottom; margins: 16; rightMargin: 120 }
+                    width: 96; height: 30; radius: 6
+                    color: tuneHover.containsMouse ? "#1a1a30" : "#0d0d18"
+                    border.color: (bridge.textureOn || bridge.diffuseOn) ? "#2e2e55" : "#14142a"
+                    border.width: 1
+                    Behavior on color { ColorAnimation { duration: 130 } }
+
+                    Row {
+                        anchors.centerIn: parent; spacing: 6
+
+                        // Lit when either layer is doing something, so the
+                        // panel does not have to be open to know whether the
+                        // face on screen has them on.
+                        Rectangle {
+                            width: 5; height: 5; radius: 2.5
+                            anchors.verticalCenter: parent.verticalCenter
+                            color: (bridge.textureOn || bridge.diffuseOn) ? "#a78bfa" : "#333355"
+                            Behavior on color { ColorAnimation { duration: 200 } }
+                        }
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: bridge.tuningPanel ? "HIDE" : "TUNING"
+                            color: tuneHover.containsMouse ? "#c4b5fd" : "#64748b"
+                            font.pixelSize: 9; font.letterSpacing: 1.4; font.weight: Font.Medium
+                            Behavior on color { ColorAnimation { duration: 130 } }
+                        }
+                    }
+
+                    HoverHandler { id: tuneHover }
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: bridge.toggleTuningPanel()
+                        cursorShape: Qt.PointingHandCursor
                     }
                 }
 

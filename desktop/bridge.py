@@ -257,6 +257,8 @@ class Bridge(QObject):
     faceChoiceChanged = Signal()
     guardReasonChanged = Signal(str)
     latencyTextChanged = Signal(str)
+    tuningPanelChanged = Signal(bool)
+    tuningChanged = Signal()
     restorationChanged = Signal(str)
     faceNoticeOpenChanged = Signal(bool)
     autoStopWarning = Signal(int)  # minutes remaining
@@ -294,7 +296,26 @@ class Bridge(QObject):
         self._source_thumbnail: str = ''
         self._source_label: str = ''
         self._pipeline_running = False
+        # The realism tuning strip. Operator-facing, not consumer-facing:
+        # it exists to answer "which of these two is doing the work", which
+        # needs one-click flipping while the eye stays on the same face. A
+        # dropdown cannot do that, and named steps would encode a conclusion
+        # nobody has measured yet -- neither layer has ever been judged.
+        #
+        # `_texture_last` and `_diffuse_last` are what makes off/on a real A/B:
+        # toggling back restores the strength you were looking at, rather than
+        # resetting to a default and quietly making it a different experiment.
+        self._tuning_panel = False
+        self._texture_strength = 0.0
+        self._diffuse_strength = 0.0
+        self._texture_last = 0.4
+        self._diffuse_last = 0.3
+
         self._awaiting_first_frame = False
+        # When the wait for a first processed frame began, and whether the
+        # watchdog has already spoken. See `_check_first_frame`.
+        self._awaiting_since = 0.0
+        self._first_frame_warned = False
         self._virtual_cam_active = False
         self._enhance_active = True
         self._color_correction_active = True
@@ -726,6 +747,8 @@ class Bridge(QObject):
         if rejoined:
             self._restore_state_from_server()
 
+        self._awaiting_since = time.time()
+        self._first_frame_warned = False
         self._ws_push_active.set()
         self._jitter_buffer.clear()
         self._audio_capture.start()
@@ -1195,6 +1218,109 @@ class Bridge(QObject):
     def filtersEnabled(self) -> bool:
         """Whether the selected filter is actually being applied."""
         return self._filters_enabled
+
+    # ── Realism tuning (operator-facing) ─────────────────────────────────
+
+    @Property(bool, notify=tuningPanelChanged)
+    def tuningPanel(self) -> bool:
+        """Whether the realism tuning strip is showing."""
+        return self._tuning_panel
+
+    @Property(float, notify=tuningChanged)
+    def textureStrength(self) -> float:
+        return self._texture_strength
+
+    @Property(float, notify=tuningChanged)
+    def diffuseStrength(self) -> float:
+        return self._diffuse_strength
+
+    @Property(bool, notify=tuningChanged)
+    def textureOn(self) -> bool:
+        return self._texture_strength > 0.0
+
+    @Property(bool, notify=tuningChanged)
+    def diffuseOn(self) -> bool:
+        return self._diffuse_strength > 0.0
+
+    @Slot()
+    def toggleTuningPanel(self) -> None:
+        """Show or hide the realism tuning strip."""
+        self._tuning_panel = not self._tuning_panel
+        self.tuningPanelChanged.emit(self._tuning_panel)
+
+    def _push_realism(self) -> None:
+        """
+        Send both values, always.
+
+        Both at once rather than only the one that changed, because the two
+        layers work in different bands and either can be blamed for what the
+        other did. Sending the pair makes the pipeline's state unambiguous
+        after any click.
+        """
+        if not self._client.connected:
+            return
+        self._client._fire(
+            'set_realism',
+            values={
+                'texture_strength': self._texture_strength,
+                'diffuse_strength': self._diffuse_strength,
+            },
+        )
+
+    @Slot()
+    def toggleTexture(self) -> None:
+        """Off is 0.0; on restores the last strength you were looking at."""
+        if self._texture_strength > 0.0:
+            self._texture_last = self._texture_strength
+            self._texture_strength = 0.0
+        else:
+            self._texture_strength = self._texture_last
+        self._push_realism()
+        self.tuningChanged.emit()
+
+    @Slot()
+    def toggleDiffuse(self) -> None:
+        if self._diffuse_strength > 0.0:
+            self._diffuse_last = self._diffuse_strength
+            self._diffuse_strength = 0.0
+        else:
+            self._diffuse_strength = self._diffuse_last
+        self._push_realism()
+        self.tuningChanged.emit()
+
+    @Slot(float)
+    def setTextureStrength(self, value: float) -> None:
+        self._texture_strength = max(0.0, min(1.0, float(value)))
+        if self._texture_strength > 0.0:
+            self._texture_last = self._texture_strength
+        self._push_realism()
+        self.tuningChanged.emit()
+
+    @Slot(float)
+    def setDiffuseStrength(self, value: float) -> None:
+        self._diffuse_strength = max(0.0, min(1.0, float(value)))
+        if self._diffuse_strength > 0.0:
+            self._diffuse_last = self._diffuse_strength
+        self._push_realism()
+        self.tuningChanged.emit()
+
+    @Slot()
+    def bypassRealism(self) -> None:
+        """
+        Both to zero in one click.
+
+        The baseline is the thing every comparison is against, so getting back
+        to it must not take two clicks and a moment's thought about which knob
+        was where.
+        """
+        if self._texture_strength > 0.0:
+            self._texture_last = self._texture_strength
+        if self._diffuse_strength > 0.0:
+            self._diffuse_last = self._diffuse_strength
+        self._texture_strength = 0.0
+        self._diffuse_strength = 0.0
+        self._push_realism()
+        self.tuningChanged.emit()
 
     @Slot()
     def toggleFilterPanel(self) -> None:
@@ -2554,6 +2680,10 @@ class Bridge(QObject):
             self.loadingMessageChanged.emit(msg)
 
     def _poll_frames(self) -> None:
+        # Cheap, and this timer already runs whether or not frames arrive --
+        # which is exactly the condition being watched for.
+        self._check_first_frame()
+
         if webcam_buffer.is_dirty():
             webcam_buffer.promote()
             self._webcam_version += 1
@@ -2784,7 +2914,50 @@ class Bridge(QObject):
         # guaranteeing the user sees an active swap before the overlay clears.
         if self._awaiting_first_frame:
             self._awaiting_first_frame = False
+            self._first_frame_warned = False
             self._set_loading_message('')
+
+    # How long to wait for the first processed frame before saying something.
+    # Generous: the first stream after a pipeline start pays model warm-up,
+    # which is tens of seconds, and a cold restore can be slower still. The
+    # point is not to be quick, it is to not wait forever.
+    _FIRST_FRAME_TIMEOUT = 45.0
+
+    def _check_first_frame(self) -> None:
+        """
+        Say something when a started stream never produces a frame.
+
+        `start_stream` returning success only means the pipeline accepted the
+        command. Everything after that -- models loading, frames arriving,
+        being swapped, being broadcast back -- can fail silently, and the
+        overlay sat on "Starting stream..." indefinitely while it did.
+
+        That is not hypothetical. A stale client socket in the server's
+        broadcast set threw on every send, aborted the loop before reaching
+        this desktop, and was never removed; the pipeline reported
+        streaming=True with a face detected while the operator watched an
+        overlay that never changed. Ten minutes of a paid session went into
+        working out that the pipeline was fine.
+
+        The message names the three things worth checking rather than merely
+        reporting failure, because "no frames" has causes at both ends.
+        """
+        if not self._awaiting_first_frame or self._first_frame_warned:
+            return
+        if not self._awaiting_since:
+            return
+        if time.time() - self._awaiting_since < self._FIRST_FRAME_TIMEOUT:
+            return
+
+        self._first_frame_warned = True
+        self._set_loading_message('')
+        self._set_status(
+            'no processed frames after {:.0f}s - the pipeline accepted the '
+            'start but nothing came back. Check the source was accepted, the '
+            'camera is sending, and the pipeline log.'.format(
+                self._FIRST_FRAME_TIMEOUT),
+            error=True,
+        )
 
     def _on_ws_event(self, data: Dict[str, Any]) -> None:
         """Called by PipelineClient when a JSON event arrives."""

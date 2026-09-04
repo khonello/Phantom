@@ -402,7 +402,12 @@ def check_source(
     variance = sharpness(frame, detection.bbox)
     if variance < config.guard_min_sharpness:
         return GuardResult.failed(
-            BLURRED, f'sharpness {variance:.0f}, need {config.guard_min_sharpness:.0f}',
+            # One decimal, because :.0f rounded 39.6 up and produced
+            # 'sharpness 40, need 40' -- a refusal that reads as a
+            # contradiction, and sends the reader looking for an off-by-one
+            # that is not there. The comparison is <, so equality passes.
+            BLURRED,
+            f'sharpness {variance:.1f}, need {config.guard_min_sharpness:.1f}',
         )
 
     yaw = estimate_yaw(detection)
@@ -411,7 +416,8 @@ def check_source(
         return GuardResult.failed(NOT_EVALUABLE, 'pose could not be estimated')
     if abs(yaw) > config.guard_max_yaw:
         return GuardResult.failed(
-            EXTREME_POSE, f'{abs(yaw):.0f} degrees, limit {config.guard_max_yaw:.0f}',
+            EXTREME_POSE,
+            f'{abs(yaw):.1f} degrees, limit {config.guard_max_yaw:.1f}',
         )
 
     return GuardResult.passed()
