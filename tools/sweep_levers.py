@@ -487,8 +487,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description='Measure each speed lever against the same clip.',
     )
-    parser.add_argument('--host', required=True, help='pipeline host')
-    parser.add_argument('--port', type=int, default=9000, help='pipeline port')
+    parser.add_argument('--host', help='override PHANTOM_API_URL from .env')
+    parser.add_argument('--port', type=int,
+                        help='override the port in PHANTOM_API_URL')
     parser.add_argument('--tls', action='store_true', help='use wss (RunPod proxy)')
     parser.add_argument('--source', help='source face path on the pipeline filesystem')
     parser.add_argument('--input-url', dest='input_url',
@@ -508,6 +509,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument('--verbose', action='store_true',
                         help='print every message the pipeline sends')
     args = parser.parse_args(argv)
+    # The address comes from PHANTOM_API_URL in .env, which `start` wrote,
+    # unless --host overrides it. The port changes on every stop/resume, so a
+    # value copied by hand is stale more often than not.
+    from pipeline_address import resolve, describe
+    explicit = args.host is not None
+    args.host, args.port = resolve(args.host, args.port)
+    print('pipeline: {}'.format(describe(args.host, args.port, explicit)))
 
     try:
         return asyncio.run(_run(args))

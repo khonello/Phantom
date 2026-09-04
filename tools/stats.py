@@ -170,10 +170,18 @@ async def _run(args: argparse.Namespace) -> int:
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description='Report what a running pipeline is configured with.')
-    parser.add_argument('--host', required=True)
-    parser.add_argument('--port', required=True)
+    parser.add_argument('--host', help='override PHANTOM_API_URL from .env')
+    parser.add_argument('--port', type=int,
+                        help='override the port in PHANTOM_API_URL')
     parser.add_argument('--json', action='store_true', help='raw JSON instead of a report')
     args = parser.parse_args(argv)
+    # The address comes from PHANTOM_API_URL in .env, which `start` wrote,
+    # unless --host overrides it. The port changes on every stop/resume, so a
+    # value copied by hand is stale more often than not.
+    from pipeline_address import resolve, describe
+    explicit = args.host is not None
+    args.host, args.port = resolve(args.host, args.port)
+    print('pipeline: {}'.format(describe(args.host, args.port, explicit)))
 
     try:
         return asyncio.run(_run(args))

@@ -154,12 +154,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         description='Change realism settings on a running pipeline.',
         epilog='Example: realism.py --host 1.2.3.4 --port 19278 enhance=false',
     )
-    parser.add_argument('--host', required=True)
-    parser.add_argument('--port', required=True)
+    parser.add_argument('--host', help='override PHANTOM_API_URL from .env')
+    parser.add_argument('--port', type=int,
+                        help='override the port in PHANTOM_API_URL')
     parser.add_argument('--show', action='store_true',
                         help='print the pipeline status instead of changing anything')
     parser.add_argument('settings', nargs='*', help='key=value pairs')
     args = parser.parse_args(argv)
+    # The address comes from PHANTOM_API_URL in .env, which `start` wrote,
+    # unless --host overrides it. The port changes on every stop/resume, so a
+    # value copied by hand is stale more often than not.
+    from pipeline_address import resolve, describe
+    explicit = args.host is not None
+    args.host, args.port = resolve(args.host, args.port)
+    print('pipeline: {}'.format(describe(args.host, args.port, explicit)))
 
     try:
         return asyncio.run(_run(args))
