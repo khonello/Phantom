@@ -76,6 +76,41 @@ _SWEEP: List[Any] = [
     ('hyperswap+no_restore', {'swapper_model': 'hyperswap_1a_256', 'enhance': False}),
 ]
 
+# The realism pass. Different question entirely: the speed sweep asks what a
+# frame costs, this asks whether the face looks like it was filmed.
+#
+# `texture_strength` and `diffuse_strength` have both been built, defaulted OFF,
+# and never judged — not on RunPod, not anywhere. They are also the two layers
+# whose cost was only ever measured on a laptop CPU (texture 0.90ms on a 101px
+# face, 7.49ms on a 460px one; scatter 0.07ms marginal), so this is the first
+# time either gets a number from the hardware that will run it.
+#
+# The reading to watch is `detail_ratio`, and specifically its `at limit N% of
+# frames`. It is the correction `_match_detail` WANTED before its clamp. If the
+# clamp binds on most frames of the baseline, then part of the 0.42 face/frame
+# detail gap is the clamp rather than the swap — and raising one constant is a
+# cheaper fix than the entire texture layer.
+#
+# Ordered so the two layers are separable: neither, each alone, then both. A
+# combined-only run cannot say which one moved anything.
+_REALISM_SWEEP: List[Any] = [
+    ('baseline', {'texture_strength': 0.0, 'diffuse_strength': 0.0}),
+
+    # 0.3-0.5 is the range CLAUDE.md expects to be usable. Both ends, because
+    # the layer is bounded by a measured headroom rather than an open gain, so
+    # the interesting question is where it stops helping rather than where it
+    # starts overshooting.
+    ('texture_0.3', {'texture_strength': 0.3, 'diffuse_strength': 0.0}),
+    ('texture_0.5', {'texture_strength': 0.5, 'diffuse_strength': 0.0}),
+
+    # Answers a different complaint in a different band — "the skin reads
+    # hard", not "the skin reads plastic" — so it is swept alone before it is
+    # swept with texture.
+    ('scatter_0.3', {'texture_strength': 0.0, 'diffuse_strength': 0.3}),
+
+    ('both', {'texture_strength': 0.4, 'diffuse_strength': 0.3}),
+]
+
 # Deliberately not swept, each for a reason established by measurement rather
 # than by argument. Kept here because a lever that was tried and abandoned is
 # worth more written down than silently missing — the next session should not
@@ -132,7 +167,11 @@ _BASE: Dict[str, Any] = {
 
 # The pipeline prints the latency budget as a STATUS_CHANGED with this scope
 # when a stream stops.
-_PERF_SCOPE = 'PERF'
+# Both reports are emitted together when a stream stops, and only PERF was
+# being captured — so a realism sweep would have discarded `detail_ratio`,
+# `texture_headroom` and `texture_confidence`, which are the whole reason to
+# run one. See ProcessingPipeline: PERF then REALISM, back to back.
+_REPORT_SCOPES = ('PERF', 'REALISM')
 
 
 def _parse_report(text: str) -> Dict[str, Any]:
@@ -271,7 +310,7 @@ async def _run(args: argparse.Namespace) -> int:
                     continue
                 if args.verbose:
                     print('    < {}'.format(str(message)[:200]))
-                if message.get('scope') == _PERF_SCOPE:
+                if message.get('scope') in _REPORT_SCOPES:
                     nonlocal_report.append(str(message.get('message', '')))
                 if message.get('event') == 'PIPELINE_STOPPED':
                     return
@@ -298,7 +337,7 @@ async def _run(args: argparse.Namespace) -> int:
                 if message.get('event') == 'ERROR' or message.get('level') == 'error':
                     print('    ERROR: {}'.format(
                         message.get('message') or message.get('error')))
-                if message.get('scope') == _PERF_SCOPE:
+                if message.get('scope') in _REPORT_SCOPES:
                     report += str(message.get('message', '')) + '\n'
             return report
 
@@ -344,7 +383,9 @@ async def _run(args: argparse.Namespace) -> int:
         await send('stop')
         await wait_stopped()
 
-        for label, levers in _SWEEP:
+        chosen = _REALISM_SWEEP if args.sweep == 'realism' else _SWEEP
+        print('\nSweep: {} ({} configurations)'.format(args.sweep, len(chosen)))
+        for label, levers in chosen:
             settings = dict(_BASE)
             settings.update(levers)
 
@@ -461,6 +502,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument('--warmup', type=float, default=20.0,
                         help='discarded first run, so model load does not land '
                              'inside the baseline measurement')
+    parser.add_argument('--sweep', choices=('speed', 'realism'), default='speed',
+                        help='which set of configurations to measure')
     parser.add_argument('--out', default='sweep.json', help='write results here')
     parser.add_argument('--verbose', action='store_true',
                         help='print every message the pipeline sends')
