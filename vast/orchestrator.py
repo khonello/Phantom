@@ -133,6 +133,29 @@ _DEFAULT_MAX_PRICE = 1.00       # $/hr
 _DEFAULT_MIN_RELIABILITY = 0.98
 _DEFAULT_MIN_INET_UP = 100.0    # MB/s
 _DEFAULT_MIN_PORTS = 32
+
+# The compositor is OpenCV on the CPU and is the one stage a faster GPU does
+# not touch: ~10.3ms of a ~29ms frame on a 4090 host, and ~20ms on an L4 host
+# with the same models. So the host's CPU decides a third of the frame.
+#
+# Measured across western Europe on 2026-09-04, eligible offers only: clock
+# ranged 3.5 to 6.0 GHz — a 1.7x spread on latency-sensitive single-threaded
+# work. Desktop silicon wins here (Ryzen 9 7900X at 5.7, Core i9-13900KF at
+# 6.0) and server silicon loses (EPYC 7663 at 3.5, EPYC 7443 at 4.0), because
+# EPYC and Xeon trade clock for core count and this workload wants the
+# opposite.
+#
+# The floor is deliberately loose. A slow CPU still holds the 50ms deadline at
+# 20fps, so clock is a preference rather than a requirement, and a tight floor
+# would collapse availability — at 4.5 GHz only two offers in all of western
+# Europe survived. `_rank` is what actually selects on it.
+_DEFAULT_MIN_CPU_GHZ = 3.5
+
+# `cpu_cores_effective` is this instance's SHARE of the machine, not the
+# machine's total — a host splitting 64 cores across 8 GPUs offers 8. OpenCV's
+# parallel_for will use them, but on 256x256 crops the benefit saturates early,
+# so this is a floor against a starved allocation rather than a lever.
+_DEFAULT_MIN_CPU_CORES = 8.0
 _DEFAULT_DISK = 25              # GB
 _DEFAULT_GPU_WAIT = 300         # seconds
 _GPU_RETRY_INTERVAL = 60        # seconds
@@ -413,6 +436,8 @@ def _search_offers(
     min_reliability: float,
     min_inet_up: float,
     min_ports: int,
+    min_cpu_ghz: float,
+    min_cpu_cores: float,
     max_compute_cap: int,
     verified_only: bool,
     disk: int,
@@ -450,6 +475,8 @@ def _search_offers(
         "reliability": {"gte": min_reliability},
         "inet_up": {"gte": min_inet_up},
         "direct_port_count": {"gte": min_ports},
+        "cpu_ghz": {"gte": min_cpu_ghz},
+        "cpu_cores_effective": {"gte": min_cpu_cores},
         "compute_cap": {"lte": max_compute_cap},
         "disk_space": {"gte": disk},
         # Every ONNX model here runs on CUDAExecutionProvider, so a card
@@ -493,36 +520,70 @@ def _country(offer: Dict[str, Any]) -> str:
     return label.rsplit(",", 1)[-1].strip().upper()
 
 
+def _cpu_band(offer: Dict[str, Any]) -> float:
+    """
+    CPU clock rounded to the nearest 0.5 GHz.
+
+    Banded rather than raw, and this is the whole design of the ranking. Sorted
+    on raw clock, a 5.6 GHz box at $0.90 would beat a 5.7 GHz box at $0.29 — a
+    difference inside the noise of what this workload can feel, bought at 3x.
+    Banding makes clock decide only when the gap is large, and hands everything
+    else back to price.
+
+    It does not remove the problem at the band edges: 5.7 and 5.8 fall either
+    side of one, so clock decides between them for no good reason. That is
+    accepted rather than fixed. Any bucketing has edges, a narrower band only
+    moves them, and the differences that matter here are several bands wide —
+    3.5 GHz against 5.7 is 1.6x, which no edge case can hide.
+    """
+    return round(float(offer.get("cpu_ghz") or 0.0) * 2.0) / 2.0
+
+
 def _rank(offers: List[Dict[str, Any]], geolocations: List[str]) -> List[Dict[str, Any]]:
     """
-    Order by how close the country is first, price second.
+    Order by country, then CPU clock band, then price.
 
-    The API sorts on one field, and sorting on price alone was wrong for this
-    product: VAST_GEOLOCATIONS is documented as a priority order, and a French
-    host at $0.336 was beating a British one at $0.350 — three cents to give
-    back some of the round trip the whole migration exists to remove.
+    **Country first** because VAST_GEOLOCATIONS is a priority order and
+    distance is the term this deployment cannot buy back. Sorting on price
+    alone had a French host at $0.336 beating a British one at $0.350 — three
+    cents to give back part of the round trip the migration exists to remove.
 
-    Note this is deliberately *not* fastest-first, which is what the RunPod
-    orchestrator did. There, ordering by speed was the only protection against
-    picking a weak card. Here `VAST_MIN_DLPERF` has already removed everything
-    below a 4090, so every remaining offer is fast enough and the ordering is
-    free to spend on the two things that still differ: distance, then money.
+    **CPU clock second, and this is the part that is not obvious.** The
+    compositor is OpenCV on the CPU — ~10.3ms of a ~29ms frame — and is the one
+    stage a faster GPU does not touch. Clock across eligible offers ranges 3.5
+    to 6.0 GHz, so the host CPU swings roughly 4-5ms of frame time: more than
+    switching restoration models bought on the detect stage, and free to
+    choose. It also decides whether 30fps is reachable later, since that is the
+    rate where a slow compositor breaks the deadline outright.
+
+    **Price last**, within a band.
+
+    Note what is deliberately absent: GPU speed. `VAST_MIN_DLPERF` has already
+    removed everything below a 4090, so every surviving offer is fast enough on
+    the GPU and ordering on it again would only buy headroom that goes unused
+    at 20fps. The RunPod orchestrator sorted fastest-first because a ranking
+    was its only protection against a weak card; the floor does that here.
     """
     rank = {code: i for i, code in enumerate(geolocations)}
     fallback = len(rank)
     return sorted(
         offers,
-        key=lambda o: (rank.get(_country(o), fallback), o.get("dph_total") or 0.0),
+        key=lambda o: (rank.get(_country(o), fallback),
+                       -_cpu_band(o),
+                       o.get("dph_total") or 0.0),
     )
 
 
 def _describe_offer(offer: Dict[str, Any]) -> str:
     return ("{gpu} - {loc} - ${price:.3f}/hr - dlperf {dl:.0f} - "
+            "cpu {ghz:.1f}GHz x{cores:.0f} - "
             "up {up:.0f} MB/s - rel {rel:.3f} - {ports} ports").format(
         gpu=offer.get("gpu_name", "?"),
         loc=(offer.get("geolocation") or "?"),
         price=offer.get("dph_total") or 0.0,
         dl=offer.get("dlperf") or 0.0,
+        ghz=offer.get("cpu_ghz") or 0.0,
+        cores=offer.get("cpu_cores_effective") or 0.0,
         up=offer.get("inet_up") or 0.0,
         rel=offer.get("reliability2") or 0.0,
         ports=offer.get("direct_port_count") or 0,
@@ -1080,6 +1141,8 @@ def _selection_settings() -> Dict[str, Any]:
         "min_reliability": _env_float("VAST_MIN_RELIABILITY", _DEFAULT_MIN_RELIABILITY),
         "min_inet_up": _env_float("VAST_MIN_INET_UP", _DEFAULT_MIN_INET_UP),
         "min_ports": _env_int("VAST_MIN_PORTS", _DEFAULT_MIN_PORTS),
+        "min_cpu_ghz": _env_float("VAST_MIN_CPU_GHZ", _DEFAULT_MIN_CPU_GHZ),
+        "min_cpu_cores": _env_float("VAST_MIN_CPU_CORES", _DEFAULT_MIN_CPU_CORES),
         "max_compute_cap": _env_int("VAST_MAX_COMPUTE_CAP", _DEFAULT_MAX_COMPUTE_CAP),
         "verified_only": (os.getenv("VAST_VERIFIED_ONLY") or "true").strip().lower()
                          not in ("0", "false", "no", "off"),
@@ -1121,10 +1184,12 @@ def _find_offer() -> Dict[str, Any]:
             print("\nNothing matches. Waiting up to {}s, retrying every {}s.".format(
                 wait, _GPU_RETRY_INTERVAL))
             print("  Waiting is free — billing starts when an instance runs.")
-            print("  Criteria: {} - dlperf>={:.0f} - <=${:.2f}/hr - rel>={:.2f} - up>={:.0f}MB/s".format(
+            print("  Criteria: {} - dlperf>={:.0f} - <=${:.2f}/hr - rel>={:.2f}"
+              " - up>={:.0f}MB/s - cpu>={:.1f}GHz".format(
                 ",".join(settings["geolocations"]) or "anywhere",
                 settings["min_dlperf"], settings["max_price"],
-                settings["min_reliability"], settings["min_inet_up"]))
+                settings["min_reliability"], settings["min_inet_up"],
+                settings["min_cpu_ghz"]))
             announced = True
 
         if time.time() >= deadline:
@@ -1376,6 +1441,10 @@ def _rejection_reasons(offer: Dict[str, Any], settings: Dict[str, Any]) -> List[
         why.append("up {:.0f}MB/s".format(offer.get("inet_up") or 0))
     if (offer.get("direct_port_count") or 0) < settings["min_ports"]:
         why.append("{} ports".format(offer.get("direct_port_count") or 0))
+    if (offer.get("cpu_ghz") or 0) < settings["min_cpu_ghz"]:
+        why.append("cpu {:.1f}GHz".format(offer.get("cpu_ghz") or 0))
+    if (offer.get("cpu_cores_effective") or 0) < settings["min_cpu_cores"]:
+        why.append("{:.0f} cpu cores".format(offer.get("cpu_cores_effective") or 0))
     if (offer.get("compute_cap") or 0) > settings["max_compute_cap"]:
         why.append("sm_{}".format(int((offer.get("compute_cap") or 0) / 10)))
     if (offer.get("gpu_ram") or 0) < settings["min_vram"] * 1024:
@@ -1402,10 +1471,12 @@ def cmd_offers() -> None:
     preferred_raw = (os.getenv("VAST_PREFERRED_HOST") or "").strip()
     preferred = int(preferred_raw) if preferred_raw.isdigit() else None
 
-    print("Searching Vast: {} - dlperf>={:.0f} - <=${:.2f}/hr - rel>={:.2f} - up>={:.0f} MB/s\n".format(
+    print("Searching Vast: {} - dlperf>={:.0f} - <=${:.2f}/hr - rel>={:.2f}"
+          " - up>={:.0f} MB/s - cpu>={:.1f}GHz\n".format(
         ",".join(settings["geolocations"]) or "anywhere",
         settings["min_dlperf"], settings["max_price"],
-        settings["min_reliability"], settings["min_inet_up"]))
+        settings["min_reliability"], settings["min_inet_up"],
+        settings["min_cpu_ghz"]))
 
     eligible = _search_offers(**settings)
 
@@ -1413,7 +1484,8 @@ def cmd_offers() -> None:
     # say what the floors are actually costing.
     wide = dict(settings)
     wide.update({"min_dlperf": 0.0, "min_reliability": 0.0, "min_inet_up": 0.0,
-                 "min_ports": 0, "verified_only": False, "max_price": 999.0})
+                 "min_ports": 0, "verified_only": False, "max_price": 999.0,
+                 "min_cpu_ghz": 0.0, "min_cpu_cores": 0.0})
     everything = _search_offers(**wide)
 
     # Compared on `machine_id`, not `id`. An offer's `id` is stable for a given
@@ -1430,21 +1502,25 @@ def cmd_offers() -> None:
 
     if eligible:
         print("Eligible — `start` takes the first of these:")
-        header = "  {:<3} {:<16} {:<22} {:>8} {:>7} {:>8} {:>6} {:>7}"
-        print(header.format("", "GPU", "location", "$/hr", "dlperf", "up MB/s", "rel", "$/mo st"))
+        header = "  {:<3} {:<15} {:<18} {:>7} {:>6} {:>5} {:>5} {:>7} {:>7}"
+        print(header.format("", "GPU", "location", "$/hr", "dlperf",
+                            "GHz", "cores", "up MB/s", "$/mo st"))
         for i, o in enumerate(eligible[:20]):
             mark = ">" if i == 0 else ""
             if preferred is not None and o.get("host_id") == preferred:
                 mark = "P"
             print(header.format(
-                mark, str(o.get("gpu_name"))[:16], str(o.get("geolocation"))[:22],
+                mark, str(o.get("gpu_name"))[:15], str(o.get("geolocation"))[:18],
                 "{:.3f}".format(o.get("dph_total") or 0.0),
                 "{:.0f}".format(o.get("dlperf") or 0.0),
+                "{:.1f}".format(o.get("cpu_ghz") or 0.0),
+                "{:.0f}".format(o.get("cpu_cores_effective") or 0.0),
                 "{:.0f}".format(o.get("inet_up") or 0.0),
-                "{:.3f}".format(o.get("reliability2") or 0.0),
                 "{:.1f}".format((o.get("storage_cost") or 0.0) * settings["disk"]),
             ))
         print("\n  > is what `start` takes; P marks VAST_PREFERRED_HOST.")
+        print("  Ordered by country, then CPU clock band, then price. GHz is the")
+        print("  compositor's speed - the one stage a faster GPU does not touch.")
         print("  '$/mo st' is standing storage for {} GB while stopped.".format(settings["disk"]))
     else:
         print("Nothing is eligible right now. `start` would wait {}s and then {}.".format(

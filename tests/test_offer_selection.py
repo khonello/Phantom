@@ -68,6 +68,10 @@ def offer(gpu, country, price, dlperf=97.0, **extra):
                                         'RO': 'Romania'}.get(country, country), country),
         'dph_total': price,
         'dlperf': dlperf,
+        # A mid-range clock by default, so a test that says nothing about the
+        # CPU is ranked purely on country and price, as it was before.
+        'cpu_ghz': 4.5,
+        'cpu_cores_effective': 16.0,
     }
     body.update(extra)
     return body
@@ -154,6 +158,7 @@ def test_the_floor_reaches_the_search_as_a_filter(monkeypatch):
     orch._search_offers(
         geolocations=GEO, min_dlperf=90.0, min_vram=16, max_price=1.0,
         min_reliability=0.98, min_inet_up=100.0, min_ports=32,
+        min_cpu_ghz=3.5, min_cpu_cores=8.0,
         max_compute_cap=900, verified_only=True, disk=25)
 
     assert captured['dlperf'] == {'gte': 90.0}
@@ -179,6 +184,7 @@ def test_non_nvidia_is_excluded(monkeypatch):
     orch._search_offers(
         geolocations=GEO, min_dlperf=90.0, min_vram=16, max_price=1.0,
         min_reliability=0.98, min_inet_up=100.0, min_ports=32,
+        min_cpu_ghz=3.5, min_cpu_cores=8.0,
         max_compute_cap=900, verified_only=True, disk=25)
     assert captured['gpu_arch'] == {'eq': 'nvidia'}
 
@@ -199,6 +205,7 @@ def test_a_pinned_host_still_cannot_bring_an_amd_card(monkeypatch):
     orch._search_offers(
         geolocations=GEO, min_dlperf=90.0, min_vram=16, max_price=1.0,
         min_reliability=0.98, min_inet_up=100.0, min_ports=32,
+        min_cpu_ghz=3.5, min_cpu_cores=8.0,
         max_compute_cap=900, verified_only=True, disk=25, host_id=135666)
 
     assert captured['host_id'] == {'eq': 135666}
@@ -386,3 +393,114 @@ def test_a_200_carrying_success_true_is_returned(monkeypatch):
     monkeypatch.setattr(orch.requests, 'request', lambda *a, **k: Resp())
     monkeypatch.setenv('VAST_API_KEY', 'k')
     assert orch._request('PUT', '/asks/1/', json={})['new_contract'] == 42
+
+
+# ── The CPU, which decides the one stage a faster GPU does not ───────────────
+# The compositor is OpenCV on the CPU: ~10.3ms of a ~29ms frame on a 4090 host
+# and ~20ms on an L4 host with identical models. Clock across eligible western
+# European offers ranged 3.5 to 6.0 GHz on 2026-09-04, so the host CPU swings
+# roughly 4-5ms of frame time -- more than switching restoration models bought
+# on detect, and free to choose.
+
+
+def test_the_cpu_floors_reach_the_search(monkeypatch):
+    captured = {}
+
+    def fake_request(method, path, auth=True, raise_on_error=False, **kwargs):
+        captured.update(kwargs.get('json') or {})
+        return {'offers': []}
+
+    monkeypatch.setattr(orch, '_request', fake_request)
+    orch._search_offers(
+        geolocations=GEO, min_dlperf=90.0, min_vram=16, max_price=1.0,
+        min_reliability=0.98, min_inet_up=100.0, min_ports=32,
+        min_cpu_ghz=4.5, min_cpu_cores=8.0,
+        max_compute_cap=900, verified_only=True, disk=25)
+    assert captured['cpu_ghz'] == {'gte': 4.5}
+    assert captured['cpu_cores_effective'] == {'gte': 8.0}
+
+
+def test_the_cpu_floor_is_loose_on_purpose():
+    """
+    A slow CPU still holds the 50ms deadline at 20fps, so clock is a preference
+    rather than a requirement -- and a tight floor collapses availability. At
+    4.5 GHz only two offers in all of western Europe survived. `_rank` is what
+    selects on it; the floor only excludes the genuinely starved.
+    """
+    assert orch._DEFAULT_MIN_CPU_GHZ <= 4.0, \
+        'a high floor trades availability for a preference'
+    assert orch._DEFAULT_MIN_CPU_CORES >= 4
+
+
+def test_a_faster_cpu_wins_inside_a_country():
+    slow = offer('RTX 4090', 'GB', 0.29, cpu_ghz=3.5)
+    fast = offer('RTX 4090', 'GB', 0.45, cpu_ghz=5.7)
+    assert orch._rank([slow, fast], GEO)[0] is fast, \
+        'the compositor is CPU-bound; clock is worth more than the price gap here'
+
+
+def test_country_still_beats_the_cpu():
+    """Distance is the term this deployment cannot buy back. Nothing outranks it."""
+    near_slow = offer('RTX 4090', 'GB', 0.29, cpu_ghz=3.5)
+    far_fast = offer('RTX 4090', 'DE', 0.29, cpu_ghz=6.0)
+    assert orch._country(orch._rank([far_fast, near_slow], GEO)[0]) == 'GB'
+
+
+def test_price_decides_inside_a_clock_band():
+    """
+    The reason clock is banded rather than sorted raw. On raw clock a 5.6 GHz
+    box at $0.90 would beat a 5.7 GHz box at $0.29 -- a difference inside the
+    noise of what this workload can feel, bought at 3x.
+    """
+    cheap = offer('RTX 4090', 'GB', 0.29, cpu_ghz=5.7)
+    dear = offer('RTX 4090', 'GB', 0.90, cpu_ghz=5.6)
+    assert orch._cpu_band(cheap) == orch._cpu_band(dear), 'test premise: same band'
+    assert orch._rank([dear, cheap], GEO)[0] is cheap
+
+
+def test_banding_still_has_boundaries_and_that_is_accepted():
+    """
+    Honest about the limit: 5.7 and 5.8 GHz straddle a band edge, so clock
+    decides between them even though the gap is meaningless. Any bucketing has
+    edges, and this one is accepted rather than fixed, because the differences
+    that actually matter here are large -- 3.5 GHz against 5.7 is 1.6x, several
+    bands wide, and no edge case hides it. A narrower band would move the
+    problem, not remove it.
+    """
+    a = offer('RTX 4090', 'GB', 0.29, cpu_ghz=5.7)
+    b = offer('RTX 4090', 'GB', 0.90, cpu_ghz=5.8)
+    assert orch._cpu_band(a) != orch._cpu_band(b)
+    assert orch._rank([a, b], GEO)[0] is b  # the edge case, documented not fixed
+
+
+def test_a_large_clock_difference_does_override_price():
+    cheap = offer('RTX 4090', 'GB', 0.29, cpu_ghz=3.5)
+    dear = offer('RTX 4090', 'GB', 0.45, cpu_ghz=5.5)
+    assert orch._rank([dear, cheap], GEO)[0] is dear
+
+
+def test_the_band_rounds_to_half_a_gigahertz():
+    assert orch._cpu_band({'cpu_ghz': 5.7}) == 5.5
+    assert orch._cpu_band({'cpu_ghz': 5.8}) == 6.0
+    assert orch._cpu_band({'cpu_ghz': 3.5}) == 3.5
+    assert orch._cpu_band({}) == 0.0, 'a missing clock must not crash the sort'
+
+
+def test_gpu_speed_is_deliberately_not_in_the_ranking():
+    """
+    VAST_MIN_DLPERF has already removed everything below a 4090, so every
+    surviving offer is fast enough on the GPU. Ranking on it again would buy
+    headroom that goes unused at 20fps, at the cost of the CPU term that does
+    not go unused.
+    """
+    weaker_gpu_faster_cpu = offer('RTX 4090', 'GB', 0.29, dlperf=97, cpu_ghz=5.7)
+    stronger_gpu_slower_cpu = offer('RTX 6000Ada', 'GB', 0.29, dlperf=113, cpu_ghz=3.5)
+    ranked = orch._rank([stronger_gpu_slower_cpu, weaker_gpu_faster_cpu], GEO)
+    assert ranked[0] is weaker_gpu_faster_cpu
+
+
+def test_a_missing_cpu_field_sorts_last_rather_than_crashing():
+    known = offer('RTX 4090', 'GB', 0.50, cpu_ghz=5.0)
+    unknown = offer('RTX 4090', 'GB', 0.10)
+    unknown['cpu_ghz'] = None
+    assert orch._rank([unknown, known], GEO)[0] is known

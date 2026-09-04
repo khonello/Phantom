@@ -109,9 +109,44 @@ and its disk, so `resume` is warm and the desktop's address stops moving. The
 filtered search still runs whenever that host has nothing rentable, so pinning
 costs nothing when it is busy.
 
-Weigh three things per host, all shown by `offers`: price, uplink, and the
-`$/mo st` column — standing storage while stopped, which varies by more than 3x
-across otherwise similar offers.
+Weigh four things per host, all shown by `offers`:
+
+- **`$/hr`** — the GPU
+- **`GHz`** — the host CPU. See below; this is the column people skip and it
+  matters more than the GPU column does
+- **`up MB/s`** — the host's uplink. The app needs ~0.6, so anything here is
+  plenty; a low number is a signal about the host, not a capacity limit
+- **`$/mo st`** — standing storage while stopped, which varies by more than 3x
+  across otherwise similar offers
+
+### Why the CPU column matters more than it looks
+
+The compositor is OpenCV on the CPU, and it is **the one stage a faster GPU
+does not touch**: ~10.3ms of a ~29ms frame on a 4090 host, and ~20ms on an L4
+host running identical models. On a fast card it is over a third of the frame.
+
+Measured across western Europe on 2026-09-04, eligible offers ranged **3.5 to
+6.0 GHz** — a 1.7x spread on latency-sensitive, lightly-threaded work. That is
+roughly **4-5ms of frame time decided by which host you take**, which is more
+than switching restoration models bought on the detect stage, and it is free to
+choose.
+
+**Desktop silicon wins; server silicon loses.** Ryzen 9 7900X at 5.7 GHz and
+Core i9-13900KF at 6.0 beat EPYC 7663 at 3.5 and the H100 hosts at 2.0-2.4.
+EPYC and Xeon trade clock for core count, and this workload wants the opposite.
+
+So `offers` orders by **country, then CPU clock band, then price** — not by GPU
+speed, because `VAST_MIN_DLPERF` has already removed everything below a 4090
+and further GPU headroom goes unused at 20fps.
+
+The clock is *banded* to 0.5 GHz rather than sorted raw, so a trivial
+difference cannot override a large price gap. Band edges still decide the odd
+pair unfairly; that is accepted, because the differences that matter here are
+several bands wide.
+
+At 20fps none of this is load-bearing — a 3.5 GHz host still holds the 50ms
+deadline. It decides whether 30fps is reachable later, and it costs nothing to
+prefer the better box today.
 
 ## Part 2 — `.env`
 
@@ -243,6 +278,8 @@ needed against a live instance.
 | `VAST_MIN_RELIABILITY` | `0.98` | Host reliability, 0–1 |
 | `VAST_MIN_INET_UP` | `100` | MB/s. The app needs ~0.6; this is a proxy for a real connection |
 | `VAST_MIN_PORTS` | `32` | `direct_port_count` — a host with too few cannot publish 9000 |
+| `VAST_MIN_CPU_GHZ` | `3.5` | Host CPU clock. **The compositor is CPU-bound** — see below |
+| `VAST_MIN_CPU_CORES` | `8` | Effective cores, i.e. this instance's *share* of the machine |
 | `VAST_MAX_COMPUTE_CAP` | `900` | sm_90. Blackwell reports 1200 and would fail after billing started |
 | `VAST_VERIFIED_ONLY` | `true` | Unverified hosts are self-reported |
 | `VAST_GPU_WAIT` | `300` | Seconds to retry the search. Waiting is free |
