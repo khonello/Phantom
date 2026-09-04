@@ -211,7 +211,15 @@ def test_a_pinned_host_still_cannot_bring_an_amd_card(monkeypatch):
     assert captured['host_id'] == {'eq': 135666}
     assert captured['gpu_arch'] == {'eq': 'nvidia'}
     assert captured['compute_cap'] == {'lte': 900}
-    assert 'dlperf' not in captured, 'a pinned host is exempt from the speed floor'
+
+    # And it is NOT exempt from the floors that decide whether 20fps holds.
+    # An earlier version exempted it from all of them, which this test asserted
+    # as correct -- pinning a host and skipping the speed floor is the same
+    # mistake as filtering on gpu_name: it trusts an identity where only a
+    # measurement will do. The live market carries RTX 4090s at dlperf 50.
+    floor = min(d for _, d, _ in orch._RELAXATION_LADDER)
+    assert captured['dlperf'] == {'gte': floor},         'a pinned host that degraded must still be refused'
+    assert captured['dph_total'] == {'lte': 1.0},         'pinning must not license unbounded billing'
 
 
 # ── Resume falls back only on capacity ───────────────────────────────────────
@@ -643,3 +651,96 @@ def test_relaxation_can_be_pinned_off_for_a_measurement(monkeypatch):
     relax = (os.environ.get('VAST_RELAX') or 'true').strip().lower() \
         not in ('0', 'false', 'no', 'off')
     assert relax is False
+
+
+# ── Identity is not a measurement ────────────────────────────────────────────
+# `dlperf` is measured per OFFER, not per GPU model. The live western-European
+# market on 2026-09-04 carried RTX 4090s scoring 50 and 51 against a normal 97
+# -- hosts letting out a throttled or heavily shared card at full 4090 prices.
+#
+# Two ways to walk into that, and neither is hypothetical:
+#   - filtering on `gpu_name`, which this orchestrator deliberately never does
+#   - pinning `VAST_PREFERRED_HOST` and skipping the speed floor, which it did
+
+def test_the_search_never_filters_on_a_gpu_name(monkeypatch):
+    """
+    A name says which model was fitted, not what the host will actually give
+    you. `gpu_name in ["RTX 4090"]` would have taken a dlperf-50 card at
+    $0.309: a 3090's throughput, a 4090's price, and a missed 20fps target.
+    """
+    captured = {}
+
+    def fake_request(method, path, auth=True, raise_on_error=False, **kwargs):
+        captured.update(kwargs.get('json') or {})
+        return {'offers': []}
+
+    monkeypatch.setattr(orch, '_request', fake_request)
+    orch._search_offers(
+        geolocations=GEO, min_dlperf=90.0, min_vram=16, max_price=1.0,
+        min_reliability=0.98, min_inet_up=100.0, min_ports=32,
+        min_cpu_ghz=3.5, min_cpu_cores=8.0,
+        max_compute_cap=900, verified_only=False, disk=25)
+    assert 'gpu_name' not in captured, \
+        'the model name is an identity; dlperf is the measurement'
+
+
+def test_a_throttled_card_is_refused_whatever_it_is_called():
+    """The floor is on the measurement, so the badge on the box is irrelevant."""
+    settings = dict(
+        geolocations=GEO, min_dlperf=90.0, min_vram=16, max_price=1.0,
+        min_reliability=0.98, min_inet_up=100.0, min_ports=32,
+        min_cpu_ghz=3.5, min_cpu_cores=8.0,
+        max_compute_cap=900, verified_only=False, disk=25)
+    floor = settings['min_dlperf']
+    honest = offer('RTX 4090', 'GB', 0.294, dlperf=97)
+    throttled = offer('RTX 4090', 'GB', 0.309, dlperf=50)
+    assert (honest['dlperf'] or 0) >= floor
+    assert (throttled['dlperf'] or 0) < floor, \
+        'both are called RTX 4090; only one of them is one'
+
+
+def test_a_pinned_host_is_still_held_to_the_delivery_floors(monkeypatch):
+    """
+    Exempt from the preferences, never from the target. "I picked this host
+    once" is not evidence that it can still do the job.
+    """
+    captured = {}
+
+    def fake_request(method, path, auth=True, raise_on_error=False, **kwargs):
+        captured.update(kwargs.get('json') or {})
+        return {'offers': []}
+
+    monkeypatch.setattr(orch, '_request', fake_request)
+    orch._search_offers(
+        geolocations=GEO, min_dlperf=90.0, min_vram=16, max_price=1.0,
+        min_reliability=0.98, min_inet_up=100.0, min_ports=32,
+        min_cpu_ghz=3.5, min_cpu_cores=8.0,
+        max_compute_cap=900, verified_only=False, disk=25, host_id=135666)
+
+    floor_dlperf = min(d for _, d, _ in orch._RELAXATION_LADDER)
+    floor_ghz = min(g for _, _, g in orch._RELAXATION_LADDER)
+
+    # Kept: the things that decide whether it works at all.
+    assert captured['dlperf'] == {'gte': floor_dlperf}
+    assert captured['cpu_ghz'] == {'gte': floor_ghz}
+    assert captured['gpu_ram'] == {'gte': 16 * 1024}
+    assert captured['gpu_arch'] == {'eq': 'nvidia'}
+    assert captured['compute_cap'] == {'lte': 900}
+    assert captured['dph_total'] == {'lte': 1.0}
+
+    # Dropped: preferences, so a transient dip does not move the session
+    # to another country.
+    assert 'reliability' not in captured
+    assert 'inet_up' not in captured
+    assert 'verified' not in captured
+
+
+def test_the_pinned_floors_are_the_ladder_bottom_not_the_preferred_standard():
+    """
+    Loose enough that a slightly slow day does not lose the warm disk, strict
+    enough that an undeliverable box is still refused.
+    """
+    floor = min(d for _, d, _ in orch._RELAXATION_LADDER)
+    preferred = orch._RELAXATION_LADDER[0][1]
+    assert floor < preferred, 'a pinned host gets latitude'
+    assert floor > 51, 'but not enough to accept the throttled 4090s seen live'

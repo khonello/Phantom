@@ -527,15 +527,38 @@ def _search_offers(
     if verified_only:
         body["verified"] = {"eq": True}
     if host_id is not None:
-        # A pinned host overrides the quality floors rather than adding to them:
-        # the host was chosen deliberately, and a transient reliability dip
-        # should not silently move the session to another country.
+        # A pinned host is exempt from the *preferences*, never from the
+        # *target*. It was chosen deliberately, so a transient reliability dip
+        # or a slightly slow day should not silently move the session to
+        # another country — but "I picked this host once" is not evidence that
+        # it can still do the job.
+        #
+        # It is not hypothetical. `dlperf` is measured per OFFER, not per GPU
+        # model, and the live market carries RTX 4090s scoring 50 and 51
+        # against a normal 97 — hosts letting out a throttled or heavily shared
+        # card. Pinning by host id and skipping the speed floor is the same
+        # mistake as filtering by `gpu_name`: it trusts an identity where only a
+        # measurement will do, and would rent half a 4090 at full price while
+        # missing 20fps.
+        #
+        # So the floors that decide whether the product works still apply, at
+        # the ladder's bottom rung rather than the preferred standard: below
+        # that, no amount of loyalty to a host makes the session deliverable.
+        floor_dlperf = min(d for _, d, _ in _RELAXATION_LADDER)
+        floor_ghz = min(g for _, _, g in _RELAXATION_LADDER)
         body = {
             "limit": 50, "type": "ondemand", "rentable": {"eq": True},
             "num_gpus": {"eq": 1}, "host_id": {"eq": host_id},
+            # Cannot run the software at all:
             "compute_cap": {"lte": max_compute_cap},
-            "disk_space": {"gte": disk},
             "gpu_arch": {"eq": "nvidia"},
+            "gpu_ram": {"gte": min_vram * 1024},
+            "disk_space": {"gte": disk},
+            # Cannot hold 20fps:
+            "dlperf": {"gte": floor_dlperf},
+            "cpu_ghz": {"gte": floor_ghz},
+            # Cannot be allowed to bill unbounded because it was pinned once:
+            "dph_total": {"lte": max_price},
             "order": [["dph_total", "asc"]],
         }
 
@@ -1243,8 +1266,21 @@ def _find_offer() -> Dict[str, Any]:
         if preferred is not None:
             pinned = _search_offers(host_id=preferred, **settings)
             if pinned:
+                offer = pinned[0]
                 print("Preferred host {} has capacity.".format(preferred))
-                return pinned[0]
+                # It cleared the delivery floors or it would not be here. But
+                # it may still have degraded since it was chosen, and a warm
+                # disk is not worth a card that is quietly half the one you
+                # picked — so say so rather than let it pass as normal.
+                if (offer.get("dlperf") or 0) < settings["min_dlperf"] or \
+                        (offer.get("cpu_ghz") or 0) < settings["min_cpu_ghz"]:
+                    print("  WARNING: it is below the preferred standard now -")
+                    print("    {}".format(_describe_offer(offer)))
+                    print("    wanted dlperf>={:.0f}, cpu>={:.1f}GHz".format(
+                        settings["min_dlperf"], settings["min_cpu_ghz"]))
+                    print("  Still inside the 20fps budget, so it is taken.")
+                    print("  Clear VAST_PREFERRED_HOST to search instead.")
+                return offer
             print("Preferred host {} has nothing rentable; searching.".format(preferred))
 
         for label, min_dlperf, min_cpu_ghz in ladder:
