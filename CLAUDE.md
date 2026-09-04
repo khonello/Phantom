@@ -595,7 +595,7 @@ table it pinned are both gone.
 |---|---|---|
 | `VAST_MIN_DLPERF` | `90` | Measured in western Europe: RTX 6000 Ada 113, RTX 4090 97, RTX 5080 84, RTX 3090 45. So 90 is "4090 or better" |
 | `VAST_GPU_WAIT` | `300` | Seconds to keep retrying before giving up |
-| `VAST_GPU_FALLBACK` | *unset* | What the timeout does: unset fails, `true` drops the floor |
+| `VAST_RELAX` | `true` | Relax in bounded steps when nothing matches — CPU, then GPU, then both. **Every rung still holds 20fps**; the ladder stops rather than renting hardware that cannot deliver |
 
 **A bounded wait is not a pin: billing starts when an instance runs, not while
 you are waiting for one**, so the wait costs nothing and the thing it avoids

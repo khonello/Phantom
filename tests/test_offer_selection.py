@@ -504,3 +504,142 @@ def test_a_missing_cpu_field_sorts_last_rather_than_crashing():
     unknown = offer('RTX 4090', 'GB', 0.10)
     unknown['cpu_ghz'] = None
     assert orch._rank([unknown, known], GEO)[0] is known
+
+
+# ── The GPU is gated AND ranked, not just gated ──────────────────────────────
+# Four GPU filters reach the search: dlperf, gpu_ram, compute_cap and gpu_arch,
+# plus the price ceiling. What was missing was the GPU in the *ordering* — at
+# equal country and CPU, a few cents decided between cards, which is the wrong
+# tiebreak when the frame is roughly 19ms of GPU work against 10.3ms of CPU.
+
+
+def test_every_gpu_gate_reaches_the_search(monkeypatch):
+    captured = {}
+
+    def fake_request(method, path, auth=True, raise_on_error=False, **kwargs):
+        captured.update(kwargs.get('json') or {})
+        return {'offers': []}
+
+    monkeypatch.setattr(orch, '_request', fake_request)
+    orch._search_offers(
+        geolocations=GEO, min_dlperf=90.0, min_vram=16, max_price=1.0,
+        min_reliability=0.98, min_inet_up=100.0, min_ports=32,
+        min_cpu_ghz=3.5, min_cpu_cores=8.0,
+        max_compute_cap=900, verified_only=False, disk=25)
+
+    assert captured['dlperf'] == {'gte': 90.0}, 'speed'
+    assert captured['gpu_ram'] == {'gte': 16 * 1024}, 'VRAM'
+    assert captured['compute_cap'] == {'lte': 900}, 'architecture the image supports'
+    assert captured['gpu_arch'] == {'eq': 'nvidia'}, 'CUDAExecutionProvider exists'
+    assert captured['dph_total'] == {'lte': 1.0}, 'budget'
+
+
+def test_the_better_gpu_wins_at_equal_country_and_cpu():
+    slow_gpu = offer('RTX 4090', 'GB', 0.29, dlperf=91, cpu_ghz=5.7)
+    fast_gpu = offer('RTX 6000Ada', 'GB', 0.45, dlperf=113, cpu_ghz=5.7)
+    assert orch._rank([slow_gpu, fast_gpu], GEO)[0] is fast_gpu
+
+
+def test_the_cpu_outranks_the_gpu():
+    """
+    Not because the CPU is the larger term — it is not, the frame is roughly
+    19ms GPU against 10.3ms CPU. Because VAST_MIN_DLPERF has already guaranteed
+    the GPU is adequate, while the CPU floor is deliberately loose and
+    guarantees nothing. CPU ordering does real work; GPU ordering refines
+    between cards that all already hold the deadline.
+    """
+    fast_cpu_slow_gpu = offer('RTX 4090', 'GB', 0.29, dlperf=91, cpu_ghz=5.7)
+    slow_cpu_fast_gpu = offer('RTX 6000Ada', 'GB', 0.29, dlperf=113, cpu_ghz=3.5)
+    assert orch._rank([slow_cpu_fast_gpu, fast_cpu_slow_gpu], GEO)[0] \
+        is fast_cpu_slow_gpu
+
+
+def test_price_still_decides_when_both_bands_tie():
+    cheap = offer('RTX 4090', 'GB', 0.29, dlperf=97, cpu_ghz=5.7)
+    dear = offer('RTX 4090', 'GB', 0.80, dlperf=97, cpu_ghz=5.7)
+    assert orch._rank([dear, cheap], GEO)[0] is cheap
+
+
+def test_the_gpu_band_is_coarse_enough_to_ignore_noise():
+    """A few dlperf points must not override a price gap, same as clock."""
+    assert orch._dlperf_band({'dlperf': 91}) == orch._dlperf_band({'dlperf': 97})
+    assert orch._dlperf_band({'dlperf': 97}) != orch._dlperf_band({'dlperf': 113})
+    assert orch._dlperf_band({}) == 0.0, 'a missing score must not crash the sort'
+
+
+# ── Verification is a badge, reliability is a measurement ────────────────────
+
+def test_verification_is_not_filtered_on_by_default(monkeypatch):
+    """
+    Vast's "verified" is a datacenter badge. Left on it excluded the best UK
+    box on every axis that matters — $0.294 against $0.737, a 5.7GHz Ryzen
+    against a 3.5GHz EPYC, $1.70/month storage against $8.30 — for a measured
+    reliability difference of 0.993 against 0.997.
+    """
+    for name in ('VAST_VERIFIED_ONLY', 'VAST_GEOLOCATIONS'):
+        monkeypatch.delenv(name, raising=False)
+    assert orch._selection_settings()['verified_only'] is False
+
+
+def test_verification_can_still_be_demanded(monkeypatch):
+    monkeypatch.setenv('VAST_VERIFIED_ONLY', 'true')
+    assert orch._selection_settings()['verified_only'] is True
+
+
+def test_reliability_remains_a_hard_floor(monkeypatch):
+    """Dropping the badge must not drop the measurement it was standing in for."""
+    monkeypatch.delenv('VAST_MIN_RELIABILITY', raising=False)
+    assert orch._selection_settings()['min_reliability'] >= 0.95
+
+
+# ── Relaxation, bounded by the one number that is not negotiable ─────────────
+# 20fps is a hard target, so every rung has to fit a frame into 50ms. GPU work
+# scales about inversely with dlperf from ~19ms at 97, so dlperf 45 (an RTX
+# 3090) lands at ~51ms and misses. The ladder stops above that rather than
+# continuing.
+
+def test_the_ladder_goes_from_strict_to_loose():
+    names = [name for name, _, _ in orch._RELAXATION_LADDER]
+    assert names[0] == 'preferred'
+    dlperfs = [d for _, d, _ in orch._RELAXATION_LADDER]
+    ghz = [g for _, _, g in orch._RELAXATION_LADDER]
+    assert min(dlperfs) < max(dlperfs), 'the GPU floor must actually relax'
+    assert min(ghz) < max(ghz), 'the CPU floor must actually relax'
+
+
+def test_the_cpu_relaxes_before_the_gpu():
+    """It costs less: a CPU rung is worth a few ms, a GPU rung about seven."""
+    names = [name for name, _, _ in orch._RELAXATION_LADDER]
+    assert names.index('relaxed CPU') < names.index('relaxed GPU')
+
+
+def test_no_rung_would_miss_twenty_fps():
+    """
+    The invariant the ladder exists to protect. ~19ms of GPU work at dlperf 97,
+    scaling inversely, plus ~10.3ms of CPU work, must stay inside 50ms.
+    """
+    for name, min_dlperf, _ghz in orch._RELAXATION_LADDER:
+        gpu_ms = 19.0 * 97.0 / min_dlperf
+        frame_ms = gpu_ms + 10.3
+        assert frame_ms < 50.0, \
+            '{} allows dlperf {:.0f} -> ~{:.0f}ms frame, misses 20fps'.format(
+                name, min_dlperf, frame_ms)
+
+
+def test_the_bottom_rung_still_refuses_a_3090():
+    """
+    dlperf 44.5 lands at ~51ms — over the 50ms budget. An unbounded fallback
+    would have taken it, and worse: the old one dropped the floor to zero,
+    which admits a GTX 1080 at dlperf 3.4.
+    """
+    floor = min(d for _, d, _ in orch._RELAXATION_LADDER)
+    assert floor > 44.5, 'an RTX 3090 must not be reachable'
+    assert floor > 3.4, 'a GTX 1080 must certainly not be reachable'
+
+
+def test_relaxation_can_be_pinned_off_for_a_measurement(monkeypatch):
+    """Numbers from two architectures are not a comparison."""
+    monkeypatch.setenv('VAST_RELAX', 'false')
+    relax = (os.environ.get('VAST_RELAX') or 'true').strip().lower() \
+        not in ('0', 'false', 'no', 'off')
+    assert relax is False

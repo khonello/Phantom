@@ -45,10 +45,16 @@ Selection:
   - VAST_GEOLOCATIONS bounds distance; everything else is a quality floor.
   - VAST_PREFERRED_HOST pins one host so the IP is stable and the disk stays
     warm. When it has nothing rentable the filtered search runs instead.
-  - When nothing matches, the whole search is retried every minute for
-    VAST_GPU_WAIT seconds. Waiting is free — billing starts when an instance
-    runs, not while you are looking for one. At the timeout VAST_GPU_FALLBACK
-    decides: unset fails, true drops the dlperf floor.
+  - When nothing matches at the preferred standard, the search relaxes in
+    bounded steps (_RELAXATION_LADDER) rather than waiting: CPU first because
+    it costs less, then GPU, then both. **Every rung still holds 20fps**, which
+    is the target the ladder exists to protect — it stops rather than
+    continuing into hardware that cannot deliver.
+  - Only when no rung matches does it wait, retrying every minute for
+    VAST_GPU_WAIT seconds. Waiting is free: billing starts when an instance
+    runs, not while you are looking for one.
+  - VAST_RELAX=false pins the top rung, for a measurement session where
+    numbers from two architectures are not a comparison.
 
 Warm models:
   - A stopped instance keeps its disk, so `stop`/`resume` is the fast path and
@@ -157,6 +163,35 @@ _DEFAULT_MIN_CPU_GHZ = 3.5
 # so this is a floor against a starved allocation rather than a lever.
 _DEFAULT_MIN_CPU_CORES = 8.0
 _DEFAULT_DISK = 25              # GB
+# Relaxation, bounded by the one number that is not negotiable.
+#
+# **20fps is a hard target**, so every rung here still has to fit a frame into
+# 50ms. The frame is roughly 19ms of GPU work and 10.3ms of CPU work at the
+# reference (RTX 4090, dlperf 97), and GPU work scales about inversely with
+# dlperf:
+#
+#     dlperf 90 -> ~21ms GPU -> ~31ms frame   19ms spare
+#     dlperf 65 -> ~28ms GPU -> ~39ms frame   11ms spare
+#     dlperf 55 -> ~34ms GPU -> ~44ms frame    6ms spare
+#     dlperf 45 -> ~41ms GPU -> ~51ms frame    MISSES 20fps
+#
+# So 60 is the floor with margin, and nothing below it may be rented — an
+# RTX 3090 at 44.5 would not hold the target.
+#
+# The CPU rung stops at 2.5 GHz for a different and weaker reason: the 10.3ms
+# compositor was measured on a host whose clock is unknown, so scaling it is an
+# extrapolation, and a hard target should not rest on one. 2.5 keeps the
+# server boxes at 2.0-2.4 GHz out.
+#
+# CPU is relaxed before GPU because it costs less: dropping the CPU rung is
+# worth a few milliseconds, dropping the GPU rung about seven.
+_RELAXATION_LADDER = (
+    ("preferred",    90.0, 3.5),
+    ("relaxed CPU",  90.0, 2.5),
+    ("relaxed GPU",  60.0, 3.5),
+    ("relaxed both", 60.0, 2.5),
+)
+
 _DEFAULT_GPU_WAIT = 300         # seconds
 _GPU_RETRY_INTERVAL = 60        # seconds
 
@@ -539,6 +574,18 @@ def _cpu_band(offer: Dict[str, Any]) -> float:
     return round(float(offer.get("cpu_ghz") or 0.0) * 2.0) / 2.0
 
 
+def _dlperf_band(offer: Dict[str, Any]) -> float:
+    """
+    GPU score rounded to a 25-point band, for the same reason clock is banded:
+    a few points is not worth a price gap.
+
+    Across the eligible set (91 to 113 on 2026-09-04) the GPU stages vary by
+    roughly 4ms of frame time — comparable to what the CPU spread is worth, so
+    it belongs in the ordering rather than being left to the floor alone.
+    """
+    return round(float(offer.get("dlperf") or 0.0) / 25.0) * 25.0
+
+
 def _rank(offers: List[Dict[str, Any]], geolocations: List[str]) -> List[Dict[str, Any]]:
     """
     Order by country, then CPU clock band, then price.
@@ -556,13 +603,14 @@ def _rank(offers: List[Dict[str, Any]], geolocations: List[str]) -> List[Dict[st
     choose. It also decides whether 30fps is reachable later, since that is the
     rate where a slow compositor breaks the deadline outright.
 
-    **Price last**, within a band.
+    **GPU third.** The frame is roughly 19ms of GPU work and 10.3ms of CPU
+    work, so the GPU is the larger half — but `VAST_MIN_DLPERF` has already
+    guaranteed it is adequate, and there is no equivalent guarantee for the
+    CPU, whose floor is deliberately loose. So CPU ordering is doing real work
+    and GPU ordering is a refinement among cards that all already hold the
+    deadline. Across the eligible set each is worth about 4ms.
 
-    Note what is deliberately absent: GPU speed. `VAST_MIN_DLPERF` has already
-    removed everything below a 4090, so every surviving offer is fast enough on
-    the GPU and ordering on it again would only buy headroom that goes unused
-    at 20fps. The RunPod orchestrator sorted fastest-first because a ranking
-    was its only protection against a weak card; the floor does that here.
+    **Price last**, within all three bands.
     """
     rank = {code: i for i, code in enumerate(geolocations)}
     fallback = len(rank)
@@ -570,6 +618,7 @@ def _rank(offers: List[Dict[str, Any]], geolocations: List[str]) -> List[Dict[st
         offers,
         key=lambda o: (rank.get(_country(o), fallback),
                        -_cpu_band(o),
+                       -_dlperf_band(o),
                        o.get("dph_total") or 0.0),
     )
 
@@ -1144,26 +1193,48 @@ def _selection_settings() -> Dict[str, Any]:
         "min_cpu_ghz": _env_float("VAST_MIN_CPU_GHZ", _DEFAULT_MIN_CPU_GHZ),
         "min_cpu_cores": _env_float("VAST_MIN_CPU_CORES", _DEFAULT_MIN_CPU_CORES),
         "max_compute_cap": _env_int("VAST_MAX_COMPUTE_CAP", _DEFAULT_MAX_COMPUTE_CAP),
-        "verified_only": (os.getenv("VAST_VERIFIED_ONLY") or "true").strip().lower()
-                         not in ("0", "false", "no", "off"),
+        # Default OFF. Vast's "verified" is a datacenter badge, not a
+        # measurement, and `reliability` already carries the measured signal.
+        # Left on, it excluded the best box in the UK on every axis that
+        # matters — $0.294 against $0.737, a 5.7GHz Ryzen against a 3.5GHz
+        # EPYC, $1.70/month storage against $8.30 — for a reliability
+        # difference of 0.993 against 0.997. The badge was costing 2.5x.
+        "verified_only": _env_flag("VAST_VERIFIED_ONLY"),
         "disk": _env_int("VAST_DISK", _DEFAULT_DISK),
     }
 
 
 def _find_offer() -> Dict[str, Any]:
     """
-    Pick an offer, waiting for one rather than dropping standards.
+    Pick an offer, relaxing standards in bounded steps rather than waiting out
+    a shortage — but never past the point where 20fps stops holding.
+
+    Each pass walks `_RELAXATION_LADDER` from strictest to loosest and takes
+    the first thing it finds, so a better box is always preferred when one
+    exists and a worse one is only reached when nothing better does. Every rung
+    still fits the frame inside 50ms; the ladder ends rather than continuing,
+    because the target is the target.
+
+    This replaces an unbounded `VAST_GPU_FALLBACK`, which dropped the speed
+    floor to zero at the timeout and could therefore have rented a GTX 1080 at
+    dlperf 3.4 — an instance that bills normally and misses the target by 10x.
+    A bounded ladder is strictly better: it relaxes sooner, and it cannot
+    relax into something that does not work.
 
     The preferred host is tried first on every pass, not just the first: it is
-    the one whose disk is warm and whose IP the desktop already has, so a pass
-    that skipped it after one miss would skip the answer. Same reasoning as the
-    RunPod version retrying its whole GPU list each minute.
+    the one whose disk is warm and whose address the desktop already has, so a
+    pass that skipped it after one miss would skip the answer.
     """
     settings = _selection_settings()
     preferred_raw = (os.getenv("VAST_PREFERRED_HOST") or "").strip()
     preferred = int(preferred_raw) if preferred_raw.isdigit() else None
     wait = _env_int("VAST_GPU_WAIT", _DEFAULT_GPU_WAIT)
-    fallback = _env_flag("VAST_GPU_FALLBACK")
+
+    # A measurement session wants one architecture or none: numbers from two
+    # cards are not a comparison. Everything else wants a working session.
+    relax = (os.getenv("VAST_RELAX") or "true").strip().lower() \
+        not in ("0", "false", "no", "off")
+    ladder = _RELAXATION_LADDER if relax else _RELAXATION_LADDER[:1]
 
     deadline = time.time() + wait
     announced = False
@@ -1176,39 +1247,39 @@ def _find_offer() -> Dict[str, Any]:
                 return pinned[0]
             print("Preferred host {} has nothing rentable; searching.".format(preferred))
 
-        offers = _search_offers(**settings)
-        if offers:
-            return offers[0]
+        for label, min_dlperf, min_cpu_ghz in ladder:
+            rung = dict(settings)
+            rung["min_dlperf"] = min(settings["min_dlperf"], min_dlperf) \
+                if label != "preferred" else settings["min_dlperf"]
+            rung["min_cpu_ghz"] = min(settings["min_cpu_ghz"], min_cpu_ghz) \
+                if label != "preferred" else settings["min_cpu_ghz"]
+            offers = _search_offers(**rung)
+            if offers:
+                if label != "preferred":
+                    print("Nothing at the preferred standard; taking '{}'"
+                          " (dlperf>={:.0f}, cpu>={:.1f}GHz).".format(
+                              label, rung["min_dlperf"], rung["min_cpu_ghz"]))
+                    print("  Still inside the 20fps budget - see"
+                          " _RELAXATION_LADDER for the arithmetic.")
+                return offers[0]
 
         if not announced:
-            print("\nNothing matches. Waiting up to {}s, retrying every {}s.".format(
-                wait, _GPU_RETRY_INTERVAL))
-            print("  Waiting is free — billing starts when an instance runs.")
-            print("  Criteria: {} - dlperf>={:.0f} - <=${:.2f}/hr - rel>={:.2f}"
-              " - up>={:.0f}MB/s - cpu>={:.1f}GHz".format(
-                ",".join(settings["geolocations"]) or "anywhere",
-                settings["min_dlperf"], settings["max_price"],
-                settings["min_reliability"], settings["min_inet_up"],
-                settings["min_cpu_ghz"]))
+            print("\nNothing matches at any rung. Waiting up to {}s, retrying"
+                  " every {}s.".format(wait, _GPU_RETRY_INTERVAL))
+            print("  Waiting is free - billing starts when an instance runs.")
+            print("  Rungs tried: {}".format(
+                ", ".join(name for name, _, _ in ladder)))
             announced = True
 
         if time.time() >= deadline:
             break
         time.sleep(min(_GPU_RETRY_INTERVAL, max(1.0, deadline - time.time())))
 
-    if fallback:
-        print("\nTimed out. VAST_GPU_FALLBACK is set — dropping the dlperf floor.")
-        relaxed = dict(settings)
-        relaxed["min_dlperf"] = 0.0
-        offers = _search_offers(**relaxed)
-        if offers:
-            print("  Taking a slower card: {}".format(_describe_offer(offers[0])))
-            return offers[0]
-
-    print("\nERROR: no offer matched after {}s.".format(wait))
+    print("\nERROR: no offer matched after {}s, at any rung.".format(wait))
     print("  See what is available:  python vast/orchestrator.py offers")
-    print("  Widen VAST_GEOLOCATIONS, lower VAST_MIN_DLPERF, raise VAST_MAX_PRICE,")
-    print("  or set VAST_GPU_FALLBACK=true to accept a slower card at the timeout.")
+    print("  Widen VAST_GEOLOCATIONS, or raise VAST_MAX_PRICE. The speed floors")
+    print("  are NOT the thing to lower by hand: the bottom rung is already the")
+    print("  slowest hardware that holds 20fps.")
     sys.exit(1)
 
 
@@ -1502,30 +1573,36 @@ def cmd_offers() -> None:
 
     if eligible:
         print("Eligible — `start` takes the first of these:")
-        header = "  {:<3} {:<15} {:<18} {:>7} {:>6} {:>5} {:>5} {:>7} {:>7}"
+        header = "  {:<3} {:<14} {:<17} {:>7} {:>6} {:>5} {:>5} {:>7} {:>10}"
         print(header.format("", "GPU", "location", "$/hr", "dlperf",
-                            "GHz", "cores", "up MB/s", "$/mo st"))
+                            "GHz", "cores", "$/mo st", "host"))
         for i, o in enumerate(eligible[:20]):
             mark = ">" if i == 0 else ""
             if preferred is not None and o.get("host_id") == preferred:
                 mark = "P"
             print(header.format(
-                mark, str(o.get("gpu_name"))[:15], str(o.get("geolocation"))[:18],
+                mark, str(o.get("gpu_name"))[:14], str(o.get("geolocation"))[:17],
                 "{:.3f}".format(o.get("dph_total") or 0.0),
                 "{:.0f}".format(o.get("dlperf") or 0.0),
                 "{:.1f}".format(o.get("cpu_ghz") or 0.0),
                 "{:.0f}".format(o.get("cpu_cores_effective") or 0.0),
-                "{:.0f}".format(o.get("inet_up") or 0.0),
                 "{:.1f}".format((o.get("storage_cost") or 0.0) * settings["disk"]),
+                "{} {:.3f}".format(
+                    str(o.get("verification") or "?")[:6],
+                    o.get("reliability2") or 0.0),
             ))
         print("\n  > is what `start` takes; P marks VAST_PREFERRED_HOST.")
-        print("  Ordered by country, then CPU clock band, then price. GHz is the")
-        print("  compositor's speed - the one stage a faster GPU does not touch.")
+        print("  Ordered by country, then CPU band, then GPU band, then price.")
+        print("  GHz is the compositor's speed - the one stage a faster GPU")
+        print("  cannot help with. 'host' is Vast's badge plus MEASURED")
+        print("  reliability; the badge is not filtered on, the number is.")
         print("  '$/mo st' is standing storage for {} GB while stopped.".format(settings["disk"]))
     else:
         print("Nothing is eligible right now. `start` would wait {}s and then {}.".format(
             _env_int("VAST_GPU_WAIT", _DEFAULT_GPU_WAIT),
-            "take a slower card" if _env_flag("VAST_GPU_FALLBACK") else "fail"))
+            "relax through the ladder"
+            if (os.getenv("VAST_RELAX") or "true").strip().lower()
+            not in ("0", "false", "no", "off") else "fail"))
 
     rejected = [o for o in everything if o.get("machine_id") not in eligible_machines]
     if rejected:

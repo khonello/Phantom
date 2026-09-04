@@ -283,7 +283,7 @@ needed against a live instance.
 | `VAST_MAX_COMPUTE_CAP` | `900` | sm_90. Blackwell reports 1200 and would fail after billing started |
 | `VAST_VERIFIED_ONLY` | `true` | Unverified hosts are self-reported |
 | `VAST_GPU_WAIT` | `300` | Seconds to retry the search. Waiting is free |
-| `VAST_GPU_FALLBACK` | — | At the timeout: unset fails, `true` takes a slower card |
+| `VAST_RELAX` | `true` | Relax the speed floors in bounded steps when nothing matches. Every step still holds 20fps |
 | `VAST_IMAGE` | `pytorch/pytorch:2.2.0-cuda12.1-cudnn8-devel` | Stock base; startup.sh does the rest |
 | `VAST_DISK` | `25` | GB. **A cost setting** — billed while stopped |
 | `VAST_MAX_UPTIME` | `120` | Minutes before auto-stop. 0 disables |
