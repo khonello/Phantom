@@ -134,6 +134,27 @@ else
     echo "Already installed: ffmpeg"
 fi
 
+# OpenCV's shared libraries, which the CUDA base image does not carry. Without
+# them the pipeline dies on `import cv2` with
+#
+#     ImportError: libGL.so.1: cannot open shared object file
+#
+# and it dies at *import* - so nothing starts, the WebSocket port never opens,
+# and the orchestrator reports a TLS timeout, which reads like a network fault
+# rather than a missing package.
+#
+# Installed as system libraries rather than fixed by pinning
+# opencv-*-headless: insightface depends on opencv-python directly, so the GUI
+# build arrives transitively whatever this repo pins, and a pin that does not
+# actually decide what gets installed is worse than none. libglib is here for
+# the same reason as libgl - it is the other object the wheels link.
+if ! ldconfig -p | grep -q 'libGL\.so\.1'; then
+    echo "Installing OpenCV runtime libraries..."
+    apt-get update -qq && apt-get install -y -qq libgl1 libglib2.0-0
+else
+    echo "Already installed: OpenCV runtime libraries"
+fi
+
 # ── 2. Pull latest code ───────────────────────────────────────────────────────
 echo ""
 echo "--- Code Sync ---"
