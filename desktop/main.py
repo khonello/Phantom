@@ -24,7 +24,10 @@ def main() -> None:
     client = PipelineClient(args.host, args.port)
     bridge = Bridge(client)
 
-    qmlRegisterType(FrameDisplay, 'Phantom', 1, 0, 'FrameDisplay')
+    # The QML name is a str at runtime; PySide6 6.10's stubs type that
+    # parameter as bytes. Passing bytes would register a name QML cannot
+    # resolve, so the stub is what is wrong here, not the call.
+    qmlRegisterType(FrameDisplay, 'Phantom', 1, 0, 'FrameDisplay')  # type: ignore[call-overload]
 
     engine = QQmlApplicationEngine()
     engine.rootContext().setContextProperty('bridge', bridge)

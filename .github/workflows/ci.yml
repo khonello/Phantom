@@ -19,10 +19,10 @@ jobs:
   # where numpy is installed. The heavy dependencies stay out — they are
   # covered by ignore_missing_imports.
   - run: pip install mypy numpy
-  # `runpod`, `tests` and `tools` were outside this command, which is how an
-  # F821 sat in orchestrator.py unnoticed — the deploy tooling was the one part
-  # of the repo nothing checked.
-  - run: flake8 pipeline.py pipeline desktop tests tools runpod
+  # `vast`, `tests` and `tools` are inside this command deliberately: they were
+  # outside it once, which is how an F821 sat in orchestrator.py unnoticed —
+  # the deploy tooling was the one part of the repo nothing checked.
+  - run: flake8 pipeline.py pipeline desktop tests tools vast
   # `pipeline.py` and `pipeline/` are both module "pipeline", so mypy refuses to
   # check them together ("Duplicate module named 'pipeline'") and exits before
   # checking anything at all. The entry point is nine lines that set an env var
@@ -32,8 +32,7 @@ jobs:
     # These run on the pod. A syntax error is a failed provision, discovered
     # after paying for a GPU.
     run: |
-      bash -n runpod/startup.sh
-      bash -n runpod/entrypoint.sh
+      bash -n vast/startup.sh
  test:
   runs-on: ubuntu-latest
   steps:
@@ -87,7 +86,11 @@ jobs:
     uses: actions/setup-python@v2
     with:
      python-version: 3.9
-  - run: pip install pytest numpy opencv-python-headless tqdm
+  # Qt's offscreen platform plugin still links libEGL, so PySide6 cannot import
+  # without it and the two desktop tests would importorskip themselves away —
+  # green, and having checked nothing.
+  - run: sudo apt-get update && sudo apt-get install -y libegl1
+  - run: pip install -r requirements-test.txt
   - run: python -m pytest tests/ -q
 
  # The production deploy path only works if something exercises it. It was

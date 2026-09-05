@@ -1,40 +1,48 @@
 #!/usr/bin/env bash
-# Phantom — RunPod Pod Startup Script
+# Phantom — Vast.ai Instance Startup Script
 #
-# Run once after the very first pod creation to prepare the environment.
-# On pod resume or new pod deployment (same network volume), most steps
-# are skipped because the venv and models already live on /workspace.
+# Run once after the very first instance is rented, to prepare it. On resume
+# most steps are skipped, because a stopped Vast instance keeps its disk and
+# the venv and models are still on it.
+#
+# Note what that means, since it is the trade recorded in
+# docs/VAST_MIGRATION.md: the disk is the *only* copy. Nothing is baked into an
+# image, so `terminate` throws all of this away and the next start pays for it
+# again. `stop` is the cheap path; `terminate` is the expensive one.
 #
 # Dependency sync: on every run, compares requirements-pipeline-gpu.txt
 # against a snapshot stored on the volume. If requirements changed since
 # the last install, pip install runs again to pick up new/removed packages.
 #
 # Usage (from repo root):
-#   bash runpod/startup.sh
+#   bash vast/startup.sh
 
 set -euo pipefail
 
 WORKSPACE="${WORKSPACE:-/workspace}"
 MODELS_DIR="${WORKSPACE}/models"
 VENV_DIR="${WORKSPACE}/venv"
-# Derive repo root from the script's own location (runpod/startup.sh → repo root)
+# Derive repo root from the script's own location (vast/startup.sh → repo root)
 PHANTOM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON="${VENV_DIR}/bin/python"
 PIP="${VENV_DIR}/bin/pip"
 REQUIREMENTS="${PHANTOM_DIR}/requirements-pipeline-gpu.txt"
 REQUIREMENTS_SNAPSHOT="${VENV_DIR}/.requirements-snapshot"
 
-# RunPod exposes pod-level environment variables (everything orchestrator.py
-# forwards) through this file. An SSH session usually inherits them via .bashrc,
-# but "usually" is not good enough for settings that decide what a paid session
-# measures — and _shell_run wraps each command in a subshell, so sourcing from
-# the orchestrator side would not survive into this script anyway.
-if [ -f /etc/rp_environment ]; then
+# Vast writes the instance's `env` block here. Its own docs warn that variables
+# set at creation are visible to the onstart script but *not* inside an SSH
+# session by default, and this script runs over SSH — so sourcing it is the
+# difference between a configured pipeline and a default one.
+#
+# The orchestrator also exports the forwarded settings directly onto the launch
+# command, because a value that decides what a paid session measures should not
+# depend on a file existing.
+if [ -f /etc/environment ]; then
     # shellcheck disable=SC1091
-    . /etc/rp_environment
+    set -a; . /etc/environment; set +a
 fi
 
-echo "=== Phantom RunPod Startup ==="
+echo "=== Phantom Vast.ai Startup ==="
 echo "Workspace:  ${WORKSPACE}"
 echo "Venv:       ${VENV_DIR}"
 echo "Models dir: ${MODELS_DIR}"
@@ -64,12 +72,16 @@ _phase() {
     _PHASE_T0="${now}"
 }
 
-# Whether this volume already had the expensive artefacts on it. The whole point
+# Whether this disk already had the expensive artefacts on it. The whole point
 # of measuring cold start is comparing these two cases, so the run has to say
 # which one it was rather than leaving it to be remembered.
-VOLUME_STATE="empty"
+#
+# On RunPod this asked about a network volume that outlived the pod. Here it is
+# the instance's own disk, which does not — so "empty" now means a fresh rental
+# rather than merely a fresh container.
+DISK_STATE="empty"
 if [ -d "${VENV_DIR}" ] && [ -d "${MODELS_DIR}" ]; then
-    VOLUME_STATE="warm"
+    DISK_STATE="warm"
 fi
 
 # ── 1. Install system packages (re-installs on each new container) ────────────
@@ -165,7 +177,7 @@ if [ -d "${PHANTOM_DIR}/.git" ]; then
             echo "${_GIT_MODIFIED}"
             echo ""
             echo "To discard them and take the remote's version:"
-            echo "  python runpod/orchestrator.py run \\"
+            echo "  python vast/orchestrator.py run \\"
             echo "    \"git -C ${PHANTOM_DIR} reset --hard\""
         fi
 
@@ -180,12 +192,12 @@ if [ -d "${PHANTOM_DIR}/.git" ]; then
                 echo "An authenticated pull is not subject to that limit, so the"
                 echo "fix is the same either way: give the URL a token."
                 echo ""
-                echo "  python runpod/orchestrator.py run \\"
+                echo "  python vast/orchestrator.py run \\"
                 echo "    \"git -C ${PHANTOM_DIR} remote set-url origin \\"
                 echo "     https://<token>@github.com/<owner>/<repo>.git\""
                 echo ""
-                echo "Set RUNPOD_REPO_URL in .env to the same, so a future pod"
-                echo "clones with it rather than rediscovering this."
+                echo "Set VAST_REPO_URL in .env to the same, so a future"
+                echo "instance clones with it rather than rediscovering this."
                 ;;
         esac
         echo ""
@@ -240,9 +252,10 @@ else
 fi
 
 # ── 5. Create or reuse /workspace/venv ────────────────────────────────────────
-# The venv lives on the network volume so it survives pod restarts and
-# new pod deployments. Packages are installed on first run, and re-synced
-# whenever requirements-pipeline-gpu.txt changes.
+# The venv lives on the instance disk, so it survives `stop`/`resume` but NOT
+# `terminate` — nothing is baked into an image, so this is the only copy.
+# Packages are installed on first run and re-synced whenever
+# requirements-pipeline-gpu.txt changes.
 echo ""
 echo "--- Python Venv ---"
 _phase "venv"
@@ -356,7 +369,7 @@ case "${ORT_PROVIDERS}" in
 esac
 
 # ── 6b. cuDNN 9 for ONNX Runtime ─────────────────────────────────────────────
-# onnxruntime-gpu requires libcudnn.so.9 which most RunPod base images don't
+# onnxruntime-gpu requires libcudnn.so.9 which most base images don't
 # ship. Install nvidia-cudnn-cu12 with --no-deps to get just the .so files
 # without letting pip's dependency resolver upgrade torch or other packages.
 echo ""
@@ -382,7 +395,7 @@ fi
 # The same helper the Docker build uses, so the two cannot diverge again.
 # Errors are shown rather than swallowed: the previous `2>/dev/null` turned
 # a real TypeError into an empty result and a misleading warning.
-CUDNN_LIB_DIR=$(${PYTHON} "${PHANTOM_DIR}/runpod/cudnn_path.py" || echo "")
+CUDNN_LIB_DIR=$(${PYTHON} "${PHANTOM_DIR}/vast/cudnn_path.py" || echo "")
 if [ -n "${CUDNN_LIB_DIR}" ] && [ -d "${CUDNN_LIB_DIR}" ]; then
     export LD_LIBRARY_PATH="${CUDNN_LIB_DIR}:${LD_LIBRARY_PATH:-}"
     echo "export LD_LIBRARY_PATH=\"${CUDNN_LIB_DIR}:\${LD_LIBRARY_PATH:-}\"" \
@@ -411,7 +424,7 @@ if [ "${CUDNN_FINAL}" = "yes" ]; then
 else
     echo "ERROR: libcudnn.so.9 cannot be loaded after installation."
     echo "       onnxruntime-gpu would silently fall back to CPU."
-    echo "       See runpod/TROUBLESHOOTING.md section 5b."
+    echo "       See vast/TROUBLESHOOTING.md section 5b."
     exit 1
 fi
 
@@ -446,7 +459,7 @@ print('yes' if 'TensorrtExecutionProvider' in onnxruntime.get_available_provider
         echo "Installing tensorrt (~2GB, this is why it is opt-in)..."
         ${PIP} install --no-deps tensorrt tensorrt-cu12 tensorrt_libs 2>/dev/null             || ${PIP} install tensorrt             || echo "WARNING: tensorrt install failed."
 
-        TRT_LIB_DIR=$(${PYTHON} "${PHANTOM_DIR}/runpod/tensorrt_path.py" || echo "")
+        TRT_LIB_DIR=$(${PYTHON} "${PHANTOM_DIR}/vast/tensorrt_path.py" || echo "")
         if [ -n "${TRT_LIB_DIR}" ]; then
             export LD_LIBRARY_PATH="${TRT_LIB_DIR}:${LD_LIBRARY_PATH:-}"
             echo "export LD_LIBRARY_PATH=\"${TRT_LIB_DIR}:\${LD_LIBRARY_PATH:-}\""                 > /etc/profile.d/tensorrt.sh
@@ -503,12 +516,88 @@ if [ -f "${PHANTOM_DIR}/pipeline/__init__.py" ]; then
     # Non-fatal by design. A pre-warm failure means a slow first frame, not a
     # broken pod, and the pipeline downloads on demand anyway. The cuDNN check
     # above is the one that genuinely must stop the deploy.
-    if ! ${PYTHON} "${PHANTOM_DIR}/runpod/prewarm.py" 2>&1; then
+    if ! ${PYTHON} "${PHANTOM_DIR}/vast/prewarm.py" 2>&1; then
         echo "WARNING: pre-warm incomplete — models will load on first request."
     fi
 else
     echo "Phantom not found at ${PHANTOM_DIR} — skipping warmup."
 fi
+
+# ── 8b. TLS certificate and API token ─────────────────────────────────────────
+# RunPod handed out wss://…proxy.runpod.net and terminated TLS for us. Vast maps
+# port 9000 to a random external port on a shared public IP and terminates
+# nothing, so without this the pipeline would serve the operator's face in
+# cleartext to anyone who found the port.
+#
+# `controller.py` already speaks ws://host:port, which is exactly what makes
+# that the dangerous option rather than the broken one: it would work.
+#
+# So the instance is its own certificate authority for itself. The fingerprint
+# is printed for the orchestrator to pin into .env, and the desktop refuses any
+# certificate that does not match it. That is a real check despite the
+# certificate being self-signed — pinning a specific key is stronger than
+# trusting whoever a CA vouched for, and it is the only option available on an
+# IP address that changes with the host.
+#
+# Generated ONCE and then reused. Regenerating per boot would hand the desktop
+# a fingerprint that stops matching the moment the instance restarts, which
+# reads as an attack rather than as a restart.
+echo ""
+echo "--- TLS and Token ---"
+_phase "tls"
+
+CERT_FILE="${WORKSPACE}/phantom-tls.pem"
+KEY_FILE="${WORKSPACE}/phantom-tls.key"
+TOKEN_FILE="${WORKSPACE}/phantom-api-token"
+
+if ! command -v openssl &>/dev/null; then
+    echo "Installing openssl..."
+    apt-get update -qq && apt-get install -y -qq openssl
+fi
+
+if [ -f "${CERT_FILE}" ] && [ -f "${KEY_FILE}" ]; then
+    echo "Reusing existing certificate."
+else
+    echo "Generating a self-signed certificate (10 years)..."
+    # No hostname to bind to: the IP changes with the host and the desktop pins
+    # the fingerprint rather than checking a name, so CN is decorative. -nodes
+    # because the pipeline starts unattended and cannot answer a passphrase.
+    # Errors are NOT sent to /dev/null. This script already learned that once:
+    # the cuDNN resolver hid a TypeError behind 2>/dev/null and turned it into a
+    # misleading warning. Here it would be worse — set -e aborts, the
+    # orchestrator reports "startup failed (exit 1)", and openssl's perfectly
+    # clear explanation is the thing that was thrown away.
+    openssl req -x509 -newkey rsa:2048 -nodes         -keyout "${KEY_FILE}" -out "${CERT_FILE}"         -days 3650 -subj "/CN=phantom-pipeline"
+    if [ ! -s "${CERT_FILE}" ] || [ ! -s "${KEY_FILE}" ]; then
+        echo "ERROR: openssl reported success but produced no certificate."
+        echo "       Refusing to continue: the pipeline would serve cleartext."
+        exit 1
+    fi
+    chmod 600 "${KEY_FILE}"
+fi
+
+# SHA-256 over the DER encoding, which is what Python's
+# getpeercert(binary_form=True) returns — so the two sides compare the same
+# bytes. Fingerprinting the PEM instead would produce a value that never
+# matches and a pin that always fails.
+CERT_FP=$(openssl x509 -in "${CERT_FILE}" -outform DER | sha256sum | cut -d" " -f1)
+
+if [ -f "${TOKEN_FILE}" ]; then
+    API_TOKEN=$(cat "${TOKEN_FILE}")
+else
+    # The WebSocket API has no authentication at all today, which
+    # docs/ACCEPTED_RISKS.md accepts partly because the RunPod proxy URL was
+    # "unguessable in practice". A bare IP and a port is not, so the token goes
+    # in with the move rather than after it.
+    API_TOKEN=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d " 
+")
+    printf "%s" "${API_TOKEN}" > "${TOKEN_FILE}"
+    chmod 600 "${TOKEN_FILE}"
+fi
+
+echo "Certificate: ${CERT_FILE}"
+echo "CERT_FINGERPRINT ${CERT_FP}"
+echo "API_TOKEN ${API_TOKEN}"
 
 # ── 9. Summary ─────────────────────────────────────────────────────────────────
 echo ""
@@ -516,10 +605,10 @@ _phase ""
 
 echo "=== Startup Complete ==="
 echo ""
-echo "--- Phase Timings (volume: ${VOLUME_STATE}) ---"
+echo "--- Phase Timings (disk: ${DISK_STATE}) ---"
 printf "%b" "${_PHASE_LINES}"
 echo "PHASE total $(( $(date +%s) - _RUN_T0 ))"
-echo "VOLUME ${VOLUME_STATE}"
+echo "DISK ${DISK_STATE}"
 echo ""
 echo "To start the pipeline (always use the workspace venv):"
 echo "  cd ${PHANTOM_DIR}"

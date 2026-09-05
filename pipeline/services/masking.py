@@ -377,13 +377,13 @@ class FaceMasker:
         """
         Resolve the occluder model path.
 
-        Checks the RunPod Network Volume first so the model survives pod
+        Checks /workspace/models first so the model survives a container
         restarts, then `pipeline/models/` — where the swapper and enhancer
         already keep their weights.
         """
-        runpod_path = os.path.join('/workspace', 'models', _OCCLUDER_MODEL_NAME)
+        workspace_path = os.path.join('/workspace', 'models', _OCCLUDER_MODEL_NAME)
         if os.path.isdir('/workspace/models'):
-            return runpod_path
+            return workspace_path
         package_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         return os.path.join(package_dir, 'models', _OCCLUDER_MODEL_NAME)
 

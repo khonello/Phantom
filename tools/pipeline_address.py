@@ -84,7 +84,7 @@ def resolve(host: Optional[str], port: Optional[int]) -> Tuple[str, int]:
         raise SystemExit(
             'No pipeline address. Either pass --host, or start an instance so\n'
             '  PHANTOM_API_URL is written to .env:\n'
-            '    python runpod/orchestrator.py start\n'
+            '    python vast/orchestrator.py start\n'
             '  (looked in the environment and {})'.format(_ENV_PATH))
 
     return final_host, final_port

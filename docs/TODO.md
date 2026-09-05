@@ -39,7 +39,7 @@ Small, independent, and they stop the other stages building on sand.
       that job had been failing on every push. Each was fixed at its site rather
       than blanket-ignored — a real `Dict[str, Face]` annotation, parameterised
       `Queue`s, and narrow per-line ignores where the cause is a missing stub
-      (`cv2.VideoWriter_fourcc`, the runpod SDK) or a platform-only module
+      (`cv2.VideoWriter_fourcc`) or a platform-only module
       (`resource`, POSIX). `mypy pipeline desktop` still reports 25, all in
       `desktop/`, which CI does not check.
 
@@ -66,20 +66,26 @@ Small, independent, and they stop the other stages building on sand.
       **Not covered: the models.** Everything ML is stubbed, so this proves the
       logic around the models, never the models themselves. That gap closes on
       the pod, not here.
-- [x] **Verify whether RunPod bills egress.** **It does not.** RunPod's Pod
-      pricing documentation states "no fees for data ingress or egress", and the
-      pricing page repeats it as a differentiator against AWS. The zero in the
-      economics was right, and is now evidence rather than assumption.
+- [x] **Verify whether the provider bills egress.** **The answer changed with
+      the migration, and that is the point of leaving this here.**
 
-      What *is* billed, so the model stays honest: compute per second, plus
-      storage — container disk $0.10/GB/month (running only), volume disk
-      $0.10 running / $0.20 stopped, network volume $0.07/GB/month under 1 TB
-      and $0.05 above, charged whether the pod runs or not.
+      RunPod did not bill it — "no fees for data ingress or egress", repeated
+      on the pricing page as a differentiator. **Vast does**, per host, as
+      `inet_up_cost` and `inet_down_cost` on every offer. At the `optimal`
+      preset the stream is ~2.16 GB/hour each way, so on a typical host that is
+      **~$0.014/hr** against a $0.31 GPU — about 4%, and `offers` prints it
+      beside the price so a host charging twenty times the going rate is
+      visible before it is rented.
 
-      That last one is the line worth watching instead: a network volume bills
-      continuously, including while every pod is stopped, and the multi-datacenter
-      fallback needs **one volume per region**. Egress was never the leak — idle
-      regional volumes are.
+      What else is billed, so the model stays honest: compute per second, plus
+      **storage, which continues while the instance is stopped**. Vast hosts
+      charge up to $0.40/GB/month, several times RunPod's $0.07 network volume.
+      At `VAST_DISK=25` that is $5-10/month standing to keep the models warm.
+
+      So the leak moved rather than closing. It was idle regional network
+      volumes; it is now the disk of a stopped instance, and the lever against
+      it is `VAST_DISK` plus a decision about whether a long gap should be a
+      `stop` or a `terminate`.
 
 ---
 
@@ -507,7 +513,7 @@ Raising the number later must require no code change.
 
 - [ ] **Pod release refcounted** — the *last* session out starts the grace
       period; the pod is released only if it expires with the count at zero
-- [ ] **Move `runpod.stop_pod()` out of the worker.** A worker cannot see its
+- [ ] **Move the auto-stop API call out of the worker.** A worker cannot see its
       neighbours and would kill them
 - [ ] **Keep a worker failsafe**: stop the pod after a long period with no
       control-plane contact *and* no active session, so an outage does not leave
@@ -593,7 +599,7 @@ Raising the number later must require no code change.
 *Ships: insurance against one vendor's availability and pricing.*
 
 - [ ] Define the interface: provision, status, terminate, list capacity
-- [ ] Move RunPod specifics behind it. Cheap now, with one implementation to
+- [ ] Move Vast specifics behind it. Cheap now, with one implementation to
       conform to and its shape already visible in `orchestrator.py`
 
 ---
@@ -666,4 +672,4 @@ Recorded here so they are not rediscovered mid-implementation.
 | Is a session one face, or one seat? | Stage 4 | Fixed identity makes packing cheaper |
 | Does the scheduler need to know the tier? | Stage 4 | PAYG earns $10/GPU-hour against a 5-Hour Pack's $8.00 |
 | Interruption threshold for hour reversal | Stage 6 | Sets what standby is worth |
-| ~~Does RunPod bill egress?~~ | — | **Settled: no.** Documented as "no fees for data ingress or egress". Watch idle per-region network volumes instead |
+| ~~Does the provider bill egress?~~ | — | **Settled, and it changed.** RunPod did not. **Vast does**, per host: `inet_up_cost` / `inet_down_cost` on every offer, ~$0.014/hr at the `optimal` preset — small, but it is now a line item and `offers` prints it |

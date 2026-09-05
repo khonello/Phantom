@@ -31,7 +31,7 @@ imperfection that the models remove.
 - `swap_aligned()` returns the raw aligned crop plus its affine (`paste_back=False`),
   handing compositing to `FaceCompositor` instead of letting the model paste
 - Falls back to InsightFace's own compositing if a build cannot supply the affine
-- Model resolution priority: RunPod network volume → local `models/` → working directory
+- Model resolution priority: `/workspace/models` on the instance → local `models/` → working directory
 
 ### Landmark Stabilization
 - `LandmarkStabilizer` — EMA on `kps` (drives the swap warp) and
@@ -187,7 +187,7 @@ Nine guard thresholds were chosen without data behind them.
 The primary mode, and where development is focused.
 
 - Live webcam capture or network stream (RTSP/RTMP/HTTP)
-- WebSocket push mode (desktop sends JPEG frames — used on RunPod, where the
+- WebSocket push mode (desktop sends JPEG frames — used on a rented instance, where the
   pod has no camera)
 - Processing chain: Detect → Stabilize → Swap → Composite → Emit
 - Frame warmup period (configurable, default 5 frames)
@@ -413,7 +413,7 @@ back to the other backend or off — rather than failing.
 - Countdown overlay showing minutes remaining
 - **Extend** button — resets the auto-stop timer
 - **Dismiss** button — acknowledges without extending
-- Works with RunPod auto-stop billing protection
+- Works with the auto-stop billing protection
 
 ### Audio & Voice
 - Real-time audio capture with timestamped PCM chunks
@@ -424,47 +424,54 @@ back to the other backend or off — rather than failing.
 
 ---
 
-## RunPod Cloud Deployment
+## Vast.ai Cloud Deployment
 
 ### Commands
 ```
-python runpod/orchestrator.py start        # Deploy fresh GPU pod
-python runpod/orchestrator.py resume       # Resume stopped pod
-python runpod/orchestrator.py stop         # Pause pod (volume preserved)
-python runpod/orchestrator.py terminate    # Delete pod (network volume survives)
-python runpod/orchestrator.py status       # Show pod state, GPU, cost, WebSocket URL
-python runpod/orchestrator.py gpus         # List GPUs with VRAM, pricing, eligibility
-python runpod/orchestrator.py datacenters  # List all datacenters
+python vast/orchestrator.py offers      # What is rentable, and why anything was refused
+python vast/orchestrator.py start       # Rent an instance, set it up, launch the pipeline
+python vast/orchestrator.py resume      # Start the stopped instance
+python vast/orchestrator.py stop        # Stop it (disk survives, storage keeps billing)
+python vast/orchestrator.py terminate   # Destroy it (disk and models go too)
+python vast/orchestrator.py status      # State, GPU, location, cost, uplink, address
+python vast/orchestrator.py logs [n]    # Tail the pipeline log
+python vast/orchestrator.py run "cmd"   # One command on the instance
+python vast/orchestrator.py push/pull   # Copy files either way
 ```
 
-### Deployment Modes
-- **SSH** (development): Clones repo, installs dependencies, starts pipeline in tmux
-- **Docker** (production): Custom image with pipeline baked in, auto-starts
+### Offer Selection
+Every filter is server-side, on fields Vast publishes per offer:
+- `VAST_GEOLOCATIONS` — country codes, a **strict** priority list. This is the
+  setting the migration off RunPod existed for
+- `VAST_MIN_DLPERF` (default 90) — Vast's measured DL score. 90 is "4090 or
+  better", and replaces a hand-typed GPU ranking
+- `VAST_MIN_VRAM`, `VAST_MAX_PRICE`, `VAST_MIN_RELIABILITY`, `VAST_MIN_INET_UP`,
+  `VAST_MIN_PORTS`, `VAST_MAX_COMPUTE_CAP`, `VAST_VERIFIED_ONLY`
+- `VAST_PREFERRED_HOST` pins one host for a stable IP and a warm disk; the
+  search runs whenever it has nothing rentable
 
-### GPU Auto-Discovery
-- Queries RunPod GraphQL for all available GPU types
-- Filters by minimum VRAM (`RUNPOD_MIN_VRAM`, default 16 GB)
-- Filters by maximum hourly price (`RUNPOD_MAX_PRICE`, default $1.00)
-- Sorts by cheapest first, tries until one succeeds
-- Manual override via `RUNPOD_GPU_TYPES` (comma-separated display names)
+Offers are ranked by **country priority first, price second** — safe only
+because the speed floor has already removed everything slow.
 
-### Multi-Datacenter Fallback
-- Format: `RUNPOD_DATACENTERS=DC1:vol1,DC2:vol2`
-- Each datacenter paired with its own network volume (volumes are datacenter-local)
-- Tries all eligible GPUs in datacenter 1 first, then datacenter 2, etc.
-- Network volumes persist models and venv across pod restarts
+### Warm Models
+A stopped instance keeps its disk, so `stop`/`resume` is the loop. Nothing is
+baked into an image, so **the disk is the only copy**: `terminate` means the
+next start downloads the venv and weights again. Storage bills while stopped.
 
 ### Auto-Stop (Billing Protection)
-- `RUNPOD_MAX_UPTIME`: Stop pod after N minutes (default 120, 0 = disabled)
-- `RUNPOD_STOP_WARNING`: Warning N minutes before stop (default 5)
-- Background timer runs in the pipeline server — works even without a desktop connected
-- Desktop shows warning dialog with extend option
-- Calls `runpod.stop_pod()` on expiry (pod can be resumed later)
+- `VAST_MAX_UPTIME`: stop the instance after N minutes (default 120, 0 disables)
+- `VAST_STOP_WARNING`: warning N minutes before (default 5)
+- Background timer in the pipeline server — works with no desktop connected
+- Desktop shows a warning dialog with an extend option
+- **Stops** rather than destroys, so the models stay warm
 
 ### Networking
-- WebSocket: RunPod proxy — `wss://{pod_id}-9000.proxy.runpod.net/ws`
-- SSH: RunPod proxy — `{podHostId}@ssh.runpod.io`
-- Only port 9000/tcp exposed (avoids JupyterLab initialization on 8888)
+- One published port, 9000, mapped to a **random external port on a shared
+  public IP**. There is no TLS proxy
+- So the instance serves `wss://` with a self-signed certificate, and the
+  desktop pins its fingerprint (`PHANTOM_TLS_FINGERPRINT`)
+- A shared `PHANTOM_API_TOKEN` is required in the first frame
+- SSH is `runtype: ssh_direct` — a real sshd, so `exec_command` and SFTP work
 
 ---
 
@@ -546,14 +553,14 @@ python pipeline.py --stream --no-grain --no-occluder
 
 ### GPU Deployment
 
-What happens when you run `python runpod/orchestrator.py start`:
+What happens when you run `python vast/orchestrator.py start`:
 
 ```
 orchestrator.py start
 │
 ├─ Load .env, verify API key
 │
-├─ RUNPOD_POD_ID already set?
+├─ VAST_INSTANCE_ID already set?
 │  ├─ Yes → "Deploy NEW pod? [y/N]"
 │  │         ├─ No  → abort
 │  │         └─ Yes → continue
@@ -561,61 +568,62 @@ orchestrator.py start
 │
 ├─ Read deploy mode (ssh or docker)
 │
-├─ FIND A GPU
+├─ FIND AN OFFER
 │  │
-│  ├─ Parse datacenters (each paired with its network volume)
-│  │   1. EU-RO-1 ←→ volume z8now7p5ts
-│  │   2. US-TX-3 ←→ volume abc123
-│  │      (volumes are datacenter-local, so each DC needs its own)
+│  ├─ Preferred host set?
+│  │   ├─ Yes → search it first, every pass (warm disk, stable IP)
+│  │   └─ No / nothing free → filtered search
 │  │
-│  ├─ Build GPU candidate list
-│  │   RUNPOD_GPU_TYPES set?
-│  │   ├─ Yes → use those exact GPUs in order
-│  │   └─ No  → query RunPod API for all GPUs
-│  │            filter: ≥16GB VRAM, ≤$1/hr
-│  │            sort: cheapest first
-│  │            e.g. [RTX 4000 $0.38, RTX 4090 $0.69, ...]
+│  ├─ Server-side filters, all on published fields
+│  │   geolocation in [GB, IE, FR, NL, BE, DE]
+│  │   dlperf ≥ 90        (4090 or better)
+│  │   compute_cap ≤ 900  (sm_90; Blackwell would fail after billing)
+│  │   gpu_arch = nvidia  (every ONNX model needs CUDA)
+│  │   reliability ≥ 0.98, inet_up ≥ 100 MB/s, verified, ≤ $1/hr
 │  │
-│  └─ Try datacenter × GPU (datacenter is outer loop)
+│  ├─ Rank: country priority FIRST, then price
+│  │   (safe only because the dlperf floor removed everything slow)
+│  │
+│  └─ Nothing matched?
+│      └─ retry the whole search every 60s for VAST_GPU_WAIT
+│         waiting is free — billing starts when an instance runs
+│         at the timeout: fail, or drop the floor if VAST_GPU_FALLBACK
 │
-│      EU-RO-1 (volume: z8now7p5ts)
-│      ├─ RTX 4000  → unavailable
-│      ├─ RTX 4090  → unavailable
-│      ├─ RTX A4500 → created ✓ → skip to WAIT
-│      └─ (all fail → fall through to next datacenter)
+├─ RENT IT
+│  └─ PUT /asks/<offer id>/  runtype=ssh_direct, -p 9000:9000
+│     (the offer id is only valid for the search that produced it)
 │
-│      US-TX-3 (volume: abc123)
-│      ├─ RTX 4000  → unavailable
-│      ├─ RTX 4090  → created ✓ → skip to WAIT
-│      └─ (all fail → exit with error ✗)
+├─ WAIT FOR THE INSTANCE
+│  └─ Poll until actual_status = running (up to 10 min)
+│     then read public_ipaddr + the 9000/tcp and 22/tcp port mappings
 │
-├─ WAIT FOR POD
+├─ SSH SETUP
 │  │
-│  └─ Poll every 3s until status = RUNNING (up to 5 min)
-│     then resolve SSH address + WebSocket address
-│
-├─ SSH SETUP (ssh mode only)
-│  │
-│  ├─ Wait for SSH port to accept connections
-│  ├─ Connect with key (~/.ssh/id_ed25519)
-│  ├─ Open interactive shell (RunPod drops exec_command)
+│  ├─ Wait for the SSH port (published before sshd listens)
+│  ├─ Connect with key (~/.ssh/id_ed25519), retry while the container boots
+│  │   exec_command — a real sshd, no interactive-shell workaround
 │  │
 │  ├─ /workspace/Phantom exists?
 │  │   ├─ No  → git clone repo
-│  │   └─ Yes → skip (already deployed before)
+│  │   └─ Yes → skip (deployed before, disk survived the stop)
 │  │
-│  ├─ Run startup.sh (ffmpeg, venv, pip install)
+│  ├─ Run startup.sh (ffmpeg, venv, pip, cuDNN, pre-warm)
+│  │   └─ generate TLS cert + API token, once, and print both
 │  ├─ Kill any old pipeline process
-│  └─ Start pipeline in background (nohup)
+│  └─ Start pipeline in background (nohup), settings exported on the
+│     launch command — exec_command opens no login shell
 │
 ├─ WAIT FOR PIPELINE HEALTH
 │  │
-│  └─ WebSocket → {"action":"health"}
-│     wait for → {"status":"healthy"} (up to 2 min)
+│  └─ wss:// → {"action":"health","token":...}
+│     wait for → {"status":"healthy"} (up to 3 min)
+│     then verify the certificate matches the reported fingerprint
 │
 ├─ UPDATE .env
-│  ├─ RUNPOD_POD_ID = <new pod id>
-│  └─ PHANTOM_API_URL = wss://<pod>-9000.proxy.runpod.net/ws
+│  ├─ VAST_INSTANCE_ID          = <new instance id>
+│  ├─ PHANTOM_API_URL           = wss://<ip>:<mapped port>/ws
+│  ├─ PHANTOM_TLS_FINGERPRINT   = <sha256 of the DER certificate>
+│  └─ PHANTOM_API_TOKEN         = <shared secret>
 │
 └─ DONE — "python desktop.py" to connect
    Auto-stop timer now running (2hr, 5min warning)
@@ -741,7 +749,7 @@ Billing protection flow — works even with no desktop connected:
 ```
 Pod starts
 │
-├─ RUNPOD_MAX_UPTIME = 120 min?
+├─ VAST_MAX_UPTIME = 120 min?
 │  ├─ 0 → timer disabled, no auto-stop
 │  └─ >0 → start background timer thread
 │
@@ -776,7 +784,7 @@ Pod starts
 │  │  │                                           │
 │  │  └─ deadline reached?                        │
 │  │      └─ Yes → broadcast auto_stop event      │
-│  │              call runpod.stop_pod()           │
+│  │          stop the instance via the API        │
 │  │              pod pauses (can resume later)    │
 │  │                                              │
 │  └──────────────────────────────────────────────┘
@@ -794,7 +802,7 @@ python desktop.py
 │
 ├─ Load .env → read PHANTOM_API_URL
 │  (local: ws://localhost:9000/ws)
-│  (cloud: wss://<pod>-9000.proxy.runpod.net/ws)
+│  (cloud: wss://<ip>:<mapped port>/ws, cert pinned)
 │
 ├─ Launch QML UI
 │  ├─ Connection badge: red (disconnected)

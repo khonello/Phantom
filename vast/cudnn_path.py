@@ -2,7 +2,7 @@
 """
 Print the directory holding the cuDNN shared libraries, or exit non-zero.
 
-Used by both deploy paths — the Docker build and runpod/startup.sh — to point
+Used by vast/startup.sh to point
 the dynamic linker at the cuDNN that `nvidia-cudnn-cu12` installs into
 site-packages. onnxruntime-gpu needs `libcudnn.so.9` on the loader path;
 without it every ONNX model falls back to CPU, silently.
@@ -36,6 +36,7 @@ the library, not the one listed first.
 import glob
 import os
 import sys
+from typing import List
 
 # What onnxruntime-gpu dlopens. Only used to choose between roots.
 _SONAME = 'libcudnn.so.9'
@@ -51,7 +52,7 @@ def cudnn_lib_dir() -> str:
     Raises:
         RuntimeError: if the package is missing or has no lib directory
     """
-    roots = []
+    roots: List[str] = []
 
     try:
         import nvidia.cudnn
@@ -76,8 +77,10 @@ def cudnn_lib_dir() -> str:
         if os.path.isdir(candidate):
             roots.append(candidate)
 
-    seen = set()
-    roots = [r for r in roots if not (r in seen or seen.add(r))]
+    # dict.fromkeys keeps the first occurrence and preserves order. The old
+    # `r in seen or seen.add(r)` idiom did the same by leaning on add()
+    # returning None, which is true but is not what the line appears to say.
+    roots = list(dict.fromkeys(roots))
 
     if not roots:
         if imported is None:

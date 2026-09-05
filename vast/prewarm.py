@@ -2,7 +2,7 @@
 Pre-warm every model the pipeline needs, so none of them download or
 initialise on the first frame of a paid session.
 
-Run by runpod/startup.sh. Each model is independent: one failing must not
+Run by vast/startup.sh. Each model is independent: one failing must not
 stop the others, because a missing optional model degrades the pipeline
 while a missing required one is worth knowing about before a customer waits.
 
@@ -15,6 +15,7 @@ matters more now: hyperswap is a 384 MB download.
 
 import os
 import sys
+from typing import Callable, List
 
 sys.path.insert(0, '.')
 
@@ -40,10 +41,10 @@ if _PROVIDER and _PROVIDER != 'cpu':
         'CPUExecutionProvider',
     ])
 
-FAILED = []
+FAILED: List[str] = []
 
 
-def warm(label, fn, required=True):
+def warm(label: str, fn: Callable[[], None], required: bool = True) -> None:
     """Load one model, reporting rather than raising."""
     try:
         fn()
@@ -55,12 +56,12 @@ def warm(label, fn, required=True):
             FAILED.append(label)
 
 
-def _detector():
+def _detector() -> None:
     from pipeline.services.face_detection import FaceDetector
     FaceDetector(CONFIG)._get_analyser()
 
 
-def _swapper():
+def _swapper() -> None:
     from pipeline.services.face_swapping import FaceSwapper
 
     swapper = FaceSwapper(CONFIG)
@@ -77,7 +78,7 @@ def _swapper():
     print('           model: {} ({}px native)'.format(model.name, model.size))
 
 
-def _enhancer():
+def _enhancer() -> None:
     from pipeline.services.enhancement import Enhancer
 
     enhancer = Enhancer(CONFIG)
@@ -86,7 +87,7 @@ def _enhancer():
         raise RuntimeError('restoration backend unavailable')
 
 
-def _masker():
+def _masker() -> None:
     from pipeline.services.masking import FaceMasker
     if FaceMasker(CONFIG)._get_session() is None:
         raise RuntimeError('occluder unavailable')

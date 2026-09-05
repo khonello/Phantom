@@ -44,7 +44,7 @@ def resolve_templates_dir() -> str:
     """
     Where the template library lives.
 
-    Checks the RunPod network volume first so the library survives pod restarts
+    Checks /workspace first so the library survives a container restart
     without being re-fetched, then the package directory — the same order the
     model weights use, and for the same reason.
 

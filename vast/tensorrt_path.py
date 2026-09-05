@@ -65,8 +65,10 @@ def tensorrt_lib_dir() -> str:
             if os.path.isdir(candidate):
                 roots.append(candidate)
 
-    seen = set()
-    roots = [r for r in roots if not (r in seen or seen.add(r))]
+    # dict.fromkeys keeps the first occurrence and preserves order. The old
+    # `r in seen or seen.add(r)` idiom did the same by leaning on add()
+    # returning None, which is true but is not what the line appears to say.
+    roots = list(dict.fromkeys(roots))
 
     if not roots:
         raise RuntimeError(

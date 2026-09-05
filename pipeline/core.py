@@ -116,7 +116,7 @@ def parse_args() -> None:
                         dest='luminance_blend', action='store_true', default=None)
     # Realism knobs. All default to None so the quality preset applies unless
     # a flag or environment variable explicitly overrides it. Environment
-    # defaults exist because the RunPod pod is configured through .env rather
+    # defaults exist because the rented instance is configured through .env rather
     # than a command line.
     program.add_argument('--swapper-model',
                         help='face swap model (also selects its realism profile)',

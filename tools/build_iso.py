@@ -22,7 +22,7 @@ What is left is the repository — source, docs, tests, QML, requirements — pl
 `.git` and the recorded measurement clips, which are gitignored but are the
 reason a sweep on a new machine is comparable with an old one.
 
-**`.env` is opt-in.** It holds `RUNPOD_API_KEY`, and a disc image is a thing
+**`.env` is opt-in.** It holds `VAST_API_KEY`, and a disc image is a thing
 that gets handed to people. `docs/SETUP_CHECKLIST.md` tells an operator to copy
 it across precisely because it is gitignored, so for your own second machine it
 is exactly what you want — which is why the flag exists rather than a refusal.
@@ -60,7 +60,7 @@ _EXCLUDE_NAMES = ('__pycache__', '.mypy_cache', '.pytest_cache')
 #
 # Matched as a *prefix*, not a fixed name. The first version of this listed
 # `.env` alone, and the tree also held `.env.backup-20260818-234644` — a real
-# copy, with a real `RUNPOD_API_KEY` in it — which sailed onto the image while
+# copy, with a real `VAST_API_KEY` in it — which sailed onto the image while
 # `.env` itself was correctly held back. A gate that one spelling of the same
 # secret walks around is not a gate.
 #

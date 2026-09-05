@@ -5,7 +5,7 @@ Extracted from pipeline/face_analyser.py. Provides a clean interface
 for detecting and analyzing faces in frames without global state.
 
 Model cache priority:
-1. /workspace/models/insightface/ (RunPod Network Volume)
+1. /workspace/models/insightface/ (the instance disk)
 2. ~/.insightface/models/ (default InsightFace path)
 """
 
@@ -20,8 +20,8 @@ from pipeline.types import Frame, Detection
 from pipeline.services import guards
 from pipeline.logging import emit_status
 
-# RunPod Network Volume model cache path
-_RUNPOD_CACHE = '/workspace/models/insightface'
+# Model cache on the instance disk
+_VOLUME_CACHE = '/workspace/models/insightface'
 # Default InsightFace model cache path
 _DEFAULT_CACHE = os.path.expanduser('~/.insightface')
 
@@ -30,15 +30,15 @@ def _get_insightface_root() -> str:
     """
     Resolve InsightFace model root directory.
 
-    Checks RunPod Network Volume first, falls back to default.
+    Checks /workspace/models first, falls back to default.
 
     Returns:
         Absolute path to InsightFace model root
     """
-    if os.path.isdir(_RUNPOD_CACHE):
-        emit_status(f'Using RunPod model cache: {_RUNPOD_CACHE}', scope='FACE_DETECTOR')
+    if os.path.isdir(_VOLUME_CACHE):
+        emit_status(f'Using workspace model cache: {_VOLUME_CACHE}', scope='FACE_DETECTOR')
         # insightface uses INSIGHTFACE_HOME env var to override root
-        return os.path.dirname(_RUNPOD_CACHE)  # parent of 'insightface/'
+        return os.path.dirname(_VOLUME_CACHE)  # parent of 'insightface/'
     emit_status(f'Using default model cache: {_DEFAULT_CACHE}', scope='FACE_DETECTOR')
     return _DEFAULT_CACHE
 
@@ -50,7 +50,7 @@ class FaceDetector:
     This service is thread-safe and maintains an internal cache of the
     face analysis model. Configuration is passed in the constructor.
 
-    Checks RunPod Network Volume (/workspace/models/insightface/) before
+    Checks /workspace/models/insightface/ before
     downloading to the default InsightFace cache (~/.insightface/models/).
 
     Example:
@@ -127,7 +127,7 @@ class FaceDetector:
         `det_size` changed — switching quality preset changes it, and the
         prepared size is baked in at `prepare()` time.
 
-        Resolves model root to RunPod volume if available.
+        Resolves model root to /workspace/models if available.
         """
         size = self._resolve_det_size()
 

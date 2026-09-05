@@ -615,7 +615,9 @@ class Bridge(QObject):
             return self._photo_uploaded[self._picker_index]
         return ''
 
-    @Property('QVariantList', notify=faceChoiceChanged)
+    # PySide6 accepts a string type name here; its stubs declare only the
+    # `type` overload. Changing this to `list` would change what QML gets.
+    @Property('QVariantList', notify=faceChoiceChanged)  # type: ignore[arg-type]
     def pickerBoxes(self) -> List[Dict[str, float]]:
         """Normalised face boxes in the photo the picker is showing."""
         if 0 <= self._picker_index < len(self._photo_faces):
@@ -636,7 +638,9 @@ class Bridge(QObject):
         """How many photos need a face chosen in them."""
         return len(self._ambiguous_indices())
 
-    @Property('QVariantList', notify=faceChoiceChanged)
+    # PySide6 accepts a string type name here; its stubs declare only the
+    # `type` overload. Changing this to `list` would change what QML gets.
+    @Property('QVariantList', notify=faceChoiceChanged)  # type: ignore[arg-type]
     def photoNeedsFace(self) -> List[bool]:
         """Per chosen photo: holds several faces and none has been named.
 

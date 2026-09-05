@@ -9,7 +9,7 @@ sensor noise, compression and ordinary imperfection. Not a high-resolution
 portrait, and not the poreless "beautified" look that reads as AI instantly.
 
 **Key Features:**
-- Real-time webcam processing, on a local GPU or a remote RunPod pod
+- Real-time webcam processing, on a local GPU or a rented Vast.ai instance
 - Single-face and multi-face swapping
 - Aligned-space compositing: occlusion-aware masking, colour and detail
   matching, temporal smoothing, sensor-matched grain
@@ -57,8 +57,8 @@ python desktop.py
 
 See [Installation Guide](docs/INSTALLATION.md) for detailed instructions including GPU setup.
 
-**Running on a rented GPU:** [RUNPOD_DEPLOYMENT.md](RUNPOD_DEPLOYMENT.md) — one-time
-setup, then `python runpod/orchestrator.py start` provisions the pod, installs
+**Running on a rented GPU:** [VAST_DEPLOYMENT.md](VAST_DEPLOYMENT.md) — one-time
+setup, then `python vast/orchestrator.py start` provisions the pod, installs
 everything, launches the pipeline and writes the connection URL into `.env`.
 [docs/PENDING_WORK.md](docs/PENDING_WORK.md) is the runbook for what to do with
 the session once it is up.
@@ -165,7 +165,7 @@ options:
 
 Every realism flag also reads an environment variable (`ENHANCER_MODEL`,
 `ENHANCER_WEIGHT`, `ENHANCE_STRENGTH`, `ALIGNED_SIZE`, `TEMPORAL_ALPHA`,
-`COLOR_STRENGTH`, `ENHANCE`, `GRAIN`, `OCCLUDER`), since a RunPod pod is
+`COLOR_STRENGTH`, `ENHANCE`, `GRAIN`, `OCCLUDER`), since a rented instance is
 configured through `.env` rather than a command line. Precedence: quality preset
 first, then CLI/env overrides.
 
@@ -180,7 +180,7 @@ its quality target, and reuses the same compositor.
 |------|-------|
 | Realtime stream (webcam, network, WebSocket push) | Working |
 | Aligned-space compositing, masking, restoration | Working |
-| RunPod deployment, auto-stop, orchestrator | Working |
+| Vast.ai deployment, auto-stop, orchestrator | Working |
 | Desktop LIVE mode, audio, voice, virtual camera | Working |
 | Batch — image | Working |
 | Batch — video | Working |
@@ -201,7 +201,7 @@ practical over the CLI against a local path, not over the API.
 ### Where this is going
 
 Today the pipeline is single-tenant: one process, one session, provisioned by
-hand through `runpod/orchestrator.py`. The intended shape is a session platform —
+hand through `vast/orchestrator.py`. The intended shape is a session platform —
 customers buy time, a scheduler places sessions on pooled GPUs across regions,
 and failures are absorbed rather than passed on.
 

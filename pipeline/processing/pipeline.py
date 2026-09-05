@@ -544,7 +544,7 @@ class ProcessingPipeline:
                 )
 
         # Push mode: desktop sends JPEG frames via WebSocket binary messages.
-        # Used when no local VideoCapture source is available (e.g. RunPod).
+        # Used when no local VideoCapture source is available (e.g. a rented instance).
         if self.frame_queue is not None and not self.config.input_url:
             emit_status('Stream mode: WebSocket push (receiving frames from desktop)', scope='PIPELINE')
             self._stream_loop_push()

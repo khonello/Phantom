@@ -31,9 +31,9 @@ All local, all free. Twenty minutes.
 
 ```bash
 python -m pytest tests/ -q                                       # expect: 10 passed, ~35s
-flake8 pipeline.py pipeline desktop tests tools runpod firebase  # expect: silent
+flake8 pipeline.py pipeline desktop tests tools vast firebase  # expect: silent
 mypy pipeline desktop                                            # expect: clean
-bash -n runpod/startup.sh && bash -n runpod/entrypoint.sh
+bash -n vast/startup.sh && bash -n vast/startup.sh
 ```
 
 Ten test modules, ~310 checks. `tests/test_wiring.py` is the one to watch: it
@@ -53,7 +53,7 @@ longer matched the errors mypy emitted. Worth clearing rather than tolerating:
 ### 0.2 Push and watch CI
 
 The CI file gained two jobs (`unit`, `docker`), had two defects fixed, and its
-lint step now covers `tests`, `tools` and **`runpod`** — which it did not before,
+lint step now covers `tests`, `tools` and **`vast`** — which it did not before,
 which is exactly how an `F821` sat undetected in `orchestrator.py`. It also runs
 `bash -n` on both shell scripts, since a syntax error there is a failed
 provision discovered after paying for a GPU.
@@ -91,7 +91,7 @@ What the first run caught, both fixed:
   failed. `startup.sh` had the identical bug, hidden behind `2>/dev/null`, where
   it would have produced an unset library path and a silent CPU fallback — and
   with the new fatal cuDNN check, a failed provision. Both now use
-  `runpod/cudnn_path.py`, which handles namespace and regular packages and
+  `vast/cudnn_path.py`, which handles namespace and regular packages and
   reports rather than swallowing.
 
 ### 0.3 Model weights
@@ -137,27 +137,24 @@ Cold start needs timing under two conditions, and they cost very differently:
 
 | Condition | What it measures | Cost |
 |---|---|---|
-| **Warm volume** | What a returning customer waits for. The common case | Free — the existing volume already has venv, models and repo |
-| **Empty volume** | First-ever deploy into a region. Also what a *fallback* region costs | A second volume that bills continuously — **deferred, see 1.4** |
+| **Warm disk** | What a returning customer waits for. The common case | Free — a stopped instance kept its venv, models and repo |
+| **Empty disk** | A first rental, or any fallback to a different host | A full cold start: venv and weights download again |
 
-Current config is a single datacenter: `RUNPOD_DATACENTERS=EU-RO-1:z8now7p5ts`.
-Its volume is warm, so there is no second region whose volume is already empty to
-measure for free.
+**These are further apart than they were on RunPod, and that is the trade the
+migration took.** A network volume outlived the pod, so even a *new* pod came up
+warm. Here the instance disk is the only copy, so "empty" means every host
+change — including the capacity fallback in `resume`.
 
-**Do the warm measurement now; defer the empty one.** A second volume bills from
-the moment it exists, and paying for regional redundancy before the pipeline is
-proven on a GPU is buying resilience you cannot use yet. The warm number is the
-one that describes what a returning customer waits for.
+Measure the warm case first: it is free and it is the common one.
 
 ### 1.1 Check what already exists
 
 ```bash
-python runpod/orchestrator.py status        # is there a pod, and is it running?
-python runpod/orchestrator.py datacenters   # every datacenter RunPod offers
-python runpod/orchestrator.py gpus          # GPUs matching MIN_VRAM / MAX_PRICE
+python vast/orchestrator.py status        # is there a pod, and is it running?
+python vast/orchestrator.py offers        # what is rentable, and what start would take
 ```
 
-`status` reads `RUNPOD_POD_ID` from `.env`. Three possible answers:
+`status` reads `VAST_INSTANCE_ID` from `.env`. Three possible answers:
 
 - **RUNNING** — a pod is live and billing. `stop` it before measuring, or the
   cold-start number is meaningless
@@ -172,7 +169,7 @@ python runpod/orchestrator.py gpus          # GPUs matching MIN_VRAM / MAX_PRICE
 
 ### 1.2 Resize the volume — do this before provisioning anything
 
-`RUNPOD_VOLUME_DISK=20` is too small for this session. Budget:
+`VAST_DISK=25` is the default. Check it against this session's budget:
 
 | Item | Size |
 |---|---|
@@ -182,21 +179,20 @@ python runpod/orchestrator.py gpus          # GPUs matching MIN_VRAM / MAX_PRICE
 | Debug frames at stride 3, limit 1500 | ~2 GB |
 | Batch scratch, if a video is processed | 4 MB per 1080p frame |
 
-That is **~12 GB before any batch job**, and batch scratch now lands on
-`/workspace/tmp`, which is this volume. A five-minute 1080p clip alone wants
+That is **~12 GB before any batch job**, and batch scratch lands on
+`/workspace/tmp`, which is the same disk. A five-minute 1080p clip alone wants
 ~36 GB of scratch.
 
-**Do this:**
-
-1. RunPod dashboard → **Storage** → volume `z8now7p5ts` → **Edit** → raise to
-   **30 GB**. Volumes can be grown in place and cannot be shrunk, so 30 is a
-   deliberate middle: comfortable for this session, not paying for batch
-   headroom you may never use.
-2. Update `.env` so a future `start` requests the same:
+**Do this:** set `VAST_DISK` before renting, because unlike a RunPod network
+volume it cannot be grown in place — the disk is fixed at creation.
 
    ```env
-   RUNPOD_VOLUME_DISK=30
+   VAST_DISK=30
    ```
+
+Size it deliberately rather than generously: **storage bills while the instance
+is stopped**, per host, at up to $0.40/GB/month. `offers` prints the standing
+monthly cost per candidate in its `$/mo st` column.
 
 Cost: $0.07/GB/month, billed **whether or not a pod is running**. 30 GB is
 about $2.10/month. Going to 100 GB "just in case" would be $7/month standing for
@@ -212,9 +208,9 @@ capacity that sits idle — worth avoiding until a real batch job needs it.
 Nothing to set up. It is the common case and it costs one pod session.
 
 ```bash
-python runpod/orchestrator.py status
-python runpod/orchestrator.py stop      # only if it reports RUNNING
-python runpod/orchestrator.py start     # always a fresh pod
+python vast/orchestrator.py status
+python vast/orchestrator.py stop      # only if it reports RUNNING
+python vast/orchestrator.py start     # always a fresh pod
 ```
 
 The phase table prints at the end and says `volume: warm`. Save the output.
@@ -241,28 +237,29 @@ Revisit when **both** are true:
 
 - The pipeline is confirmed working end to end on a GPU — hyperswap produces a
   face, guards behave, latency holds
-- You are either taking real sessions, or `provision` has actually failed to
-  find a GPU in `EU-RO-1` and the fallback is no longer theoretical
+- You are either taking real sessions, or the search has actually failed to
+  find anything in the preferred countries and the fallback is no longer
+  theoretical
 
-When that day comes, the procedure is:
+**On Vast this needs no setup at all, which is the one thing the move made
+simpler here.** There are no per-region volumes to create and pre-seed, because
+there are no network volumes: geography is a list, and widening it is one line.
 
-1. `python runpod/orchestrator.py datacenters`, pick one that is **not**
-   `EU-RO-1`
-2. RunPod dashboard → **Storage** → **New Network Volume** in that datacenter,
-   30 GB. Copy the volume ID
-3. Put the new pair **first**, because the orchestrator tries datacenters in the
-   order listed and only falls through when no GPU is free. Listing it second
-   would land you back on the warm volume and silently measure the wrong thing:
+1. `python vast/orchestrator.py offers` — see what the current list returns,
+   and what is being refused
+2. Append a country to `VAST_GEOLOCATIONS`. Order is strict priority, so put it
+   **last** unless you want it preferred:
 
    ```env
-   RUNPOD_DATACENTERS=<NEW_DC>:<NEW_VOL_ID>,EU-RO-1:z8now7p5ts
+   VAST_GEOLOCATIONS=GB,IE,FR,NL,BE,DE,ES
    ```
 
-4. `python runpod/orchestrator.py start` → the phase table reports
-   `volume: empty`
-5. Swap the order back so normal sessions use the warm volume. Keep both
-   entries — that is the fallback working as intended, and the second volume is
-   warm now too
+3. `python vast/orchestrator.py start` → the phase table reports `disk: empty`,
+   because a new host means a new disk
+
+What this costs instead is the cold start itself. There is no warm volume
+waiting in the new region — that is the trade recorded in
+[VAST_MIGRATION.md](VAST_MIGRATION.md) §6.
 
 **In the meantime**, record the empty case as unmeasured rather than estimating
 it. An invented number in the cold-start budget is worse than an admitted gap.
@@ -294,7 +291,7 @@ clear without paying for a second volume to confirm it.
 **One pod session answers every open question.** Read the whole phase before
 starting it; the ordering exists to avoid paying for a second session.
 
-`RUNPOD_MAX_UPTIME` will stop the pod automatically, so an abandoned session is
+`VAST_MAX_UPTIME` will stop the pod automatically, so an abandoned session is
 capped rather than open-ended. It is still worth running `stop` when done.
 
 ### 2.1 Start the pod, and capture the cold-start breakdown
@@ -313,7 +310,7 @@ DEBUG_FRAMES_STRIDE=3
 ```
 
 ```bash
-python runpod/orchestrator.py start
+python vast/orchestrator.py start
 ```
 
 This now prints its own phase table at the end. **Save the output** — it is the
@@ -341,7 +338,7 @@ without relying on memory.
 - `Execution provider: CUDAExecutionProvider confirmed on ...` — if instead the
   pipeline **exits** with an `ExecutionProviderError`, that is deliberate. It
   means ONNX would have run on CPU, which is seconds per frame and a wasted GPU
-  hour. See `runpod/TROUBLESHOOTING.md` §5b.
+  hour. See `vast/TROUBLESHOOTING.md` §5b.
 - The **pre-warm report**, which now covers all four models rather than two:
   `ok detection` / `ok swap` / `ok restoration` / `ok occluder`. A `REQUIRED`
   line means that model will download on the first frame of a paid session
@@ -525,7 +522,7 @@ capability probe, and the provider confirmation.
 ### 2.6 Stop the pod
 
 ```bash
-python runpod/orchestrator.py stop
+python vast/orchestrator.py stop
 ```
 
 `stop` preserves the volume and the container disk. Use `terminate` only to
@@ -589,15 +586,19 @@ grain and restoration strength instead.
 
 ### 3.4 The Docker decision
 
-From the cold-start table:
+**Reopened by the migration, and currently answered "no".** The Dockerfile is
+gone: the deployment is stop/start on a stock image, so a stale image build that
+nothing exercises would be a trap rather than an option.
 
-- **`pip-install` dominates** → bake an image. The Dockerfile already exists and
-  builds in CI; switching is `RUNPOD_DEPLOY_MODE=docker`
-- **`model-load` or downloads dominate** → do **not** bake. The Dockerfile
-  deliberately leaves weights on the network volume, so it would not help. The
-  fix is pre-seeding regional volumes instead
-- **`provision` dominates** → neither helps; that is RunPod scheduling, and the
-  lever is `support_public_ip`, which is why Docker mode schedules more freely
+What the cold-start table decides is whether to bring it back:
+
+- **`pip-install` dominates** → bake an image. This is the strongest case,
+  because unlike RunPod there is no network volume to fall back on when a host
+  changes, so every host change pays the full venv build
+- **`model-load` or downloads dominate** → baking the *weights* in is what
+  helps, which is a bigger image but removes the one thing a lost disk costs
+- **`provision` dominates** → neither helps; that is marketplace availability,
+  and the lever is `VAST_GEOLOCATIONS` and `VAST_PREFERRED_HOST`
 
 Keep both modes regardless. The rule that makes that safe is already in place:
 CI builds the image on every push, so the unused path cannot rot silently the way
@@ -646,10 +647,10 @@ every stop/resume.
 # 1. The pod runs whatever it last pulled. This is not optional — a sweep has
 #    already been lost to a pod that predated the fields it was being asked to
 #    set, and every configuration reported identical numbers.
-python runpod/orchestrator.py run "cd /workspace/Phantom && git pull"
+python vast/orchestrator.py run "cd /workspace/Phantom && git pull"
 
 # 2. Restart the pipeline so it loads the pulled code.
-python runpod/orchestrator.py run "pkill -f pipeline.py; sleep 4; \
+python vast/orchestrator.py run "pkill -f pipeline.py; sleep 4; \
   [ -f /etc/rp_environment ] && . /etc/rp_environment; \
   [ -f /etc/profile.d/cudnn.sh ] && . /etc/profile.d/cudnn.sh; \
   cd /workspace/Phantom && nohup /workspace/venv/bin/python \
@@ -658,11 +659,11 @@ python runpod/orchestrator.py run "pkill -f pipeline.py; sleep 4; \
 
 # 3. Wait for it to bind 9000 — model load is ~60-90s, and a stream started
 #    before then reports nothing at all.
-python runpod/orchestrator.py run "for i in \$(seq 1 20); do \
+python vast/orchestrator.py run "for i in \$(seq 1 20); do \
   ss -ltn | grep -q ':9000' && echo READY && break; sleep 10; done"
 
 # 4. Get the clip and the source face on, if this is a fresh volume.
-python runpod/orchestrator.py push clip_h264.mp4
+python vast/orchestrator.py push clip_h264.mp4
 
 # 5. Then A/B live, with no restart between configurations.
 python tools/realism.py --host <ip> --port <port> enhance=false
@@ -674,7 +675,7 @@ python tools/realism.py --host <ip> --port <port> swapper_model=inswapper_128
 baked into the container environment, and it is gitignored so `git pull` never
 carries it. On a pod that already exists, `tools/realism.py` is how a model
 changes; only `terminate` + `start` picks up an edited `.env`. See
-RUNPOD_DEPLOYMENT.md, "Changing settings on a pod that already exists".
+VAST_DEPLOYMENT.md, "Changing settings on a pod that already exists".
 
 **Watch the latency badge, not just the frame time.** The desktop now shows RTT
 p50/p95, buffer depth and uplink Mbps top-right in the viewport. Read it against
@@ -725,7 +726,7 @@ them from what `push` prints; on Git Bash set `MSYS_NO_PATHCONV=1` or every
 `/workspace/...` argument is rewritten into a Windows path):
 
 ```
-python runpod/orchestrator.py push clip_h264.mp4
+python vast/orchestrator.py push clip_h264.mp4
 python tools/sweep_levers.py --host <ip> --port <port> --input-url <path> --source /workspace/Phantom/.github/examples/source.jpg --seconds 60 --out sweep.json
 ```
 
@@ -750,7 +751,7 @@ restoration is the dominant term:
 | `total` >> the sum of stages | The cost is outside the compositor — capture, JPEG encode, or the proxy hop. None of these levers touch it |
 
 The third case is the one worth taking seriously: the desktop pushes webcam
-frames to the pod and reads them back through RunPod's proxy, and that round
+frames to the instance and reads them back over the network, and that round
 trip is tens of milliseconds no GPU affects.
 
 ### 2b.2 CUDA graphs — free, do it second
@@ -837,8 +838,8 @@ Only after Phase 3. Each item's priority depends on what the data says.
       image, not by price or availability
 - [ ] **Stop the pod on a fatal startup error.** If the pipeline now refuses to
       start — a provider fallback, say — the pod keeps billing until
-      `RUNPOD_MAX_UPTIME`, up to ~$2 wasted. Belongs with Stage 4's "move
-      `runpod.stop_pod()` out of the worker"
+      `VAST_MAX_UPTIME`, up to ~$2 wasted. Belongs with Stage 4's "move
+      the auto-stop API call out of the worker"
 
 ### 4.2 Stage 3.5 — call realism
 
@@ -907,7 +908,7 @@ makes it safe to have landed before Phase 3 is finished.
       the hour keeps running. Deferring the burn until the pipeline is up
       removes the most likely failure, not all of them
 - [ ] **Fold into the pod session.** The desktop knows the hour is over; the pod
-      is stopped separately by `RUNPOD_MAX_UPTIME`. Two clocks that currently
+      is stopped separately by `VAST_MAX_UPTIME`. Two clocks that currently
       agree because both are 60 minutes — see 4.5
 
 ### 4.5 Session shutdown — done
@@ -1041,7 +1042,7 @@ frame. Model weights live on the network volume by design, not in the image, so
 they are the one thing still fetched at run time — and hyperswap is a 384 MB
 download that would otherwise land on a customer.
 
-`runpod/prewarm.py` is shared by `startup.sh` (SSH) and `entrypoint.sh` (Docker).
+`vast/prewarm.py` is shared by `startup.sh` (SSH) and `entrypoint.sh` (Docker).
 A pre-warm failure is a warning, not a stop: it costs a slow first frame, and
 the pipeline downloads on demand anyway. The checks that genuinely halt are the
 cuDNN test and the execution-provider check.
@@ -1060,9 +1061,9 @@ Things that will genuinely bite, all found the hard way.
 
 | Landmine | Detail |
 |---|---|
-| **`runtime` image tag does not exist** | Only `devel` is published for `runpod/pytorch`. Four files referenced a dead tag; all now pinned to `2.2.0-py3.10-cuda12.1.1-devel-ubuntu22.04` |
-| **`Dockerfile` and `RUNPOD_IMAGE` must stay in step** | Drifting them means production runs a different Python, torch and CUDA than anything ever tested over SSH |
-| **Batch scratch needs real disk** | Extracted PNGs are ~4 MB per 1080p frame — ~36 GB for five minutes at 30fps. Scratch defaults to `/workspace/tmp` (the network volume) rather than the 20 GB container disk; raise `RUNPOD_VOLUME_DISK` before long jobs |
+| **The image must be a `devel` tag** | `runtime` tags omit the headers cuDNN and TensorRT builds need. `VAST_IMAGE` and the orchestrator's default are asserted equal by `tests/test_wiring.py` |
+| **`Dockerfile` and `VAST_IMAGE` must stay in step** | Drifting them means production runs a different Python, torch and CUDA than anything ever tested over SSH |
+| **Batch scratch needs real disk** | Extracted PNGs are ~4 MB per 1080p frame — ~36 GB for five minutes at 30fps. Scratch defaults to `/workspace/tmp`; raise `VAST_DISK` **before renting**, since an instance disk is fixed at creation and cannot be grown |
 | **Volumes bill while stopped** | $0.07/GB/month per region, running or not. Egress is free; idle per-region volumes are the cost line to watch |
 | **Guard thresholds still uncalibrated** | Eight of nine are guesses. `guard_min_coverage` is the one most likely to fire on ordinary frames — what XSeg reads on a clear face has never been measured. Phase 3.1 sets them from data |
 | **Tests stub the ML layer** | `tests/` proves the logic around the models, never the models. Only the pod and the CI `test` job cover those |
@@ -1075,12 +1076,12 @@ Things that will genuinely bite, all found the hard way.
 
 ```bash
 # Pod lifecycle
-python runpod/orchestrator.py start        # new pod; prints the cold-start breakdown
-python runpod/orchestrator.py resume       # existing pod (RUNPOD_POD_ID)
-python runpod/orchestrator.py stop         # pause; volume and container disk survive
-python runpod/orchestrator.py terminate    # delete pod; network volume survives
-python runpod/orchestrator.py status
-python runpod/orchestrator.py gpus         # VRAM, price, eligibility
+python vast/orchestrator.py start        # new pod; prints the cold-start breakdown
+python vast/orchestrator.py resume       # existing pod (VAST_INSTANCE_ID)
+python vast/orchestrator.py stop         # pause; volume and container disk survive
+python vast/orchestrator.py terminate    # delete pod; network volume survives
+python vast/orchestrator.py status
+python vast/orchestrator.py gpus         # VRAM, price, eligibility
 
 # Pipeline — batch
 python pipeline.py -s <src>.jpg -t <target>.mp4 -o <out>.mp4 --execution-provider cuda

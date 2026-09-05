@@ -259,6 +259,6 @@ and it is the reason the burn waits for the pipeline to be running, which
 removes the most likely way for a session to fail before it starts.
 
 **This does not enforce the hour.** `expires_at` is what the desktop reads to
-know when to stop; the pod is stopped independently by `RUNPOD_MAX_UPTIME`. Two
+know when to stop; the pod is stopped independently by `VAST_MAX_UPTIME`. Two
 clocks that currently agree. Keeping them separate is what lets a two-hour code
 work later without touching the shutdown path.

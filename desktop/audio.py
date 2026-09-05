@@ -687,7 +687,7 @@ class RTTTracker:
     SMOOTHING_ALPHA_UP: float = 0.5    # rise fast: a late buffer glitches
     SMOOTHING_ALPHA_DOWN: float = 0.1  # fall slow: an early buffer underruns
     FLOOR_NS: int = 50_000_000            # 50 ms — one frame interval at 20fps
-    CEILING_NS: int = 2_000_000_000      # 2 s  (accommodates RunPod RTT)
+    CEILING_NS: int = 2_000_000_000      # 2 s  (accommodates a bad remote link)
     INITIAL_DELAY_NS: int = 120_000_000  # 120 ms, then adapt from measurement
     WARMUP_SAMPLES: int = 5             # min samples before adapting
 

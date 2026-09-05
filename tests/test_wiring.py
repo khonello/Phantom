@@ -11,8 +11,8 @@ None of those were caught by tests, because each lived in the gap between two
 things that were individually fine. Everything here asserts that two files
 still agree.
 
-Deliberately reads source text in places rather than importing. `runpod/`
-imports the RunPod SDK and paramiko, neither of which belongs in a test
+Deliberately reads source text in places rather than importing. `vast/`
+imports paramiko, which does not belong in a test
 environment, and the point is the literal contents anyway.
 """
 
@@ -98,7 +98,7 @@ check('preset and model profile do not both own a knob',
 # ── Orchestrator forwards only names the pipeline reads ────────────────
 print('\nOrchestrator env forwarding')
 
-orch_src = read('runpod', 'orchestrator.py')
+orch_src = read('vast', 'orchestrator.py')
 forwarded = re.search(r'_FORWARDED_ENV = \((.*?)\n\)', orch_src, re.S)
 forwarded_names = set(re.findall(r'"([A-Z_]+)"', forwarded.group(1)))
 check('the forwarded list is non-empty', bool(forwarded_names),
@@ -123,10 +123,14 @@ declared = set(re.findall(r"os\.environ\.get\('([A-Z_]+)'", package_src))
 declared |= set(re.findall(r"_env_(?:float|int|bool)\('([A-Z_]+)'\)", package_src))
 # Names the pod must not or need not receive.
 exempt = {
-    'RUNPOD_API_KEY', 'RUNPOD_MAX_UPTIME', 'RUNPOD_STOP_WARNING',
+    # Set explicitly on the launch command rather than forwarded in bulk:
+    # they configure the instance's relationship to Vast and to the desktop,
+    # not the swap.
+    'VAST_API_KEY', 'VAST_INSTANCE_ID', 'VAST_MAX_UPTIME', 'VAST_STOP_WARNING',
+    'PHANTOM_TLS_CERT', 'PHANTOM_TLS_KEY', 'PHANTOM_API_TOKEN',
     'API_PORT', 'PHANTOM_API_URL', 'EXECUTION_PROVIDER',
     'PHANTOM_SESSION_ID', 'TF_CPP_MIN_LOG_LEVEL', 'OMP_NUM_THREADS',
-    'INSIGHTFACE_HOME',
+    'INSIGHTFACE_HOME', 'PHANTOM_SESSION_GRACE',
 }
 stranded = sorted(declared - forwarded_names - exempt)
 check('no pipeline setting is stranded on the local machine', not stranded,
@@ -167,6 +171,7 @@ _DIST = {
 }
 # Standard library and first-party; never in a requirements file.
 _NOT_A_DEPENDENCY = {
+    'ssl', 'hashlib', 'hmac',
     'argparse', 'base64', 'collections', 'dataclasses', 'desktop', 'gc',
     'hashlib', 'json', 'math', 'os', 'pathlib', 'pipeline', 'platform',
     'queue', 'secrets', 'struct', 'subprocess', 'sys', 'threading', 'time',
@@ -205,15 +210,16 @@ check('requirements-orchestrator.txt carries websockets',
 # ── The orchestrator's own settings are documented ─────────────────────
 # The forwarding checks above cover settings that travel *to* the pod. These
 # cover the ones that configure the orchestrator itself, which drifted the other
-# way: RUNPOD_DATACENTERS, the auto-discovery bounds and the auto-stop timers
+# way: the geography, the auto-discovery bounds and the auto-stop timers
 # were all read by the code and named in neither .env.example nor the guide, so
 # the documented setup silently pinned GPUs and had no billing cap.
 print('\nOrchestrator settings are documented')
 
 env_example_src = read('.env.example')
-deploy_doc = read('RUNPOD_DEPLOYMENT.md')
+deploy_doc = read('VAST_DEPLOYMENT.md')
 
-orch_settings = set(re.findall(r'os\.getenv\("(RUNPOD_[A-Z_]+)"', orch_src))
+orch_settings = set(re.findall(r'os\.getenv\("(VAST_[A-Z_]+)"', orch_src))
+orch_settings |= set(re.findall(r'_env_(?:float|int|flag)\("(VAST_[A-Z_]+)"', orch_src))
 check('the orchestrator reads a plausible number of settings',
       len(orch_settings) >= 10, '{} found'.format(len(orch_settings)))
 
@@ -222,15 +228,19 @@ check('.env.example documents every setting the orchestrator reads',
       not undocumented, str(undocumented))
 
 unexplained = sorted(n for n in orch_settings if n not in deploy_doc)
-check('RUNPOD_DEPLOYMENT.md documents every setting the orchestrator reads',
+check('VAST_DEPLOYMENT.md documents every setting the orchestrator reads',
       not unexplained, str(unexplained))
 
-# Auto-discovery is the default only while nothing pins it. A shipped value
-# turns off the VRAM, price and compute-capability filtering in one go.
-gpu_pin = re.search(r'^RUNPOD_GPU_TYPES=(.*)$', env_example_src, re.M)
-check('.env.example leaves GPU auto-discovery on',
-      gpu_pin is not None and not gpu_pin.group(1).strip(),
-      'a shipped RUNPOD_GPU_TYPES disables VRAM, price and architecture filtering')
+# Geography is the setting the migration exists for, so a shipped value that
+# quietly widened it would undo the whole point.
+geo = re.search(r'^VAST_GEOLOCATIONS=(.*)$', env_example_src, re.M)
+check('.env.example ships a geography, and it starts in the UK',
+      geo is not None and geo.group(1).strip().startswith('GB'),
+      'RunPod had no UK datacenter; being able to ask for one is the reason to be here')
+host_pin = re.search(r'^VAST_PREFERRED_HOST=(.*)$', env_example_src, re.M)
+check('.env.example ships no pinned host',
+      host_pin is not None and not host_pin.group(1).strip(),
+      'a host id is account-specific and would send everyone to one machine')
 
 # A stopped pod keeps its host, so resting can end with that host's GPUs taken.
 # The fallback to a new pod is the only thing that recovers it, and it has to
@@ -241,15 +251,15 @@ check('resume falls back to start when the host is full',
       'cmd_start()' in resume_body)
 check('that fallback is gated, not unconditional',
       '_is_capacity_error' in resume_body)
-check('the phrase RunPod actually returned still matches',
-      'not enough free gpus' in orch_src.lower(),
-      'RunPod said "There are not enough free GPUs on the host machine"')
+check('the capacity markers are substrings, not exact messages',
+      "_CAPACITY_MARKERS" in orch_src and 'no gpu' in orch_src.lower(),
+      'the wording carries the machine own numbers, so it cannot be matched whole')
 
 # insightface depends on the CPU `onnxruntime`, and both wheels write the same
 # `onnxruntime/` directory, so the CPU one lands last and shadows the GPU build.
 # The only symptom is an argparse error rejecting --execution-provider cuda, so
 # the repair and its verification both have to survive.
-startup_src = read('runpod', 'startup.sh')
+startup_src = read('vast', 'startup.sh')
 check('startup removes the CPU onnxruntime that shadows the GPU build',
       'uninstall -y onnxruntime' in startup_src)
 # Deliberately NOT "reinstall right after the uninstall". Removing the CPU
@@ -266,17 +276,24 @@ check('startup fails when CUDAExecutionProvider is missing',
 # The pipeline is launched from a different subshell than startup.sh ran in, so
 # the cuDNN LD_LIBRARY_PATH only reaches it by being sourced again.
 check('the pipeline launch sources the cuDNN environment',
-      '/etc/profile.d/cudnn.sh' in orch_src.split('pipeline_cmd = (')[1][:400])
+      '/etc/profile.d/cudnn.sh' in orch_src.split('launch = (')[1][:600])
 
 
 # The architecture filter is the only thing between a Blackwell card and a paid
-# hour on an image whose torch and ONNX cannot use it — RunPod schedules one
-# without complaint. An RTX PRO 4000 got through while 6000 and 4500 were listed
-# by model, so the family keywords are what must not be lost.
-for _kw in ('Blackwell', 'RTX PRO'):
-    check('the GPU filter matches {} as a family'.format(_kw),
-          "\"{}\"".format(_kw) in orch_src,
-          'model-by-model entries go stale as NVIDIA ships more')
+# hour on an image whose torch and ONNX cannot use it — a marketplace schedules
+# one without complaint. On RunPod this was a hand-maintained keyword table that
+# an RTX PRO 4000 walked straight through; here it is a server-side filter on a
+# field Vast publishes, so what must not be lost is the filter being applied at
+# all.
+check('the compute-capability ceiling is applied as a search filter',
+      '"compute_cap": {"lte": max_compute_cap}' in orch_src,
+      'a keyword table of GPU names goes stale as NVIDIA ships more')
+check('that ceiling is sm_90, matching the image',
+      '_DEFAULT_MAX_COMPUTE_CAP = 900' in orch_src,
+      'Blackwell reports 1200 and would fail only after billing started')
+check('the ceiling is settable without editing code',
+      'VAST_MAX_COMPUTE_CAP' in orch_src and 'VAST_MAX_COMPUTE_CAP' in env_example_src,
+      'the image will move, and a constant nobody can reach is a constant nobody updates')
 
 # ── Deploy guide describes the code that exists ────────────────────────
 
@@ -292,22 +309,35 @@ check('that re-exec cannot loop',
 
 # ── Deploy guide describes the code that exists ────────────────────────
 
-# Selection order. The price ceiling is applied before the sort, so everything
-# that survives is affordable and there is nothing left for cost to decide —
-# while the spread between fastest and slowest of them is the difference between
-# a call and a slideshow.
-check('GPU candidates are ordered by speed, not price',
-      '_gpu_perf(c[1])' in orch_src)
-check('AMD cards are excluded, since the pipeline needs CUDA',
-      '_is_cuda_gpu' in orch_src and 'MI300' in orch_src)
-# "A40" sits inside "RTX A4000". Shortest-match-wins scored an entry-level
-# Ampere as a datacenter one, and put it above cards twice its speed.
-for _fn in ('_gpu_perf', '_get_gpu_compute_cap'):
-    _body = orch_src.split('def {}'.format(_fn))[1].split(chr(10) + 'def ')[0]
-    check('{} matches the longest keyword first'.format(_fn),
-          'key=len' in _body and 'reverse=True' in _body)
+# Selection order, and why it is not what it used to be.
+#
+# The RunPod orchestrator sorted fastest-first, because a speed ranking was the
+# only thing stopping it picking a weak card. `VAST_MIN_DLPERF` now removes
+# everything below a 4090 before the sort runs, so every surviving offer is
+# fast enough and the ordering is free to spend on what still differs.
+#
+# It spends it on distance. VAST_GEOLOCATIONS is documented as a priority
+# order, and sorting on price alone had a French host at $0.336 beating a
+# British one at $0.350 — three cents to give back part of the round trip this
+# whole migration exists to remove.
+check('offers are ranked by country priority before price',
+      '_rank(offers, geolocations)' in orch_src and 'rank.get(_country(o)' in orch_src)
+check('the ranking reads the country code, not the whole label',
+      'def _country' in orch_src and 'rsplit(",", 1)' in orch_src,
+      'geolocation is "United Kingdom, GB" but the filter matches GB')
+check('a speed floor still exists, so ranking on price is safe',
+      'VAST_MIN_DLPERF' in orch_src and '"dlperf": {"gte": min_dlperf}' in orch_src,
+      'without it, cheapest-first is how a measurement session ends up on an L4')
 
-# ── Deploy guide describes the code that exists ────────────────────────
+# Every ONNX model runs on CUDAExecutionProvider, so a card without it is not a
+# slower option, it is no option. MI300X listed at $0.50/hr with 192GB on
+# RunPod and passed every other filter — exactly what a cheapest-first search
+# reaches for.
+check('non-NVIDIA cards are excluded at the search',
+      '"gpu_arch": {"eq": "nvidia"}' in orch_src)
+check('that exclusion covers the pinned-host path too',
+      orch_src.count('"gpu_arch": {"eq": "nvidia"}') >= 2,
+      'a pinned host bypasses the quality floors; it must not bypass this')
 
 # ── The deploy guide describes the code that exists ────────────────────
 print('\nDeploy guide matches the code')
@@ -319,7 +349,7 @@ TMUX_CLAIMS = ('tmux attach', 'tmux new', 'tmux kill', 'in tmux', 'tmux session'
 for label, src in (('the guide', deploy_doc),
                    ('the orchestrator', orch_src),
                    ('.env.example', env_example_src),
-                   ('startup.sh', read('runpod', 'startup.sh'))):
+                   ('startup.sh', read('vast', 'startup.sh'))):
     stale = [c for c in TMUX_CLAIMS if c in src]
     check('{} does not present tmux as live'.format(label), not stale,
           'the pipeline has run under nohup since the tmux dependency was '
@@ -328,11 +358,14 @@ pipeline_log = re.search(r'^_PIPELINE_LOG = "([^"]+)"', orch_src, re.M)
 check('the guide names the log the pipeline actually writes',
       pipeline_log is not None and pipeline_log.group(1) in deploy_doc,
       'the log is the only view of a nohup pipeline')
-check('the guide gives the proxy WebSocket address, not a raw IP',
-      'proxy.runpod.net' in deploy_doc)
-check('the guide gives the proxy SSH address, not root@ip',
-      'ssh.runpod.io' in deploy_doc and 'root@' not in deploy_doc)
-check('the guide covers forwarding pipeline settings into the pod',
+check('the guide explains why the address is wss and pinned',
+      'PHANTOM_TLS_FINGERPRINT' in deploy_doc and 'self-signed' in deploy_doc,
+      'Vast terminates no TLS, so this is the difference between encrypted and not')
+check('the guide says storage bills while stopped',
+      'billed while stopped' in deploy_doc or 'billing for storage' in deploy_doc
+      or 'Storage does not' in deploy_doc,
+      'the disk is the only copy of the models, and it is not free to keep')
+check('the guide covers forwarding pipeline settings into the instance',
       '_FORWARDED_ENV' in deploy_doc,
       'without it, configuring a run means SSHing in by hand')
 check('the retired DEPLOYMENT.md is gone rather than left to rot',
@@ -368,91 +401,129 @@ check('explicit flags are applied after both',
       overrides > profile_at,
       'an operator override must win over either')
 
-# ── Image tag agreement ────────────────────────────────────────────────
-print('\nDeploy image agreement')
+# ── The instance image, and what startup.sh must do to it ───────
+print('\nInstance setup')
 
-dockerfile = read('Dockerfile')
 env_example = read('.env.example')
-docker_tag = re.search(r'^FROM (\S+)', dockerfile, re.M).group(1)
-env_tag = re.search(r'^RUNPOD_IMAGE=(\S+)', env_example, re.M).group(1)
-check('Dockerfile and .env.example pin the same image',
-      docker_tag == env_tag,
-      '{} vs {}'.format(docker_tag, env_tag))
+startup = read('vast', 'startup.sh')
+
+image = re.search(r'^VAST_IMAGE=(\S+)', env_example, re.M)
+check('.env.example pins a base image', image is not None)
 check('the image is a devel tag',
-      'devel' in docker_tag,
-      'runtime is not published for runpod/pytorch - TROUBLESHOOTING section 5')
-check('no file still references the dead runtime tag',
-      'cuda12.4.1-runtime' not in dockerfile + env_example)
+      image is not None and 'devel' in image.group(1),
+      'the runtime tags omit the headers cuDNN and TensorRT builds need')
+check('the orchestrator defaults to the same image .env.example ships',
+      image is not None and image.group(1) in orch_src,
+      'a default that disagrees with the documented one is two deployments')
 
-# ── Both deploy paths cover the same setup ─────────────────────────────
-print('\nSSH and Docker parity')
+# There is no Docker path any more, and that is a decision rather than an
+# omission: docs/VAST_MIGRATION.md chose stop/start with a stock image, so
+# every deploy goes through startup.sh over SSH. Nothing may quietly depend on
+# an image that bakes the pipeline in.
+check('no Dockerfile is left to rot',
+      not _os.path.isfile(_os.path.join(_REPO_ROOT, 'Dockerfile')),
+      'stop/start on a stock image is the deployment; a stale image build is a trap')
 
-startup = read('runpod', 'startup.sh')
 check('startup.sh runs the pre-warm script',
       'prewarm.py' in startup)
 check('the pre-warm script exists',
-      _os.path.isfile(_os.path.join(_REPO_ROOT, 'runpod', 'prewarm.py')))
+      _os.path.isfile(_os.path.join(_REPO_ROOT, 'vast', 'prewarm.py')))
 check('startup.sh fails hard when cuDNN cannot load',
       'libcudnn.so.9' in startup and 'exit 1' in startup,
       'a CPU fallback wastes a paid GPU hour')
-check('the Docker build fails hard when cuDNN cannot load',
-      'libcudnn.so.9' in dockerfile,
-      'the SSH path checks at setup; the image must check at build')
-check('both paths resolve the cuDNN directory with the same helper',
-      'cudnn_path.py' in dockerfile and 'cudnn_path.py' in startup,
-      'they previously had the same bug and fixed it in neither')
-check('neither path still uses nvidia.cudnn.__file__',
-      '__file__' not in dockerfile
-      and 'nvidia.cudnn.__file__' not in startup,
-      'it is None for a namespace package, which broke the Docker build')
+check('startup.sh resolves the cuDNN directory with the shared helper',
+      'cudnn_path.py' in startup)
+check('startup.sh does not use nvidia.cudnn.__file__',
+      'nvidia.cudnn.__file__' not in startup,
+      'it is None for a namespace package')
 check('startup.sh no longer swallows the cuDNN resolution error',
       'cudnn_path.py" || echo' in startup,
       'the old 2>/dev/null turned a TypeError into a misleading warning')
-# Follow the chain rather than grepping one file: Dockerfile -> entrypoint ->
-# prewarm. Asserting only on the Dockerfile would pass for the wrong reasons.
-entrypoint_path = _os.path.join(_REPO_ROOT, 'runpod', 'entrypoint.sh')
-check('the Docker entrypoint exists', _os.path.isfile(entrypoint_path))
-entrypoint = read('runpod', 'entrypoint.sh') if _os.path.isfile(entrypoint_path) else ''
-check('the Dockerfile runs that entrypoint',
-      'entrypoint.sh' in dockerfile)
-check('Docker pre-warms too, so first-frame cost matches SSH',
-      'prewarm.py' in entrypoint,
-      'otherwise a 384 MB model downloads on a customer first frame')
-check('the entrypoint execs the pipeline as PID 1',
-      'exec python' in entrypoint,
-      'otherwise SIGTERM never reaches Python and a clean stop loses the reports')
-check('the entrypoint does not abort on a pre-warm failure',
-      '&& exec' not in entrypoint,
-      'a slow first frame is not a broken pod')
 
-prewarm = read('runpod', 'prewarm.py')
+prewarm = read('vast', 'prewarm.py')
 for label in ('detection', 'swap', 'restoration', 'occluder'):
     check('pre-warm covers {}'.format(label), "'{}'".format(label) in prewarm)
 check('pre-warm constructs Enhancer with a config',
       'Enhancer(CONFIG)' in prewarm,
       'Enhancer() with no args raised TypeError and was silently swallowed')
 
-# ── Pod environment actually reaches the processes ─────────────────────
-print('\nPod environment delivery')
+# ── The transport is protected, and both ends agree how ──────────────
+# Vast publishes a random port on a shared public IP and terminates no TLS, so
+# every piece of this has to line up or the result is a working, readable
+# connection carrying the operator's face.
+print('\nTransport security')
 
-check('startup.sh sources the RunPod env file',
-      '/etc/rp_environment' in startup,
-      'inheritance via .bashrc is a convention, not a guarantee')
-check('the Docker entrypoint sources it too',
-      '/etc/rp_environment' in entrypoint)
-check('the SSH pipeline launch sources it',
-      '/etc/rp_environment' in orch_src,
-      '_shell_run uses a subshell, so it must be part of the launch command')
+server_src = read('pipeline', 'api', 'server.py')
+controller_src = read('desktop', 'controller.py')
+link_src = read('tools', 'pipeline_link.py')
+
+check('startup.sh generates a certificate',
+      'openssl req -x509' in startup)
+check('it fingerprints the DER form, not the PEM',
+      'outform DER' in startup and 'sha256sum' in startup,
+      'Python getpeercert(binary_form=True) is DER; a PEM hash never matches')
+check('startup.sh reports the fingerprint on a parseable line',
+      'CERT_FINGERPRINT' in startup and 'CERT_FINGERPRINT' in orch_src,
+      'the orchestrator reads it out of the transcript')
+check('startup.sh generates an API token',
+      'API_TOKEN' in startup and 'API_TOKEN' in orch_src)
+check('the certificate is generated once, not per boot',
+      '-f "${CERT_FILE}"' in startup,
+      'a fingerprint that changes on restart reads as an attack')
+
+check('the orchestrator writes both into .env',
+      'PHANTOM_TLS_FINGERPRINT' in orch_src and 'PHANTOM_API_TOKEN' in orch_src)
+check('the orchestrator refuses to continue without a fingerprint',
+      'did not report a certificate fingerprint' in orch_src,
+      'an unpinned wss to a self-signed cert is not better than cleartext')
+
+check('the server can serve TLS',
+      'PHANTOM_TLS_CERT' in server_src and '_build_ssl_context' in server_src)
+check('an unreadable certificate stops the server rather than downgrading it',
+      'Refusing to start in cleartext' in server_src)
+check('the server authenticates before joining the broadcast set',
+      server_src.index('_authenticate') < server_src.index('self._clients.add'),
+      'frames go to every client in _clients')
+check('the token comparison is constant-time',
+      'hmac.compare_digest' in server_src,
+      'otherwise a token can be found a character at a time')
+
+check('the desktop pins the fingerprint',
+      '_check_pin' in controller_src and 'PHANTOM_TLS_FINGERPRINT' in controller_src)
+check('the desktop sends the token in its first frame',
+      'PHANTOM_API_TOKEN' in controller_src)
+check('the measurement tools share one connector',
+      'pipeline_link' in read('tools', 'stats.py')
+      and 'pipeline_link' in read('tools', 'realism.py')
+      and 'pipeline_link' in read('tools', 'sweep_levers.py'),
+      'three hand-rolled ws:// strings is how three answers to one question start')
+check('that connector pins too',
+      'load_verify_locations' in link_src and 'fingerprint mismatch' in link_src)
+
+# ── Instance environment actually reaches the processes ───────────
+print('\nInstance environment delivery')
+
+check('startup.sh sources the instance env file',
+      '/etc/environment' in startup,
+      'Vast own docs warn those variables are not in an SSH session by default')
+check('the pipeline launch carries the forwarded settings',
+      '_remote_env_exports' in orch_src,
+      'exec_command opens no login shell, so it must be part of the command')
+check('the launch sources the cuDNN path file',
+      'cudnn.sh' in orch_src,
+      'without it ONNX falls back to CPU on a GPU that is billing')
 
 # ── Phase timing agreement ─────────────────────────────────────────────
 print('\nCold-start measurement')
 
 check('startup.sh emits parseable phase lines',
-      'PHASE ' in startup and 'VOLUME ' in startup)
+      'PHASE ' in startup and 'DISK ' in startup)
 check('the orchestrator parses that exact prefix',
-      'PHASE ' in orch_src and 'VOLUME ' in orch_src)
-check('startup.sh reports whether the volume was warm or empty',
-      'VOLUME_STATE' in startup)
+      'PHASE ' in orch_src and 'DISK ' in orch_src)
+check('startup.sh reports whether the disk was warm or empty',
+      'DISK_STATE' in startup,
+      'it asked about a network volume on RunPod; here it is the instance disk, '
+      'which does not outlive terminate')
 check('the orchestrator absorbs inner phases into remote-setup',
       "'remote-setup'" in orch_src or '"remote-setup"' in orch_src)
 
@@ -616,8 +687,8 @@ check('the dot is part of the match',
 for ext in ('.gif', '.heic', '.mp4', '.txt'):
     check('%s is refused' % ext, not ff_helpers.has_image_extension('x' + ext))
 
-# The list is a claim about what OpenCV can decode, and nothing was checking
-# it. `.gif` is excluded on exactly this basis, so the basis is worth proving.
+# The list is a claim about what OpenCV can decode on any build, and nothing
+# was checking it. See the gif case below for why that wording matters.
 import numpy as _np  # noqa: E402
 import cv2 as _cv2  # noqa: E402
 import tempfile as _tempfile  # noqa: E402
@@ -631,19 +702,35 @@ for _ext in ff_helpers.IMAGE_EXTENSIONS:
     _back = _cv2.imread(_path) if _wrote else None
     check('OpenCV round-trips %s' % _ext,
           _back is not None and _back.shape == _probe.shape,
-          'the list claims these are readable; .gif is excluded for failing this')
+          'the list is a claim about what OpenCV decodes on every build')
 
-# Hex rather than an escaped byte literal: this is the smallest valid GIF,
-# and the point is that OpenCV refuses a *well-formed* one.
+# GIF is the interesting case, and the reason it stays off the list has
+# changed. It used to be "OpenCV cannot read one". OpenCV 4.13 can, and older
+# builds cannot — so support now depends on which wheel is installed.
+#
+# That is a stronger reason to exclude it, not a weaker one. It is exactly the
+# bug `IMAGE_EXTENSIONS` was made a fixed tuple to kill: `.webp` resolved on
+# one machine and not the next, while the picker offered it either way, so
+# selecting one did nothing at all with no message. A format whose support
+# varies by environment must not be on a list that has to mean the same thing
+# everywhere.
+#
+# Hex rather than an escaped byte literal: this is the smallest valid GIF, so
+# whatever OpenCV does with it, it is not failing on a malformed file.
 _gif = _os.path.join(_work, 'x.gif')
 with open(_gif, 'wb') as _fh:
     _fh.write(bytes.fromhex(
         '47494638396101000100800000000000ffffff21f90401000000002c0000'
         '0000010001000002024401003b'
     ))
-check('and still cannot read a gif, which is why it is not on the list',
-      _cv2.imread(_gif) is None,
-      'if this ever passes, gif can be added rather than refused')
+_reads_gif = _cv2.imread(_gif) is not None
+print('     (this OpenCV {} {} read a gif)'.format(
+    _cv2.__version__, 'CAN' if _reads_gif else 'cannot'))
+check('gif is excluded regardless of what this OpenCV can decode',
+      '.gif' not in ff_helpers.IMAGE_EXTENSIONS
+      and not ff_helpers.has_image_extension('x.gif'),
+      'support varies by OpenCV build, which is the webp bug that made this '
+      'list a fixed tuple in the first place')
 
 check('both file dialogs offer the same list',
       bridge_photo_src.count('_IMAGE_FILTER') >= 3
@@ -847,7 +934,7 @@ check('the card offers a way back',
 
 # ── Everything parses ──────────────────────────────────────────────────
 print('\nSyntax')
-for path in (('runpod', 'orchestrator.py'), ('runpod', 'prewarm.py'),
+for path in (('vast', 'orchestrator.py'), ('vast', 'prewarm.py'),
              ('firebase', 'functions', 'main.py'), ('desktop', 'auth.py'),
              ('desktop', 'codes.py'), ('tools', 'mint_codes.py')):
     name = '/'.join(path)

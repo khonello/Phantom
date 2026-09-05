@@ -14,14 +14,14 @@ than a live call.
 **Three things it cannot express, all handled here.**
 
 1. **torch is not installed on Windows or Linux by that file.** It is pinned to
-   macOS only, because the RunPod image ships torch already. Locally, nothing
+   macOS only, because the base image ships torch already. Locally, nothing
    installs it until `gfpgan` pulls one in as a dependency — and the default
    PyPI wheel on Windows is the **CPU** build. A requirements file cannot name
    PyTorch's own index, so it is installed here explicitly.
 
 2. **insightface depends on `onnxruntime`, the CPU wheel.** Both packages write
    the same `onnxruntime/` directory, so whichever pip resolves last wins and
-   the GPU build disappears. `runpod/startup.sh` removes the CPU wheel after
+   the GPU build disappears. `vast/startup.sh` removes the CPU wheel after
    the fact; this does the same thing.
 
 3. **onnxruntime-gpu needs cuDNN 9 on the loader path.** `nvidia-cudnn-cu12`
@@ -35,7 +35,7 @@ against numpy 1.x, and numpy 2 breaks its bridge with
 `_ARRAY_API not found`.
 
 **Not run against a real GPU by its author.** The steps mirror
-`runpod/startup.sh`, which is proven on a pod, but this path has not been
+`vast/startup.sh`, which is proven on an instance, but this path has not been
 executed on a local NVIDIA machine. `--check` is safe everywhere and is what
 tells you whether it worked.
 """
@@ -99,7 +99,7 @@ def cudnn_dir() -> Optional[str]:
     """
     Directory holding cuDNN inside the installed `nvidia-cudnn-cu12`.
 
-    Platform-dependent, which is why `runpod/cudnn_path.py` cannot be reused:
+    Platform-dependent, which is why `vast/cudnn_path.py` cannot be reused:
     that one looks for `libcudnn.so.9` under `lib`, and on Windows the library
     is `cudnn64_9.dll` under `bin`.
     """

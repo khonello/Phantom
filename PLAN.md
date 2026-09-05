@@ -201,6 +201,13 @@ Resolution:
 
 ### Phase 4B — RunPod Cloud Deployment
 
+> **Superseded, 2026-09-03.** The deployment moved to Vast.ai; see
+> [docs/VAST_MIGRATION.md](docs/VAST_MIGRATION.md). The filenames and settings
+> named in this phase (`RUNPOD_DEPLOYMENT.md`, `runpod/`, `RUNPOD_*`) no longer
+> exist. They are left as written because this file is a record of what was
+> done in March, not a description of what is there now — renaming them would
+> make it a record of something that never happened.
+
 #### Task 4B.1 — Create RunPod deployment guide
 - Create `RUNPOD_DEPLOYMENT.md` with:
   - Step-by-step pod creation in RunPod UI

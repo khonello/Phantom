@@ -1,17 +1,25 @@
-# Orchestrator dependencies — local machine only, not needed on the pod
-# Install only if using runpod/orchestrator.py to manage pods via Python API
+# Orchestrator dependencies — local machine only, not needed on the instance
+# Install only if using vast/orchestrator.py to manage GPU instances
 # Usage: pip install -r requirements-orchestrator.txt
 
-runpod>=1.6.0
+# No vendor SDK. The RunPod version pulled in `runpod`, which was needed for
+# GraphQL that had no REST equivalent. Vast's REST API is complete and
+# documented, `requests` reaches all of it, and the search endpoint answers
+# without a key at all — so `offers` works before an account exists, which is
+# the command someone runs to decide whether to open one.
 python-dotenv>=1.0.0
 requests>=2.28.0
 
 # Every tool that talks to a running pipeline: sweep_levers.py, stats.py and
 # realism.py all open the WebSocket directly. It was installed in the working
-# venv and missing here, so a fresh machine could manage pods and then fail on
-# the first command sent to one.
+# venv and missing here, so a fresh machine could manage instances and then
+# fail on the first command sent to one.
 websockets>=12.0
 
-# Only needed for RUNPOD_DEPLOY_MODE=ssh (development mode)
-# Docker mode does not require paramiko
+# SSH and SFTP to the instance: setup, `logs`, `run`, `push` and `pull`.
+#
+# Not optional any more, and that is the shape of the deployment rather than an
+# oversight. RunPod had a docker mode that needed no SSH because the image
+# carried everything; here the instance is a stock CUDA image that startup.sh
+# builds on, so every deploy goes over SSH.
 paramiko>=3.0.0

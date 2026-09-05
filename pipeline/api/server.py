@@ -15,6 +15,7 @@ Server listens on ws://host:9000/ws
 Health check: send {"action": "health"}, receive {"status": "healthy", "uptime": <seconds>}
 """
 
+import hmac
 import json
 import os
 import queue
@@ -124,11 +125,11 @@ class WebSocketAPIServer:
         # Start time for uptime reporting
         self._start_time = time.time()
 
-        # Auto-stop timer — stops the RunPod pod after RUNPOD_MAX_UPTIME minutes
-        # to prevent billing overruns. Configurable via env vars; disabled if
-        # RUNPOD_MAX_UPTIME is 0 or unset.
-        self._auto_stop_max = int(os.getenv('RUNPOD_MAX_UPTIME', '0')) * 60  # seconds
-        self._auto_stop_warning = int(os.getenv('RUNPOD_STOP_WARNING', '5')) * 60  # seconds
+        # Auto-stop timer — stops the Vast instance after VAST_MAX_UPTIME
+        # minutes to prevent billing overruns. Configurable via env vars;
+        # disabled if VAST_MAX_UPTIME is 0 or unset.
+        self._auto_stop_max = int(os.getenv('VAST_MAX_UPTIME', '0')) * 60  # seconds
+        self._auto_stop_warning = int(os.getenv('VAST_STOP_WARNING', '5')) * 60  # seconds
         self._auto_stop_deadline = 0.0  # set on start()
         self._auto_stop_thread: Optional[threading.Thread] = None
 
@@ -240,6 +241,95 @@ class WebSocketAPIServer:
 
     # ── Server loop ──────────────────────────────────────────────────────────
 
+    def _build_ssl_context(self) -> Optional[Any]:
+        """
+        TLS for the WebSocket, when the instance was given a certificate.
+
+        RunPod terminated TLS at its proxy and handed out a wss:// hostname.
+        Vast maps this port to a random external port on a shared public IP and
+        terminates nothing, so on a rented machine the choice is between
+        serving the operator's face in cleartext and doing this.
+
+        Off when the paths are unset, which is how a local run stays plain
+        ws:// — `desktop.py` against a pipeline on the same machine has no
+        network to protect, and requiring a certificate there would only mean
+        generating one nobody checks.
+
+        A missing or unreadable certificate is fatal rather than a downgrade.
+        Falling back to cleartext would be the silent-CPU-fallback mistake in a
+        worse place: the session would work, look identical, and be readable by
+        anyone on the path.
+        """
+        cert = os.getenv('PHANTOM_TLS_CERT', '').strip()
+        key = os.getenv('PHANTOM_TLS_KEY', '').strip()
+        if not cert or not key:
+            return None
+
+        import ssl
+        if not os.path.isfile(cert) or not os.path.isfile(key):
+            emit_error(
+                f'PHANTOM_TLS_CERT/KEY set but not readable ({cert}, {key}). '
+                'Refusing to start in cleartext.',
+                scope='API_SERVER',
+            )
+            raise SystemExit(1)
+
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(cert, key)
+        return context
+
+    def _authenticate(self, websocket: Any, client_addr: Any) -> bool:
+        """
+        Require the shared token in the first frame, before anything is sent.
+
+        `docs/ACCEPTED_RISKS.md` accepted the unauthenticated WebSocket partly
+        because the RunPod proxy URL was "pod-specific and unguessable in
+        practice". On Vast the address is an IP and a port on a shared host,
+        which is neither, so the move has to close this rather than inherit it.
+
+        Unset means open, which keeps local development and the test suite
+        working exactly as before. That is a real weakening of the default, and
+        it is why `vast/startup.sh` always generates a token: the deployment
+        that needs it never runs without one.
+        """
+        expected = os.getenv('PHANTOM_API_TOKEN', '').strip()
+        if not expected:
+            return True
+
+        try:
+            # Ten seconds: long enough for a saturated uplink to deliver one
+            # small frame, short enough that a port scanner holding the
+            # socket open does not occupy a slot indefinitely.
+            message = websocket.recv(timeout=10)
+        except Exception:
+            self._reject(websocket, client_addr, 'no opening frame')
+            return False
+
+        token = ''
+        if isinstance(message, str):
+            try:
+                token = str((json.loads(message) or {}).get('token') or '')
+            except (ValueError, AttributeError):
+                token = ''
+
+        # compare_digest so a wrong token cannot be found a character at a time.
+        if not token or not hmac.compare_digest(token, expected):
+            self._reject(websocket, client_addr, 'bad or missing token')
+            return False
+
+        # The opening frame is a real command, so it is answered rather than
+        # consumed — otherwise every client would have to send `health` twice.
+        self._handle_text_message(websocket, message)
+        return True
+
+    def _reject(self, websocket: Any, client_addr: Any, why: str) -> None:
+        """Close an unauthenticated connection, saying nothing useful to it."""
+        emit_status(f'Rejected {client_addr}: {why}', scope='API_SERVER')
+        try:
+            websocket.close(code=1008, reason='unauthorized')
+        except Exception:
+            pass
+
     def _server_loop(self) -> None:
         """Main WebSocket server loop using websockets.sync.server."""
         try:
@@ -252,6 +342,13 @@ class WebSocketAPIServer:
                     client_addr = websocket.remote_address
                 except Exception:
                     client_addr = 'unknown'
+
+                # Authenticate BEFORE joining the broadcast set. The order is
+                # the whole point: frames go to every client in `_clients`, so
+                # a connection added first and checked second would receive the
+                # operator's swapped video in the window between the two.
+                if not self._authenticate(websocket, client_addr):
+                    return
 
                 with self._clients_lock:
                     self._clients.add(websocket)
@@ -286,10 +383,15 @@ class WebSocketAPIServer:
                         self._arm_session_sweep()
 
             def process_request(connection: Any, request: Any) -> Any:
-                """Respond to plain HTTP requests (RunPod proxy health probes).
+                """Respond to plain HTTP requests (proxy and port health probes).
 
-                WebSocket upgrades pass through unchanged. Plain HTTP GETs
-                get a 200 OK so the RunPod proxy considers the port alive.
+                WebSocket upgrades pass through unchanged. Plain HTTP GETs get
+                a 200 OK so anything probing the port considers it alive.
+
+                Deliberately answered before authentication: this says only
+                that a socket is listening, which is already observable from
+                the outside, and a health probe that had to hold a credential
+                would be one more place for the credential to live.
                 """
                 from http import HTTPStatus
                 from websockets.datastructures import Headers
@@ -304,18 +406,26 @@ class WebSocketAPIServer:
                     body=b'OK\n',
                 )
 
+            ssl_context = self._build_ssl_context()
+            serve_kwargs: Dict[str, Any] = {
+                'max_size': 64 * 1024 * 1024,  # 64 MB max message (for file transfers)
+                'ping_interval': 30,
+                'ping_timeout': 120,  # generous for high-latency / saturated links
+                'process_request': process_request,
+            }
+            if ssl_context is not None:
+                serve_kwargs['ssl'] = ssl_context
+
             with ws_serve(
                 handler,
                 '0.0.0.0',
                 self.port,
-                max_size=64 * 1024 * 1024,  # 64 MB max message (for file transfers)
-                ping_interval=30,
-                ping_timeout=120,  # generous timeout for high-latency / saturated links
-                process_request=process_request,
+                **serve_kwargs,
             ) as server:
                 self._ws_server = server
+                scheme = 'wss' if ssl_context is not None else 'ws'
                 emit_status(
-                    f'WebSocket server listening on ws://0.0.0.0:{self.port}/ws',
+                    f'WebSocket server listening on {scheme}://0.0.0.0:{self.port}/ws',
                     scope='API_SERVER',
                 )
                 # serve_forever() drives the accept loop — without it connections
@@ -665,11 +775,26 @@ class WebSocketAPIServer:
                 return
 
     def _stop_pod(self) -> None:
-        """Stop the RunPod pod to halt billing. Falls back to sys.exit if API fails."""
-        pod_id = os.getenv('RUNPOD_POD_ID', '')
-        api_key = os.getenv('RUNPOD_API_KEY', '')
+        """
+        Stop the Vast instance to halt GPU billing.
 
-        emit_status('Auto-stop deadline reached — stopping pod...', scope='AUTO_STOP')
+        Stop rather than destroy, deliberately: a stopped instance keeps its
+        disk, so the venv and the model weights survive and the next session
+        resumes warm. Nothing is baked into an image, so destroying here would
+        make every auto-stop cost a full cold start.
+
+        It does not halt billing completely — storage keeps charging while the
+        instance exists — which is the trade recorded in
+        docs/VAST_MIGRATION.md and the reason VAST_DISK is sized rather than
+        left generous.
+
+        Falls back to exiting the process, which frees nothing but at least
+        stops the pipeline pretending to serve a session that has ended.
+        """
+        instance_id = os.getenv('VAST_INSTANCE_ID', '')
+        api_key = os.getenv('VAST_API_KEY', '')
+
+        emit_status('Auto-stop deadline reached — stopping instance...', scope='AUTO_STOP')
         self._broadcast_text({
             'type': 'event',
             'event': 'auto_stop',
@@ -679,26 +804,32 @@ class WebSocketAPIServer:
         # Give clients a moment to receive the final event
         time.sleep(1)
 
-        if pod_id and api_key:
+        if instance_id and api_key:
             try:
-                # The runpod SDK ships no type information, so mypy sees a
-                # module without these attributes.
-                import runpod
-                runpod.api_key = api_key  # type: ignore[attr-defined]
-                runpod.stop_pod(pod_id)  # type: ignore[attr-defined]
+                import requests
+                resp = requests.put(
+                    f'https://console.vast.ai/api/v0/instances/{instance_id}/',
+                    headers={
+                        'Authorization': f'Bearer {api_key}',
+                        'Content-Type': 'application/json',
+                    },
+                    json={'state': 'stopped'},
+                    timeout=30,
+                )
+                resp.raise_for_status()
                 print(
-                    f'[AUTO_STOP] Pod {pod_id} stopped via RunPod API.',
+                    f'[AUTO_STOP] Instance {instance_id} stopped via Vast API.',
                     file=sys.stderr,
                 )
             except Exception as e:
                 print(
-                    f'[AUTO_STOP] RunPod API stop failed: {e} — exiting process.',
+                    f'[AUTO_STOP] Vast API stop failed: {e} — exiting process.',
                     file=sys.stderr,
                 )
                 sys.exit(0)
         else:
             print(
-                '[AUTO_STOP] RUNPOD_POD_ID or RUNPOD_API_KEY not set — exiting process.',
+                '[AUTO_STOP] VAST_INSTANCE_ID or VAST_API_KEY not set — exiting process.',
                 file=sys.stderr,
             )
             sys.exit(0)

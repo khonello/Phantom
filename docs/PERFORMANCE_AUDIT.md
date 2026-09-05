@@ -296,7 +296,7 @@ deadline is a factor, not a margin. The options are honest ones:
 2. **Port the compositor to torch.** CLAUDE.md's route —
    `affine_grid`/`grid_sample` for the warps, elementwise ops for the rest — and
    it is now a *code* change rather than a dependency one: torch is on the pod,
-   `pipeline/core.py` imports it unconditionally, and the RunPod image supplies
+   `pipeline/core.py` imports it unconditionally, and the instance image supplies
    it. Transfers are trivial (a 640x360 frame is 691KB, ~0.03ms over PCIe 4.0).
    This is where the 28-allocations-per-frame problem in §5 actually goes away.
 3. **Do neither until the pod's latency report says compute is the largest
