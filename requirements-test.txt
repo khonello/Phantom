@@ -1,0 +1,54 @@
+# Test dependencies — the unit suite, and nothing else.
+#
+# `python -m pytest tests/ -q` runs in about a minute on any machine, with no
+# GPU, no model weights and no multi-gigabyte install, because tests/conftest.py
+# stubs the ML layer into sys.modules. This file is what makes that claim
+# installable rather than remembered: it lived as an inline `pip install` line
+# in .github/workflows/ci.yml, so the one install nothing outside CI could
+# reproduce was the one every contributor needs first.
+#
+# Usage: pip install -r requirements-test.txt
+#
+# Deliberately NOT requirements-ci.txt, which pulls the whole CPU runtime —
+# torch, tensorflow, insightface, onnxruntime — because the end-to-end job does
+# a real batch swap with real models. That job proves the models work; this one
+# proves the logic around them does. Conflating them would put several
+# gigabytes in front of a one-minute test run.
+
+pytest>=7.0.0
+
+# The conftest stubs cover insightface, onnxruntime, torch and tensorflow. They
+# deliberately do not cover these two: the guards, the compositor's realism
+# metrics and the texture extractor are arithmetic over real arrays, so a stub
+# there would only test the stub.
+numpy>=1.23.5
+# Headless because nothing in the suite opens a window, and the GUI build pulls
+# system Qt libraries a CI container does not have.
+opencv-python-headless>=4.7.0
+
+# On the pipeline's import chain at module scope, so it is needed to import the
+# package at all rather than by any test directly.
+tqdm>=4.65.0
+
+# The transport tests: TLS fingerprint pinning, the API token, and a real
+# client/server round trip over the wss:// link the Vast migration introduced.
+# Without it six of them skip, and they skip *quietly* — a green run that never
+# opened a socket reads exactly like one that did.
+websockets>=12.0
+
+# Qt, for the two tests that cover the desktop. Essentials rather than the
+# full PySide6 distribution: desktop/ and tests/ import only QtCore, QtGui,
+# QtQml, QtQuick and QtWidgets, all of which Essentials carries. Plain
+# `PySide6` additionally pulls pyside6-addons — a 168 MB wheel of WebEngine,
+# Qt3D, Charts and the rest, none of which anything here imports.
+#
+# What it unlocks:
+#   test_desktop_layout.py     the recorded QML module list against main.qml's
+#                              own imports - the drift that makes a build start,
+#                              produce no root object, and exit -1 saying nothing
+#   test_uplink_resilience.py  the desktop's capture and send threads
+#
+# Both set QT_QPA_PLATFORM=offscreen themselves, so no display is needed, and
+# both use importorskip - so a machine where Qt cannot load degrades to a skip
+# rather than a failure.
+PySide6-Essentials>=6.5.0
