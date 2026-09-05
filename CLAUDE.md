@@ -633,6 +633,13 @@ Lives in `_search_offers`, `_rank`, `_find_offer` and `_create_instance` in
 ## Quick Commands
 
 ### Machine setup
+**[OPERATING_ENVIRONMENT.md](OPERATING_ENVIRONMENT.md)** — the constraints that
+are **ours, not the product's**: the operator's uplink, their machine, and the
+measurements that separate a bad link from a bad pipeline. Read it before
+concluding anything is broken. It carries the uplink each preset needs, what the
+badge readings mean, and a log of things that looked like product faults and
+were not.
+
 
 **[docs/VAST_MANUAL_SETUP.md](docs/VAST_MANUAL_SETUP.md)** — everything on
 Vast.ai that no script here can do: account, credit, the two API keys, the SSH
