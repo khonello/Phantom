@@ -1070,6 +1070,46 @@ def _connect_ssh(instance: Dict[str, Any]) -> Any:
     raise AssertionError("unreachable")
 
 
+def _console_safe() -> None:
+    """
+    Make stdout survive whatever the instance prints down the transcript.
+
+    The remote half of a deploy is not ours to sanitise. pip draws progress with
+    box-drawing characters, apt and git emit UTF-8 freely, and a Windows console
+    defaults to cp1252 - so sys.stdout.write raises UnicodeEncodeError and takes
+    the orchestrator down mid-install. That is an expensive way to lose a
+    deploy: the instance carries on billing, the work is abandoned, and the
+    traceback names an encoding rather than anything that actually went wrong.
+
+    Reconfigure where that is supported, and fall back to per-line replacement
+    in `_printable` where it is not.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
+
+
+def _printable(text: str) -> str:
+    """
+    `text`, guaranteed to survive an encode to the console's encoding.
+
+    Belt to `_console_safe`'s braces: a stream that cannot be reconfigured -
+    already wrapped, redirected by a caller, replaced in a test - still must not
+    raise while echoing a line the instance wrote.
+    """
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        text.encode(encoding)
+        return text
+    except (UnicodeEncodeError, LookupError):
+        return text.encode(encoding, "replace").decode(encoding, "replace")
+
+
 def _redact(text: str, secrets: Optional[List[str]] = None) -> str:
     """
     Blank out anything that must not reach a terminal, a log or a screen share.
@@ -1120,14 +1160,14 @@ def _ssh_run(client: Any, command: str, label: str, check: bool = True,
         line = raw.rstrip("\n")
         chunks.append(raw)
         if line.strip():
-            sys.stdout.write("  " + _redact(line, secrets) + "\n")
+            sys.stdout.write("  " + _printable(_redact(line, secrets)) + "\n")
             sys.stdout.flush()
 
     exit_code = channel.recv_exit_status()
     err = stderr.read().decode("utf-8", errors="replace").strip()
     if err:
         for line in err.splitlines():
-            sys.stdout.write("  " + _redact(line, secrets) + "\n")
+            sys.stdout.write("  " + _printable(_redact(line, secrets)) + "\n")
         chunks.append(err)
 
     if check and exit_code != 0:
@@ -1871,6 +1911,7 @@ def _warn_existing_instance(instance_id: str) -> None:
 
 def main() -> None:
     """Parse args and dispatch."""
+    _console_safe()
     parser = argparse.ArgumentParser(
         description="Phantom Vast.ai Orchestrator",
         formatter_class=argparse.RawDescriptionHelpFormatter,
