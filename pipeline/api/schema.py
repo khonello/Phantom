@@ -55,16 +55,14 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         'det_size': 320,          # detector input; runs every frame, so this
                                   # is the single largest cost in the loop
         'aligned_size': 192,      # cheaper compositing
-        # ON, where it used to be off to skip an ONNX pass per frame. That
-        # saving was chosen when the GPU was the suspected constraint; it is
-        # not. At 15fps the deadline is 66.7ms and the pipeline measured 38.8ms
-        # *with* occlusion, so there is ~28ms of headroom - and occlusion costs
-        # nothing on the uplink, which is what actually binds.
-        #
-        # It also makes the ladder honest. `fast` is the gear an operator drops
-        # to when the link is poor, and it should cost them resolution, not a
-        # hand across the face being overpainted.
-        'occluder': True,
+        # OFF, and put back after being switched on. `fast` is the gear an
+        # operator drops to when the link is failing, and the one configuration
+        # measured to hold on theirs - so it stays byte-identical to what was
+        # tested rather than carrying an untested change, however cheap that
+        # change looked. Occlusion costs nothing on the uplink and the pipeline
+        # has the headroom for it; that is an argument for revisiting this on a
+        # good link, not for altering the fallback gear.
+        'occluder': False,        # skips an ONNX pass per frame
         # Smoothing, scaled to frame rate
         'alpha': 0.7,
         'temporal_alpha': 0.7,

@@ -882,7 +882,7 @@ They are identical in every preset now.
 | **Uplink**              | 1.58 Mbps | 2.45 Mbps         | 3.96 Mbps  |
 | **Detector input**      | 320       | 448               | 448        |
 | **Compositing ceiling** | 192       | 256               | 256        |
-| **Occlusion masking**   | On        | On                | On         |
+| **Occlusion masking**   | Off       | On                | On         |
 | **Landmark EMA**        | 0.7       | 0.7               | 0.6        |
 | **Temporal EMA**        | 0.7       | 0.7               | 0.6        |
 | **Restore strength**    | 0.7       | 0.7               | 0.7        |
@@ -916,16 +916,18 @@ of the one leg that is asymmetric. It was never a usable live preset.
 `production` is now what `optimal` used to be, for a connection that can carry
 it.
 
-**Every preset masks occlusion now.** `fast` had it off to skip an ONNX pass per
-frame, chosen when the GPU was the suspected constraint. It is not: at 15fps the
-deadline is 66.7ms against a measured 38.8ms *with* occlusion, and the mask costs
-nothing on the uplink, which is what actually binds. It also makes the ladder
-honest - `fast` is the gear an operator drops to on a poor link, and that should
-cost them resolution, not a hand across the face being overpainted.
+**`fast` keeps occlusion masking OFF, and that was tried and reverted.** The
+argument for turning it on is sound on paper - at 15fps the deadline is 66.7ms
+against a measured 38.8ms *with* occlusion, and the mask costs nothing on the
+uplink. It was switched on and put back within the hour, for a reason worth
+recording: `fast` is the gear an operator drops to when the link is failing, and
+it is the one configuration measured to hold on theirs. A fallback that has
+drifted from what was tested is not a fallback. Revisit it on a good link, as a
+deliberate A/B, rather than folding it in alongside other changes.
 
-So the three differ on exactly two axes: `fast` gives up resolution and detector
-input, `production` spends frame rate and JPEG quality. Nothing that decides
-whether the output reads as real varies between them.
+So `fast` gives up resolution, detector input and occlusion; `production` spends
+frame rate and JPEG quality. Nothing that decides whether the output reads as
+real varies between them.
 
 The EMA factors vary with frame rate rather than with quality: smoothing across
 frames is smoothing across time, so the same factor reaches twice as far back at
