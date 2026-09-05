@@ -37,9 +37,47 @@ REQUIREMENTS_SNAPSHOT="${VENV_DIR}/.requirements-snapshot"
 # The orchestrator also exports the forwarded settings directly onto the launch
 # command, because a value that decides what a paid session measures should not
 # depend on a file existing.
+#
+# Read, never sourced. /etc/environment is a PAM environment file, not a shell
+# script: its values are unquoted, so `.` executes them. A real instance shipped
+#
+#     line 18: 471: No such file or directory
+#
+# and killed the whole deploy under `set -e`, because one Vast-written value
+# contained a space and bash ran its second word as a command. Vast owns that
+# file's contents and can add a variable at any time, so parsing it is the only
+# version of this that stays fixed.
+#
+# Keys are checked against the shell-identifier rule and anything else is
+# skipped rather than guessed at, one optional layer of surrounding quotes is
+# removed, and no expansion happens at any point.
 if [ -f /etc/environment ]; then
-    # shellcheck disable=SC1091
-    set -a; . /etc/environment; set +a
+    while IFS= read -r _line || [ -n "${_line}" ]; do
+        case "${_line}" in
+            ''|'#'*) continue ;;
+            *=*) ;;
+            *) continue ;;
+        esac
+        _key="${_line%%=*}"
+        _val="${_line#*=}"
+        # Negated class, not [A-Za-z0-9_]* - a glob's `*` matches any
+        # character, so the positive form accepts `not-a-valid-key` and export
+        # then rejects it, which under `set -e` is the failure being fixed.
+        case "${_key}" in
+            ''|[0-9]*|*[!A-Za-z0-9_]*) continue ;;
+        esac
+        # One optional layer of surrounding quotes, either kind. The strip
+        # uses `?` rather than naming the quote character, because a quote
+        # inside `${_val#...}` inside double quotes silently strips nothing -
+        # the pattern matches, the removal does not happen, and the value keeps
+        # its quotes. Wildcards have no such trap, and only run here when a
+        # matching pair was detected.
+        case "${_val}" in
+            '"'*'"'|"'"*"'") _val=${_val#?}; _val=${_val%?} ;;
+        esac
+        export "${_key}=${_val}"
+    done < /etc/environment
+    unset _line _key _val
 fi
 
 echo "=== Phantom Vast.ai Startup ==="

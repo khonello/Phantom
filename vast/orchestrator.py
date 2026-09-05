@@ -722,28 +722,48 @@ def _ws_address(instance: Dict[str, Any]) -> Optional[str]:
     return "{}:{}".format(str(ip).strip(), port)
 
 
-def _ssh_target(instance: Dict[str, Any]) -> Optional[Tuple[str, int]]:
+def _ssh_targets(instance: Dict[str, Any]) -> List[Tuple[str, int]]:
     """
-    (host, port) for SSH.
+    Every SSH endpoint worth trying, best first.
 
-    Prefer the direct mapping on the instance's own public IP — that is what
+    Direct first — the mapping on the instance's own public IP is what
     `runtype: ssh_direct` buys, and it is the difference between `exec_command`
-    working and the RunPod situation where it silently did nothing. `ssh_host`
-    is the proxy, kept only as a fallback for a host that declines direct.
+    working and the RunPod situation where it silently did nothing. The proxy
+    (`ssh_host`) comes second.
+
+    Both are returned rather than one being chosen, because a host can
+    *advertise* a direct port it does not actually accept. That is not
+    hypothetical: instance 49966815 published 81.2.141.194:40000, refused every
+    connection to it, and deployed perfectly over ssh3.vast.ai. `start` happened
+    to run before the direct mapping appeared and used the proxy; `run`, `logs`,
+    `push` and `pull` ran after, took the direct address on faith and timed out
+    after five minutes each. Reachability is measured, not read off a field —
+    the same lesson dlperf already taught about trusting a published identity.
     """
+    targets: List[Tuple[str, int]] = []
+
     ip = instance.get("public_ipaddr")
     port = _mapped_port(instance, 22)
     if ip and port:
-        return (str(ip).strip(), port)
+        targets.append((str(ip).strip(), port))
 
     host = instance.get("ssh_host")
     sport = instance.get("ssh_port")
     if host and sport:
         try:
-            return (str(host), int(sport))
+            proxy = (str(host), int(sport))
         except (TypeError, ValueError):
-            return None
-    return None
+            proxy = None
+        if proxy and proxy not in targets:
+            targets.append(proxy)
+
+    return targets
+
+
+def _ssh_target(instance: Dict[str, Any]) -> Optional[Tuple[str, int]]:
+    """The preferred SSH endpoint, or None. See `_ssh_targets`."""
+    targets = _ssh_targets(instance)
+    return targets[0] if targets else None
 
 
 # ── Waiting ───────────────────────────────────────────────────────────────────
@@ -787,6 +807,45 @@ def _wait_for_tcp(host: str, port: int, timeout: int, label: str) -> None:
             time.sleep(_POLL_INTERVAL)
     print("ERROR: {} not reachable at {}:{} after {}s.".format(label, host, port, timeout))
     sys.exit(1)
+
+
+def _wait_for_any_tcp(
+    targets: List[Tuple[str, int]],
+    timeout: int,
+    label: str,
+) -> Optional[Tuple[str, int]]:
+    """
+    Wait until one of `targets` accepts a connection, and return it.
+
+    Each is tried in turn every round, rather than one being waited out before
+    the next is touched. During boot none of them answer, and spending the whole
+    timeout proving that about the first candidate is how a working proxy goes
+    unnoticed behind an advertised direct port.
+
+    Args:
+        targets: (host, port) pairs, best first
+        timeout: total seconds to keep trying, across all of them
+        label: what to call this in the output
+
+    Returns:
+        The endpoint that answered, or None if the deadline passed
+    """
+    if not targets:
+        return None
+    print("  Waiting for {} at {}...".format(
+        label, ", ".join("{}:{}".format(h, p) for h, p in targets)))
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        for host, port in targets:
+            try:
+                sock = socket.create_connection((host, port), timeout=5)
+                sock.close()
+                print("  {} is up at {}:{}.".format(label, host, port))
+                return (host, port)
+            except (socket.error, OSError):
+                continue
+        time.sleep(_POLL_INTERVAL)
+    return None
 
 
 def _wait_for_pipeline(ws_address: str, context: Any, token: Optional[str]) -> None:
@@ -979,12 +1038,17 @@ def _connect_ssh(instance: Dict[str, Any]) -> Any:
     connections are refused as a matter of course rather than as a fault.
     """
     paramiko = _require_paramiko()
-    target = _ssh_target(instance)
-    if target is None:
+    targets = _ssh_targets(instance)
+    if not targets:
         print("ERROR: instance exposes no SSH port yet.")
         sys.exit(1)
-    host, port = target
-    _wait_for_tcp(host, port, _SSH_TIMEOUT, "SSH")
+    reachable = _wait_for_any_tcp(targets, _SSH_TIMEOUT, "SSH")
+    if reachable is None:
+        print("ERROR: no SSH endpoint reachable after {}s. Tried: {}.".format(
+            _SSH_TIMEOUT,
+            ", ".join("{}:{}".format(h, p) for h, p in targets)))
+        sys.exit(1)
+    host, port = reachable
 
     key = _load_ssh_key(os.getenv("VAST_SSH_KEY_PATH", "~/.ssh/id_ed25519"))
     attempts = 12
@@ -1115,8 +1179,17 @@ def _setup_and_start(instance: Dict[str, Any], timer: Optional[BootTimer] = None
         if repo_url:
             _ssh_run(
                 client,
-                "[ -d {dir} ] && echo 'Repo present, skipping clone.' "
-                "|| git clone --progress {url} {dir}".format(dir=_REMOTE_PHANTOM_DIR, url=repo_url),
+                # Updated, not skipped. Skipping made every failed deploy
+                # poison the next one: the clone that a crashed run left behind
+                # was accepted as "present", so a fix pushed in between was
+                # never fetched and the instance failed again identically. A
+                # directory that is not a git checkout is a partial clone and
+                # is replaced outright.
+                "if [ -d {dir}/.git ]; then echo 'Repo present, updating.'; "
+                "git -C {dir} fetch --prune origin && "
+                "git -C {dir} reset --hard @{{u}}; "
+                "else rm -rf {dir} && git clone --progress {url} {dir}; fi".format(
+                    dir=_REMOTE_PHANTOM_DIR, url=repo_url),
                 "git-clone",
             )
         else:
@@ -1356,6 +1429,12 @@ def _create_instance(offer: Dict[str, Any]) -> str:
         print("ERROR: create returned no contract id: {}".format(resp))
         sys.exit(1)
     print("  Instance {} created.".format(instance_id))
+    # Written here, not at the end of a successful deploy. Billing starts
+    # now, so this is the first moment the id can be lost - and every
+    # failure after this line used to leave a running instance that `stop`
+    # could not name. It happened twice in one session; both times the id
+    # had to be read out of the scrollback by hand while the meter ran.
+    _update_env_key("VAST_INSTANCE_ID", instance_id)
     return str(instance_id)
 
 
@@ -1395,7 +1474,6 @@ def _boot(instance_id: str, timer: Optional[BootTimer] = None) -> None:
     _update_env_key("PHANTOM_TLS_FINGERPRINT", fingerprint)
     if token:
         _update_env_key("PHANTOM_API_TOKEN", token)
-    _update_env_key("VAST_INSTANCE_ID", instance_id)
 
     print("\nDone. Open the desktop:")
     print("  python desktop.py")
@@ -1493,6 +1571,9 @@ def cmd_terminate(instance_id: str) -> None:
         print("Aborted.")
         return
     _request("DELETE", "/instances/{}/".format(instance_id))
+    # The id names nothing now. Left behind, it makes the next `start`
+    # warn about an instance that cannot be looked up.
+    _update_env_key("VAST_INSTANCE_ID", "")
     print("Instance destroyed. Billing has stopped.")
 
 
@@ -1519,10 +1600,13 @@ def cmd_status(instance_id: str) -> None:
             print("URL:      wss://{}/ws".format(ws))
         else:
             print("URL:      not published yet")
-        target = _ssh_target(instance)
-        if target:
-            key_path = os.getenv("VAST_SSH_KEY_PATH", "~/.ssh/id_ed25519")
-            print("SSH:      ssh root@{} -p {} -i {}".format(target[0], target[1], key_path))
+        # Every endpoint, not just the preferred one: a host can advertise a
+        # direct port it refuses, and then the only line printed here is the
+        # one that does not work.
+        key_path = os.getenv("VAST_SSH_KEY_PATH", "~/.ssh/id_ed25519")
+        for index, (shost, sport) in enumerate(_ssh_targets(instance)):
+            label = "SSH:     " if index == 0 else "  or:    "
+            print("{} ssh root@{} -p {} -i {}".format(label, shost, sport, key_path))
     else:
         print("URL:      not available (status: {})".format(status))
 
