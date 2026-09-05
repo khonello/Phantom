@@ -1191,6 +1191,64 @@ def _shell_quote(value: str) -> str:
     return "'" + value.replace("'", "'\\''") + "'"
 
 
+def _require_direct_reachable(instance: Dict[str, Any]) -> None:
+    """
+    Refuse a host whose published ports do not answer from here.
+
+    The desktop reaches the pipeline at `public_ipaddr:<mapped 9000>`. There is
+    no proxy in front of it - that is the point of the Vast migration, and the
+    reason RunPod's `proxy.runpod.net` was dropped. So a host that publishes
+    port mappings and then accepts nothing on them cannot serve this product,
+    however good its GPU is.
+
+    Host 596679 did exactly that: an excellent offer on every visible axis -
+    RTX 4090, dlperf 97, 5.7GHz, and **98 open ports** in its own listing - on
+    which 40000 and 40013 both timed out while ssh3.vast.ai answered instantly.
+    The port count is a claim by the host, not a measurement, which is the same
+    trap that dlperf-per-offer already documents.
+
+    Checked through SSH, because SSH is the only port open before the pipeline
+    starts. If the direct SSH address refuses while the proxy answers, the
+    WebSocket port on the same IP will refuse too - and learning that after the
+    deploy costs a full cold start to find out nothing. Twice, in this case.
+
+    Silent when the host is fine, and when no direct address is published to
+    test against.
+    """
+    targets = _ssh_targets(instance)
+    if len(targets) < 2:
+        return
+
+    host, port = targets[0]
+    # Retried rather than sampled once: sshd binding the direct port a moment
+    # after the proxy is ready is a race, and calling that a dead host would be
+    # a false alarm that costs a good rental.
+    for _ in range(3):
+        try:
+            sock = socket.create_connection((host, port), timeout=8)
+            sock.close()
+            return
+        except (socket.error, OSError):
+            time.sleep(5)
+
+    print("")
+    print("ERROR: this host publishes ports it does not accept connections on.")
+    print("  {}:{} refused, while the SSH proxy answered.".format(host, port))
+    print("")
+    print("  The desktop connects straight to {}:<mapped 9000>, with no".format(host))
+    print("  proxy in front of it, so the pipeline would deploy correctly and")
+    print("  then be unreachable. Stopping now rather than after the install.")
+    print("")
+    preferred = os.getenv("VAST_PREFERRED_HOST", "").strip()
+    if preferred:
+        print("  VAST_PREFERRED_HOST={} is pinning this host. Clear it, or".format(preferred))
+        print("  set another id from `vast/orchestrator.py offers`.")
+    else:
+        print("  Re-run `start` to take the next offer, or pin a known-good")
+        print("  host with VAST_PREFERRED_HOST.")
+    sys.exit(1)
+
+
 def _setup_and_start(instance: Dict[str, Any], timer: Optional[BootTimer] = None) -> Tuple[str, str]:
     """
     Clone the repo if missing, run startup.sh, launch the pipeline.
@@ -1203,6 +1261,9 @@ def _setup_and_start(instance: Dict[str, Any], timer: Optional[BootTimer] = None
     fingerprint that no longer matches.
     """
     client = _connect_ssh(instance)
+    # Before apt, pip and the weights: an unreachable host is worth five
+    # seconds to detect and a full cold start to discover.
+    _require_direct_reachable(instance)
     try:
         # Before anything else, because the clone below needs git and the base
         # image does not ship it. startup.sh installs what the *pipeline*
