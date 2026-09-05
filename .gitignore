@@ -48,3 +48,7 @@ sweep*.json
 # derived from the repository rather than part of it — and it may carry .env,
 # which holds a live API key.
 *.iso
+
+# Link measurements from tools/measure_link.py. Machine- and day-specific,
+# and the whole point is comparing your own runs over time.
+link-history.json
