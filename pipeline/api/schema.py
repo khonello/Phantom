@@ -55,14 +55,75 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         'det_size': 320,          # detector input; runs every frame, so this
                                   # is the single largest cost in the loop
         'aligned_size': 192,      # cheaper compositing
-        'occluder': False,        # skips an ONNX pass per frame
+        # ON, where it used to be off to skip an ONNX pass per frame. That
+        # saving was chosen when the GPU was the suspected constraint; it is
+        # not. At 15fps the deadline is 66.7ms and the pipeline measured 38.8ms
+        # *with* occlusion, so there is ~28ms of headroom - and occlusion costs
+        # nothing on the uplink, which is what actually binds.
+        #
+        # It also makes the ladder honest. `fast` is the gear an operator drops
+        # to when the link is poor, and it should cost them resolution, not a
+        # hand across the face being overpainted.
+        'occluder': True,
         # Smoothing, scaled to frame rate
         'alpha': 0.7,
         'temporal_alpha': 0.7,
         'buffer_size': 3,
         'warmup_frames': 3,
     },
+    # The default, and it is chosen by UPLINK rather than by compute.
+    #
+    # Measured 2026-09-05 from West Africa to a Denmark RTX 4090: the pipeline
+    # held its 50ms deadline comfortably at p50 38.8ms with 7ms of headroom and
+    # guarded nothing across 1105 frames. The GPU was never the problem. What
+    # the operator saw as sluggish was the uplink - 640x360 q70 at 20fps is
+    # 3.96 Mbps, which delivered only 84% of frames, while 480x270 q60 at 15fps
+    # is 1.58 Mbps and delivered 91%. Switching by hand, they described the
+    # lower rate as "much smoother" immediately.
+    #
+    # So this preset keeps everything that decides how the output LOOKS -
+    # 640x360, det_size 448, occlusion masking, aligned 256 - and pays for it
+    # in frame rate and JPEG quality, which are the two axes that cost uplink
+    # without costing detail:
+    #
+    #     640x360 q70 @20fps   3.96 Mbps    was optimal, measured not smooth
+    #     640x360 q60 @15fps   2.45 Mbps    this
+    #     480x270 q60 @15fps   1.58 Mbps    fast, measured smooth
+    #
+    # 15fps rather than 12, and that floor is deliberate. Speech runs at 4-8
+    # syllables a second, so 12fps gives one to three frames per syllable and
+    # lip movement stutters - on a product whose entire subject is a talking
+    # face. The virtual camera also ticks at 30/s and repeats to fill, so at
+    # 12fps three frames in five that reach the call are repeats. 15 is the
+    # rate `fast` already runs and the one the operator judged acceptable.
     'optimal': {
+        **_LOOK,
+        'capture_width': 640,
+        'capture_height': 360,
+        'capture_fps': 15,
+        'jpeg_quality': 60,
+        'det_size': 448,
+        'aligned_size': 256,
+        'occluder': True,
+        # Matches `fast`, because both run at 15fps. Smoothing across frames is
+        # smoothing across time, so this factor belongs to the rate and not to
+        # the quality tier.
+        'alpha': 0.7,
+        'temporal_alpha': 0.7,
+        'buffer_size': 4,
+        'warmup_frames': 5,
+    },
+    # What `optimal` used to be. Same picture, 20fps and q70 instead of 15fps
+    # and q60 - so it costs 3.96 Mbps up, which is more than a home connection
+    # in West Africa carried on the day this was measured.
+    #
+    # The old `production` - 960x540 at 30fps, det_size 640, aligned 320 - is
+    # gone rather than renamed. docs/PERFORMANCE_AUDIT.md had it at 39ms of a
+    # 33ms deadline before detection, swap, restoration or encode, so it missed
+    # its frame budget on the compositor alone. It was never a usable live
+    # preset, and at 85 quality and 30fps it asked ~11 Mbps of the one leg that
+    # is asymmetric.
+    'production': {
         **_LOOK,
         'capture_width': 640,
         'capture_height': 360,
@@ -74,20 +135,6 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         'alpha': 0.6,
         'temporal_alpha': 0.6,
         'buffer_size': 4,
-        'warmup_frames': 5,
-    },
-    'production': {
-        **_LOOK,
-        'capture_width': 960,
-        'capture_height': 540,
-        'capture_fps': 30,
-        'jpeg_quality': 85,
-        'det_size': 640,
-        'aligned_size': 320,
-        'occluder': True,
-        'alpha': 0.5,
-        'temporal_alpha': 0.5,
-        'buffer_size': 5,
         'warmup_frames': 5,
     },
 }

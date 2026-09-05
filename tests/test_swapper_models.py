@@ -152,10 +152,26 @@ check('presets still own the compute knobs',
 fresh = FaceSwapConfig()
 fresh.apply_preset('production')
 fresh.apply_model_profile('hyperswap_1a_256')
+# Read from the schema rather than written out. This asserted `== 320`, which
+# was production's aligned ceiling until the preset was retuned for uplink
+# rather than compute - so a preset change broke a test about model profiles,
+# which is the wrong thing to be coupled to. What matters is the SOURCE of each
+# number: the ceiling comes from the preset, the floor from the model.
 check('profile applies after preset without the two fighting',
-      fresh.aligned_size == 320 and fresh.aligned_min == 256,
+      fresh.aligned_size == PRESETS['production']['aligned_size']
+      and fresh.aligned_min == 256,
       'ceiling {} from preset, floor {} from model'.format(
           fresh.aligned_size, fresh.aligned_min))
+
+# The two really are independent, which equal numbers would not demonstrate.
+other = FaceSwapConfig()
+other.apply_preset('fast')
+other.apply_model_profile('inswapper_128')
+check('a different preset and model move them independently',
+      other.aligned_size == PRESETS['fast']['aligned_size']
+      and other.aligned_min == 128,
+      'ceiling {} from preset, floor {} from model'.format(
+          other.aligned_size, other.aligned_min))
 
 # ── Compositing floor is honoured ──────────────────────────────────────
 print('\nCompositing floor')

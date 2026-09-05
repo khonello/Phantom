@@ -867,30 +867,75 @@ Desktop quality dropdown controls capture resolution, frame rate, and processing
 Presets trade latency against realism. Defined once in
 `pipeline/api/schema.py::PRESETS`, applied via `FaceSwapConfig.apply_preset()`.
 
-A preset picks **how much compute to spend. It does not change how the face
-looks.** `enhancer_weight` and `enhance_strength` decide whether the output reads
-as a real call or as AI, and neither costs anything to compute — so varying them
-per preset only meant "production" restored hardest and therefore looked most
-synthetic, while presenting itself as the best option. They are identical in
-every preset now.
+A preset picks **how much uplink and compute to spend. It does not change how
+the face looks.** `enhancer_weight` and `enhance_strength` decide whether the
+output reads as a real call or as AI, and neither costs anything to compute —
+so varying them per preset only meant "production" restored hardest and
+therefore looked most synthetic, while presenting itself as the best option.
+They are identical in every preset now.
 
 |                         | Fast      | Optimal (default) | Production |
 |-------------------------|-----------|-------------------|------------|
-| **Capture resolution**  | 480x270   | 640x360           | 960x540    |
-| **Frame rate**          | 15 fps    | 20 fps            | 30 fps     |
-| **JPEG quality**        | 60        | 70                | 85         |
-| **Detector input**      | 320       | 448               | 640        |
-| **Compositing ceiling** | 192       | 256               | 320        |
-| **Occlusion masking**   | Off       | On                | On         |
-| **Landmark EMA**        | 0.7       | 0.6               | 0.5        |
-| **Temporal EMA**        | 0.7       | 0.6               | 0.5        |
+| **Capture resolution**  | 480x270   | 640x360           | 640x360    |
+| **Frame rate**          | 15 fps    | 15 fps            | 20 fps     |
+| **JPEG quality**        | 60        | 60                | 70         |
+| **Uplink**              | 1.58 Mbps | 2.45 Mbps         | 3.96 Mbps  |
+| **Detector input**      | 320       | 448               | 448        |
+| **Compositing ceiling** | 192       | 256               | 256        |
+| **Occlusion masking**   | On        | On                | On         |
+| **Landmark EMA**        | 0.7       | 0.7               | 0.6        |
+| **Temporal EMA**        | 0.7       | 0.7               | 0.6        |
 | **Restore strength**    | 0.7       | 0.7               | 0.7        |
 | **Fidelity weight**     | 0.7       | 0.7               | 0.7        |
 | **Grain matching**      | On        | On                | On         |
 
+**The ladder is uplink, not compute, and that is a change.** Measured
+2026-09-05, West Africa to a Denmark RTX 4090: the pipeline held its 50ms
+deadline at p50 **38.8ms** with 7ms of headroom and guarded nothing across 1105
+frames. The GPU was never the constraint. What the operator saw as sluggish was
+the uplink — the old `optimal` at 3.96 Mbps delivered **84%** of frames, while
+`fast` at 1.58 Mbps delivered **91%**, and switching by hand read as "much
+smoother" immediately.
+
+So `optimal` now keeps everything that decides how the output *looks* —
+640x360, det_size 448, occlusion masking, aligned 256 — and pays in frame rate
+and JPEG quality, the two axes that cost uplink without costing detail. That is
+2.45 Mbps against 3.96.
+
+**15fps is a floor, not a target.** 12fps was considered and rejected: speech
+runs at 4-8 syllables a second, so 12fps gives one to three frames per syllable
+and lip movement stutters — on a product whose whole subject is a talking face.
+The virtual camera ticks at 30/s and repeats to fill, so at 12fps three frames
+in five reaching the call are repeats.
+
+**The old `production` — 960x540 at 30fps, det_size 640, aligned 320 — was
+deleted rather than renamed.** docs/PERFORMANCE_AUDIT.md had it at 39ms of a
+33ms deadline *before* detection, swap, restoration or encode, so it missed its
+budget on the compositor alone; and at q85 and 30fps it asked roughly 11 Mbps
+of the one leg that is asymmetric. It was never a usable live preset.
+`production` is now what `optimal` used to be, for a connection that can carry
+it.
+
+**Every preset masks occlusion now.** `fast` had it off to skip an ONNX pass per
+frame, chosen when the GPU was the suspected constraint. It is not: at 15fps the
+deadline is 66.7ms against a measured 38.8ms *with* occlusion, and the mask costs
+nothing on the uplink, which is what actually binds. It also makes the ladder
+honest - `fast` is the gear an operator drops to on a poor link, and that should
+cost them resolution, not a hand across the face being overpainted.
+
+So the three differ on exactly two axes: `fast` gives up resolution and detector
+input, `production` spends frame rate and JPEG quality. Nothing that decides
+whether the output reads as real varies between them.
+
 The EMA factors vary with frame rate rather than with quality: smoothing across
 frames is smoothing across time, so the same factor reaches twice as far back at
-15fps as it does at 30.
+15fps as it does at 30. `fast` and `optimal` share 0.7 because they share 15fps.
+
+**Do not delete `fast` until `optimal` has proven itself.** `fast` is the only
+configuration measured to hold on the operator's own connection - 91% of frames
+delivered against `optimal`'s old 84%. The new `optimal` at 2.45 Mbps is an
+estimate that it lands on the right side of that link, not a measurement, and
+without a lower gear a bad day has no remedy.
 
 Capture settings live in `PRESETS` and are read by both the pipeline's own
 `VideoCapture` loop and the desktop's webcam thread, so local and push mode
