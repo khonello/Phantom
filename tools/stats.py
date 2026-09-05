@@ -160,6 +160,17 @@ async def _run(args: argparse.Namespace) -> int:
             if message.get('type') != 'get_stats':
                 continue
 
+            # A failed reply carries the reason in `error`, and its `data` is
+            # the echoed request. Rendering that as a report prints every field
+            # as None - a confident, complete-looking answer to a question the
+            # pipeline refused. This tool exists to catch a silent failure; it
+            # must not be one.
+            if message.get('success') is False:
+                print('')
+                print('ERROR: the pipeline refused get_stats.')
+                print('  {}'.format(message.get('error') or 'no reason given'))
+                return 1
+
             data = message.get('data') or {}
             if args.json:
                 print(json.dumps(data, indent=2, sort_keys=True))

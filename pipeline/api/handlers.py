@@ -424,9 +424,16 @@ def handle_get_state(
     pipeline: Optional[ProcessingPipeline],
 ) -> ResponseMessage:
     """Return current pipeline state so a reconnecting client can sync its UI."""
+    # `hasattr` is not enough: the attribute exists from construction and
+    # holds None until `_build_processors` runs, which happens when a stream
+    # starts. So this raised AttributeError on any pipeline that had not
+    # streamed yet - which for get_stats is its whole purpose (run straight
+    # after a deploy, to check the GPU is really in use) and for get_state
+    # is a desktop reconnecting before the first stream.
     source_loaded = False
-    if pipeline is not None and hasattr(pipeline, '_swapping_proc'):
-        source_loaded = pipeline._swapping_proc.source_face is not None
+    swapping = getattr(pipeline, '_swapping_proc', None) if pipeline else None
+    if swapping is not None:
+        source_loaded = swapping.source_face is not None
 
     return ResponseMessage(
         type='get_state',
@@ -512,9 +519,16 @@ def handle_get_stats(
     """
     pipeline = ctx.pipeline
 
+    # `hasattr` is not enough: the attribute exists from construction and
+    # holds None until `_build_processors` runs, which happens when a stream
+    # starts. So this raised AttributeError on any pipeline that had not
+    # streamed yet - which for get_stats is its whole purpose (run straight
+    # after a deploy, to check the GPU is really in use) and for get_state
+    # is a desktop reconnecting before the first stream.
     source_loaded = False
-    if pipeline is not None and hasattr(pipeline, '_swapping_proc'):
-        source_loaded = pipeline._swapping_proc.source_face is not None
+    swapping = getattr(pipeline, '_swapping_proc', None) if pipeline else None
+    if swapping is not None:
+        source_loaded = swapping.source_face is not None
 
     swapper = swapper_models.resolve(config.swapper_model)
     enhancer = enhancer_models.resolve(config.enhancer_model)
