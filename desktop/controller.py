@@ -24,6 +24,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -181,6 +182,20 @@ class PipelineClient:
         self._ws: Optional[Any] = None
         self._ws_lock = threading.Lock()
         self._connected = False
+
+        # Uplink instrumentation. Cumulative; read as deltas between ticks so a
+        # link that degrades mid-session shows it rather than being averaged
+        # away under the minutes that went well — same reasoning as
+        # `Bridge._uplink_rate`.
+        #
+        # `send_blocked_ns` is the interesting one. `websockets.sync` blocks
+        # inside `send()` until the kernel accepts the bytes, so this is a
+        # direct measurement of send-buffer backpressure: microseconds on a link
+        # with headroom, tens of milliseconds on a saturated one. It is what
+        # `UplinkGovernor` steers on, and it was previously not measured at all.
+        self.send_frames = 0
+        self.send_blocked_ns = 0
+        self.send_contended = 0
 
         # Pending requests, keyed by request id rather than by action name.
         #
@@ -745,18 +760,45 @@ class PipelineClient:
         """Send a raw JPEG frame to the pipeline (fire-and-forget, non-blocking).
 
         Drops the frame silently if the connection is busy or unavailable.
+
+        **The send itself is not non-blocking, and that is the measurement.**
+        `websockets.sync` returns only once the kernel has accepted the bytes,
+        so on a saturated uplink this call sits here while the OS send buffer
+        drains. That time is recorded rather than hidden: it is the earliest and
+        most direct evidence that the link cannot carry the current gear, and
+        `UplinkGovernor` steers on it.
+
+        A frame lost to the lock is recorded separately, because it is a
+        different fault with the same symptom. The lock is held by an in-flight
+        command *or by a previous send still blocked*, so on a bad link this
+        counter climbs for a reason that has nothing to do with the command
+        traffic it was written for — and it used to be invisible.
         """
         if not self._connected:
             return
         if not self._ws_lock.acquire(blocking=False):
-            return  # drop frame — lock held by an in-flight command
+            self.send_contended += 1
+            return  # drop frame — lock held by an in-flight command, or a blocked send
+        started = time.perf_counter_ns()
         try:
             if self._ws is not None:
                 self._ws.send(jpeg_bytes)
+                self.send_frames += 1
         except Exception as e:
             print(f'[CONTROLLER] send_frame error: {type(e).__name__}: {e}', file=sys.stderr)
         finally:
+            self.send_blocked_ns += time.perf_counter_ns() - started
             self._ws_lock.release()
+
+    def uplink_counters(self) -> Tuple[int, int, int]:
+        """
+        Cumulative (frames sent, nanoseconds blocked in send, frames lost to the lock).
+
+        Plain reads of three ints, which under the GIL are atomic enough for a
+        counter nobody makes a decision on within a single window — the caller
+        differences them across a two-second tick.
+        """
+        return (self.send_frames, self.send_blocked_ns, self.send_contended)
 
     def cleanup_session(self, timeout: float = 5.0) -> Dict[str, Any]:
         """Erase the session on the pipeline: source, targets, outputs, embedding.

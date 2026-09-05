@@ -122,6 +122,20 @@ class WebSocketAPIServer:
         self._frame_queue: 'queue.Queue[Any]' = queue.Queue(maxsize=2)
         self._frame_sender_thread: Optional[threading.Thread] = None
 
+        # Both drop-oldest queues discard silently, and neither said so.
+        #
+        # That mattered more than it looks. A frame evicted here never comes
+        # back, so from the desktop it is indistinguishable from one the network
+        # lost — and the two want opposite remedies. Network loss means the
+        # uplink is over budget and the answer is a lower bitrate. Eviction here
+        # means frames arrived in a *burst* faster than a depth-2 queue could
+        # hold, which is what a saturated link does after each stall, and the
+        # answer is a smoother send schedule. `measure_link.py` reported 39% of
+        # frames missing at the old `optimal` with no way to tell which.
+        self._inbound_frames = 0
+        self._inbound_evicted = 0
+        self._broadcast_evicted = 0
+
         # Start time for uptime reporting
         self._start_time = time.time()
 
@@ -592,9 +606,11 @@ class WebSocketAPIServer:
         if fq is None:
             return
 
+        self._inbound_frames += 1
         try:
             fq.put_nowait((capture_ts, jpeg_bytes))
         except queue.Full:
+            self._inbound_evicted += 1
             # Drop the **oldest** frame and take this one. The previous version
             # dropped the arriving frame instead, which is backwards for a live
             # call: under pressure it kept a backlog of stale frames and threw
@@ -718,6 +734,8 @@ class WebSocketAPIServer:
         if self._auto_stop_max > 0 and self._auto_stop_deadline > 0:
             remaining = max(0.0, self._auto_stop_deadline - now)
 
+        arrived = self._inbound_frames
+        evicted = self._inbound_evicted
         return {
             'uptime_seconds': round(now - self._start_time, 1),
             'clients': len(getattr(self, '_clients', ()) or ()),
@@ -725,6 +743,18 @@ class WebSocketAPIServer:
             'auto_stop_remaining_seconds': (
                 None if remaining is None else round(remaining, 1)
             ),
+            # What the two drop-oldest queues discarded. `inbound_evicted` is
+            # the one to read first: it separates "the network lost the frame"
+            # from "the frame arrived in a burst and this end threw it away",
+            # which look identical from the desktop and want opposite fixes.
+            'frames': {
+                'inbound': arrived,
+                'inbound_evicted': evicted,
+                'inbound_evicted_pct': (
+                    round(100.0 * evicted / arrived, 1) if arrived else 0.0
+                ),
+                'broadcast_evicted': self._broadcast_evicted,
+            },
         }
 
     def _reset_auto_stop(self) -> None:
@@ -896,6 +926,7 @@ class WebSocketAPIServer:
         try:
             self._frame_queue.put_nowait(payload)
         except queue.Full:
+            self._broadcast_evicted += 1
             # Drop oldest, enqueue latest — keeps display current
             try:
                 self._frame_queue.get_nowait()

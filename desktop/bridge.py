@@ -25,7 +25,6 @@ from pipeline.api.schema import (
     MAX_VIDEO_BYTES,
     MAX_VIDEO_SECONDS,
     VIDEO_CHUNK_BYTES,
-    PRESETS,
 )
 from desktop import auth
 from desktop import effects as overlay_effects
@@ -39,6 +38,7 @@ from desktop.audio import (
     resolve_sample_rate,
 )
 from desktop.pacing import FramePacer
+from desktop.uplink import UplinkGovernor, capture_ceiling
 from desktop.voice import VoiceTransformer
 
 _PANEL_MAX_W = 800
@@ -397,7 +397,17 @@ class Bridge(QObject):
         self._uplink_bytes: int = 0
         self._uplink_frames: int = 0
         self._uplink_mark: Tuple[float, int, int] = (time.perf_counter(), 0, 0)
+        self._downlink_frames: int = 0
         self._latency_text: str = ''
+
+        # What frames are actually encoded and sent at, which is the operator's
+        # preset only while the link can carry it. `_quality` above is now the
+        # *ceiling*: the governor moves below it when the uplink saturates and
+        # climbs back when it recovers, and never exceeds it. See
+        # desktop/uplink.py.
+        self._governor = UplinkGovernor(self._quality)
+        # Counters at the previous tick, so each window is a delta.
+        self._uplink_probe_mark: Tuple[int, int, int, int] = (0, 0, 0, 0)
         # 'auto' defers to the swap model's profile, which is what
         # happened before this was a control.
         self._restoration: str = 'auto'
@@ -755,6 +765,10 @@ class Bridge(QObject):
         self._first_frame_warned = False
         self._ws_push_active.set()
         self._jitter_buffer.clear()
+        # A new stream is a new link as far as the governor is concerned: start
+        # at what the operator asked for and let this session's own evidence
+        # move it, rather than inheriting a gear the last one arrived at.
+        self._governor.reset()
         self._audio_capture.start()
         self._audio_playback.start()
         self._last_frame_time = time.time()
@@ -801,8 +815,12 @@ class Bridge(QObject):
             return
         data = state.get('data', {})
 
-        # Restore quality & enhance to match server
+        # Restore quality & enhance to match server. The server's preset is the
+        # operator's choice, so it sets the ceiling; the governor is then free
+        # to sit below it, and a reconnect must not read its own adaptation back
+        # as a new instruction.
         self._quality = data.get('quality', self._quality)
+        self._governor.set_ceiling(self._quality, now=time.perf_counter())
 
         preset = data.get('restoration_preset')
         if preset and preset != self._restoration:
@@ -1050,8 +1068,22 @@ class Bridge(QObject):
 
     @Slot(str)
     def setQuality(self, preset: str) -> None:
+        """
+        Set the uplink ceiling — the most this session will ever send.
+
+        **This no longer restarts the camera**, and that is the point. The
+        device is opened once at `capture_ceiling()` and every gear is a resize
+        of what it already delivers, so a change takes effect on the next frame
+        instead of costing the ~3.9 seconds `_configure_capture` measures for a
+        device renegotiation. Without that, adaptation would be unaffordable:
+        four seconds of black per gear change is worse than a saturated link.
+
+        An explicit choice applies immediately in both directions rather than
+        being climbed towards — someone who picks a gear expects to see it — and
+        the governor resumes adapting from there.
+        """
         self._quality = preset
-        self._start_webcam(self._webcam_index)
+        self._governor.set_ceiling(preset, now=time.perf_counter())
 
     @Property(str, notify=restorationChanged)
     def restoration(self) -> str:
@@ -2771,6 +2803,7 @@ class Bridge(QObject):
         audio = self._audio_playback.stats()
         skew_ms = self._av_skew_ms(stats, audio)
         uplink_mbps, uplink_fps = self._uplink_rate()
+        self._govern_uplink()
 
         # Non-zero means D is larger than the buffer can hold: frames are being
         # shown before their deadline to stop them being evicted unseen. That
@@ -2829,6 +2862,13 @@ class Bridge(QObject):
             )
             if stats.get('repeats'):
                 text += f' · {stats["repeats"]} held'
+            # Only when the governor is below what the operator chose. Naming
+            # the gear at all times would be noise; naming it when it disagrees
+            # with the dropdown explains a picture that got softer on its own,
+            # which otherwise reads as a fault rather than as a link protecting
+            # itself.
+            if self._governor.adapted:
+                text += f' · {self._governor.gear.name} (link)'
             # Only when it is worth acting on. Below one frame interval the
             # skew is quantisation in the display tick rather than a fault, and
             # a badge that always shows a number teaches people to ignore it.
@@ -2868,6 +2908,69 @@ class Bridge(QObject):
         if video_ms <= 0.0 or audio_ms <= 0.0:
             return None
         return video_ms - audio_ms
+
+    def _govern_uplink(self) -> None:
+        """
+        Show the governor one window of link behaviour, and log any gear change.
+
+        Called from the same two-second tick that publishes the latency readout,
+        so the window is the tick and the counters are differenced across it —
+        a link that degrades mid-session shows it, rather than being averaged
+        away under the minutes that went well.
+
+        Delivery is computed as **returned frames over sent frames within the
+        window**, which in steady state is a ratio of rates and therefore exact.
+        Comparing cumulative totals would under-report by the whole round trip,
+        since frames sent in the last ~350ms have not come back yet.
+        """
+        sent_total, blocked_total, contended_total = self._client.uplink_counters()
+        received_total = self._downlink_frames
+        sent_then, blocked_then, contended_then, received_then = self._uplink_probe_mark
+        self._uplink_probe_mark = (
+            sent_total, blocked_total, contended_total, received_total)
+
+        sent = sent_total - sent_then
+        received = received_total - received_then
+        contended = contended_total - contended_then
+        blocked_ms = (blocked_total - blocked_then) / 1_000_000.0
+        if sent <= 0:
+            return
+
+        block_per_frame = blocked_ms / sent
+        delivered = received / float(sent)
+
+        # A frame refused the lock never reached the socket, so it is not in
+        # `sent` and would otherwise vanish from both sides of the ratio. On a
+        # saturated link the lock is held by a *blocked send* rather than by
+        # command traffic, so this is uplink pressure by another route and
+        # belongs in the same number.
+        if contended:
+            delivered = received / float(sent + contended)
+
+        changed = self._governor.observe(
+            sent=sent + contended,
+            delivered_ratio=delivered,
+            block_ms_per_frame=block_per_frame,
+            now=time.perf_counter(),
+        )
+
+        if blocked_ms > 0 or contended:
+            print(
+                '[UPLINK] gear={} sent={} delivered={:.0f}% '
+                'blocked={:.1f}ms/frame contended={}'.format(
+                    self._governor.gear.name, sent, delivered * 100.0,
+                    block_per_frame, contended),
+                file=sys.stderr,
+            )
+
+        if changed:
+            gear = self._governor.gear
+            print(
+                '[UPLINK] {} -> {} ({}x{} q{} @{}fps): {}'.format(
+                    self._quality, changed, gear.width, gear.height,
+                    gear.jpeg_quality, gear.fps, self._governor.reason),
+                file=sys.stderr,
+            )
 
     def _uplink_rate(self) -> Tuple[float, float]:
         """Uplink megabits/sec and frames/sec since the previous call.
@@ -2912,6 +3015,7 @@ class Bridge(QObject):
 
         self._last_capture_ts = capture_ts
         self._last_frame_time = time.time()
+        self._downlink_frames += 1
         self._jitter_buffer.push(capture_ts, jpeg_bytes)
 
         # Drop the loading overlay once the first processed frame arrives,
@@ -3154,22 +3258,25 @@ class Bridge(QObject):
 
     def _capture_settings(self) -> Tuple[int, int, int, int]:
         """
-        Capture settings for the current quality preset.
+        What frames are currently encoded and sent at.
 
-        Read from `pipeline.api.schema.PRESETS` rather than a table of our own,
-        so the desktop's webcam and the pipeline's own VideoCapture loop cannot
-        disagree about what a preset means.
+        This is the **governor's gear**, not the operator's preset, and the two
+        differ whenever the link cannot carry what was chosen. Read from
+        `pipeline.api.schema.PRESETS` via `desktop.uplink`, so the desktop's
+        webcam and the pipeline's own VideoCapture loop cannot disagree about
+        what a preset means.
+
+        Note what this is *not*: the camera's own configuration. The device is
+        opened once at `capture_ceiling()` and never reconfigured — see
+        `_run_webcam` — because applying a preset to it costs about 3.9 seconds
+        to first frame, which is not a price an adaptive controller can pay
+        every time it acts.
 
         Returns:
             (width, height, fps, jpeg_quality)
         """
-        preset = PRESETS.get(self._quality) or PRESETS['optimal']
-        return (
-            int(preset['capture_width']),
-            int(preset['capture_height']),
-            int(preset['capture_fps']),
-            int(preset['jpeg_quality']),
-        )
+        gear = self._governor.gear
+        return (gear.width, gear.height, gear.fps, gear.jpeg_quality)
 
     # Consecutive uplink iterations that raised before the operator is told.
     # One is a hiccup; a run of them means the camera or the encode is broken
@@ -3274,11 +3381,24 @@ class Bridge(QObject):
 
         try:
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            # The device is configured **once**, at the largest gear on the
+            # ladder, and never touched again. Every gear is 640x360 or smaller,
+            # so one capture serves all of them and a gear change becomes three
+            # local variables instead of a device renegotiation — which
+            # `_configure_capture` measures at 3.9 seconds to first frame. A
+            # controller that blacked the call out for four seconds each time it
+            # acted would be worse than no controller.
+            #
+            # Resizing down in software is also the better picture: 640x360
+            # resampled to 480x270 supersamples, where asking the camera for
+            # 270p does not.
+            ceiling_w, ceiling_h = capture_ceiling()
             w, h, fps, jpeg_quality = self._capture_settings()
-            self._configure_capture(cap, w, h, fps)
+            self._configure_capture(cap, ceiling_w, ceiling_h, fps)
 
+            gear = (w, h, fps, jpeg_quality)
             encode_params = [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality]
-            # Send at the preset's rate, capture at whatever the camera gives.
+            # Send at the gear's rate, capture at whatever the camera gives.
             # The camera ignores the rate it is asked for on Windows — 20
             # requested, 30 delivered — and every extra frame is uplink
             # bandwidth on the one leg that is asymmetric, where saturation
@@ -3297,12 +3417,28 @@ class Bridge(QObject):
 
                     capture_ts = time.perf_counter_ns()
 
+                    # Pick up a gear change without restarting anything. One
+                    # tuple read per frame, and the pacer is rebuilt only when
+                    # the rate actually moved — its measured capture rate is
+                    # worth keeping across a change that did not alter it.
+                    current = self._capture_settings()
+                    if current != gear:
+                        w, h, fps, jpeg_quality = current
+                        if fps != gear[2]:
+                            pacer = FramePacer(fps)
+                        encode_params = [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality]
+                        gear = current
+
                     # Upstream gets the **raw** frame. A filter is the last
                     # layer, so grading before the swap would have the
                     # compositor matching the face to an already-graded frame
                     # and then grading it again.
                     if self._ws_push_active.is_set() and pacer.due(capture_ts):
-                        _, jpeg = cv2.imencode('.jpg', frame, encode_params)
+                        outgoing = frame
+                        if frame.shape[1] != w or frame.shape[0] != h:
+                            outgoing = cv2.resize(
+                                frame, (w, h), interpolation=cv2.INTER_AREA)
+                        _, jpeg = cv2.imencode('.jpg', outgoing, encode_params)
                         header = struct.pack('<q', capture_ts)
                         payload = header + jpeg.tobytes()
                         self._uplink_bytes += len(payload)

@@ -688,8 +688,11 @@ GPU work can reach.
 ### Development
 - **Lint**: `flake8 pipeline.py pipeline desktop`
 - **Type check**: `mypy pipeline desktop` — clean, keep it that way (CI runs `mypy pipeline` only)
-- **Unit tests**: `python -m pytest tests/ -q` — ~32s, no GPU or model weights
-  needed (the ML layer is stubbed in `tests/conftest.py`). Twelve modules;
+- **Unit tests**: `python -m pytest tests/ -q` — ~80s, no GPU or model weights
+  needed (the ML layer is stubbed in `tests/conftest.py`). 35 modules;
+  `test_uplink_governor.py` pins the two rules the adaptive uplink exists to
+  keep — the dropdown is a ceiling automation never exceeds, and adapting down
+  is fast while adapting up is slow —
   `test_photo_batch.py` covers the photo path, including that a refused photo
   leaves no output file behind, `test_templates.py` covers the bundled
   library and the face its manifest names, and `test_texture.py` covers the
@@ -814,7 +817,9 @@ two cannot drift.
 - **pipeline/core.py**: Argument parsing, headless orchestration; supports `--stream`, `--log-level`
 - **pipeline/stream.py**: Stream mode wrapper
 - **desktop/bridge.py**: Push-based frame display (no HTTP polling, no 2s status timer)
-- **desktop/controller.py**: WebSocket client (`websockets` library, single connection, auto-reconnect)
+- **desktop/controller.py**: WebSocket client (`websockets` library, single connection, auto-reconnect); carries the uplink counters, including time blocked inside `send()`
+- **desktop/pacing.py**: `FramePacer` — which captured frames are sent upstream
+- **desktop/uplink.py**: `UplinkGovernor` — which gear to send them at, from what the link is doing
 
 ### Session shutdown
 The paid hour ends in one of two ways, and both land in
@@ -948,7 +953,11 @@ without a lower gear a bad day has no remedy.
 
 Capture settings live in `PRESETS` and are read by both the pipeline's own
 `VideoCapture` loop and the desktop's webcam thread, so local and push mode
-cannot diverge. Changing quality restarts the capture device to apply them.
+cannot diverge.
+
+**Changing quality no longer restarts the capture device**, and that change is
+what makes the ladder drivable rather than merely present. See "The uplink
+drives itself" below.
 
 **The frame rate is enforced on the send, not on the camera.** A camera is
 free to ignore `CAP_PROP_FPS` and Windows Media Foundation does — asked for 20
@@ -973,6 +982,72 @@ Presets deliberately **do not** set `enhance`: it has an explicit toggle in the
 desktop header, and a preset must not silently undo something the operator just
 clicked. `color_correction` is left alone for a different reason — it is on and
 stays on (see below).
+
+### The uplink drives itself
+The ladder was already the most valuable lever in the project and it was driven
+by hand: dropping a gear took delivery from 61% to 94% and p50 from 1222ms to
+366ms, worth more than every compute lever combined. `desktop/uplink.py`
+does it on evidence, within seconds instead of whenever someone notices.
+
+**The dropdown became a ceiling.** `UplinkGovernor` may move below what the
+operator chose and back up to it, and never past it. Automation can protect
+them from a link that cannot carry their choice and can never hand them
+something they did not ask for — and picking a gear still applies immediately in
+both directions, because someone who selects one expects to see it rather than
+be climbed towards it.
+
+**The precondition was decoupling capture from the preset.** Applying a preset
+to the device costs ~3.9s to first frame on Windows MSMF (`_configure_capture`
+measured it), so a governor that reconfigured the camera per gear change would
+black the call out for four seconds every time it acted — worse than not
+adapting. Every gear is 640x360 or smaller, so the device is opened **once** at
+`capture_ceiling()` and each gear is a `cv2.resize` of what it already delivers.
+Software downscaling is also the better picture: 640x360 resampled to 480x270
+supersamples, where asking the camera for 270p does not.
+
+**A gear is uplink only** — resize, JPEG quality, send rate. It deliberately
+cannot reach `det_size`, `aligned_size` or `occluder`, because those decide how
+the face *looks* and an automatic change must not alter the swap mid-call.
+`tests/test_uplink_governor.py` asserts a `Gear` has no such attribute.
+
+**The signal is send-buffer backpressure, not bandwidth.** `websockets.sync`
+blocks inside `send()` until the kernel accepts the bytes, so the time the
+uplink thread spends in there measures directly whether the link is absorbing
+frames as fast as they are produced — microseconds with headroom, tens of
+milliseconds when saturated. Two reasons to prefer it to RTT: it is local, so it
+reports at the moment of the event rather than one round trip later; and it
+cannot confuse congestion with distance. A 350ms RTT to Europe is geography, and
+a controller steering on RTT alone would read that floor as a fault and shift
+down forever. It was **not measured before** — `PipelineClient` now carries
+`send_frames`, `send_blocked_ns` and `send_contended`.
+
+Delivery ratio corroborates it, as a ratio of **rates** rather than of counts:
+frames sent in the last round trip have not come back yet, so cumulative totals
+under-report by the whole RTT.
+
+Asymmetric, for the same reason `RTTTracker` is — one bad window drops a gear,
+twenty seconds of clean ones raise it, with an 8s cooldown because a gear change
+alters the very thing being measured. An idle window is explicitly **not**
+evidence of health, or the governor would climb precisely when it has learned
+nothing.
+
+`PHANTOM_UPLINK_ADAPT=0` leaves it observing without steering — for a
+measurement run, for the reason `PHANTOM_PLAYOUT_DELAY_MS` exists: two sessions
+cannot be compared if the thing under test chose itself differently in each.
+
+**Both drop-oldest queues now count what they discard.** A frame evicted from
+the pod's depth-2 inbound queue never comes back, so from the desktop it was
+indistinguishable from one the network lost — and the two want opposite
+remedies. Loss means the uplink is over budget and wants a lower bitrate;
+eviction means frames arrived in a *burst*, which is what a saturated link does
+after each stall, and wants a smoother send schedule. `measure_link.py` reported
+39% of frames missing at the old `optimal` with no way to tell which it was.
+`get_stats` now carries `frames.inbound_evicted`, and `tools/stats.py` prints it.
+
+**None of this is judged yet.** The thresholds are starting points reasoned from
+two measured points — 94% delivered on a gear that worked, 61% on one that did
+not — not from a sweep of the space between them. The pod run is what tells us
+whether the governor shifts when a person would have.
 
 ### Restoration strength — the one appearance control
 A dropdown in the sidebar under QUALITY: **auto / off / subtle / balanced /

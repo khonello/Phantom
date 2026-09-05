@@ -60,6 +60,21 @@ def _render(data: Dict[str, Any]) -> List[str]:
     if 'clients' in server:
         out.append(_line('clients', server['clients']))
 
+    # What the pod threw away before the GPU saw it. A frame evicted from the
+    # depth-2 inbound queue never comes back, so from the desktop it is
+    # indistinguishable from one the network lost — and the two want opposite
+    # remedies. Loss means the uplink is over budget and wants a lower bitrate;
+    # eviction means frames arrived in a burst, which is what a saturated link
+    # does after each stall, and wants a smoother send schedule.
+    frames = server.get('frames') or {}
+    if frames.get('inbound'):
+        out.append(_line('frames in', '{} received, {} evicted ({}%)'.format(
+            frames.get('inbound'), frames.get('inbound_evicted'),
+            frames.get('inbound_evicted_pct'))))
+        if frames.get('broadcast_evicted'):
+            out.append(_line('frames out', '{} evicted before broadcast'.format(
+                frames['broadcast_evicted'])))
+
     out.append('')
     out.append('HARDWARE')
     out.append(_line('gpu', data.get('gpu')))
