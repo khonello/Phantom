@@ -963,7 +963,18 @@ drives itself" below.
 free to ignore `CAP_PROP_FPS` and Windows Media Foundation does — asked for 20
 it reports 20 and delivers 30 — so the uplink was carrying half again as many
 JPEGs as the preset's own budget assumes, on the one leg of the path that is
-asymmetric. `desktop/pacing.py` chooses which captured frames to send;
+asymmetric.
+
+**Measured again 2026-09-05 on the development machine, and that is not what
+happens there** — see OPERATING_ENVIRONMENT.md §3. The camera delivers 15.1fps
+whatever it is asked for, MSMF cannot open it at all (the backend resolves to
+DSHOW), and so the pacer drops nothing: 15.1 against a 15 target is inside its
+own margin. Keep both readings. The point of the pacer is that the camera's rate
+is *not a contract*, and a camera that undershoots proves that as well as one
+that overshoots — it just makes `production`'s 20fps unreachable, and its real
+uplink cost ~2.6 Mbps rather than 3.5.
+
+`desktop/pacing.py` chooses which captured frames to send;
 capture itself runs at whatever the device gives, which keeps the local preview
 smooth and costs one comparison per frame.
 
@@ -1043,6 +1054,14 @@ eviction means frames arrived in a *burst*, which is what a saturated link does
 after each stall, and wants a smoother send schedule. `measure_link.py` reported
 39% of frames missing at the old `optimal` with no way to tell which it was.
 `get_stats` now carries `frames.inbound_evicted`, and `tools/stats.py` prints it.
+
+**The block-time denominator is measured, not nominal, and that was a
+correction.** The fraction asks what share of the time available per frame was
+spent blocked, and the gear's own interval is only that figure when the camera
+can reach its rate. It cannot here — 15.1fps whatever it is asked — so dividing
+`production`'s blocked time by its nominal 50ms rather than the real 66ms
+overstates pressure by a third and would shift down on a link that was coping.
+`observe(interval_ms=...)` takes the measured one; the gear's is the fallback.
 
 **None of this is judged yet.** The thresholds are starting points reasoned from
 two measured points — 94% delivered on a gear that worked, 61% on one that did

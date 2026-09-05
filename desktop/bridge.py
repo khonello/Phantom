@@ -408,6 +408,7 @@ class Bridge(QObject):
         self._governor = UplinkGovernor(self._quality)
         # Counters at the previous tick, so each window is a delta.
         self._uplink_probe_mark: Tuple[int, int, int, int] = (0, 0, 0, 0)
+        self._uplink_probe_at: float = time.perf_counter()
         # 'auto' defers to the swap model's profile, which is what
         # happened before this was a control.
         self._restoration: str = 'auto'
@@ -2923,9 +2924,12 @@ class Bridge(QObject):
         Comparing cumulative totals would under-report by the whole round trip,
         since frames sent in the last ~350ms have not come back yet.
         """
+        now = time.perf_counter()
         sent_total, blocked_total, contended_total = self._client.uplink_counters()
         received_total = self._downlink_frames
         sent_then, blocked_then, contended_then, received_then = self._uplink_probe_mark
+        window_s = now - self._uplink_probe_at
+        self._uplink_probe_at = now
         self._uplink_probe_mark = (
             sent_total, blocked_total, contended_total, received_total)
 
@@ -2947,11 +2951,19 @@ class Bridge(QObject):
         if contended:
             delivered = received / float(sent + contended)
 
+        # What each frame actually had, rather than what the gear asked for.
+        # Measured on this machine: the webcam delivers 15.1fps however it is
+        # configured, so `production` never reaches its nominal 20 and its 50ms
+        # figure is a fiction — see `UplinkGovernor.observe`.
+        interval_ms = (window_s * 1000.0 / (sent + contended)
+                       if window_s > 0 and (sent + contended) > 0 else 0.0)
+
         changed = self._governor.observe(
             sent=sent + contended,
             delivered_ratio=delivered,
             block_ms_per_frame=block_per_frame,
-            now=time.perf_counter(),
+            now=now,
+            interval_ms=interval_ms,
         )
 
         if blocked_ms > 0 or contended:

@@ -220,6 +220,40 @@ def test_block_threshold_is_a_fraction_of_the_interval():
                          block_ms_per_frame=block, now=100.0) is None
 
 
+def test_measured_interval_beats_the_gears_nominal_one():
+    """
+    Measured on the development machine 2026-09-05: the webcam delivers 15.1fps
+    whatever `CAP_PROP_FPS` is set to, and MSMF cannot open it at all — so
+    `production`'s nominal 20fps is unreachable there and its 50ms per frame is
+    a fiction. Dividing blocked time by 50ms instead of the real 66ms overstates
+    the pressure by a third, which shifts down on a link that was coping.
+    """
+    gear = gear_for('production')
+    real_interval = 1000.0 / 15.1
+    assert gear.interval_ms < real_interval
+
+    # Sits over the threshold against the nominal interval, under it against
+    # the interval the frames actually had.
+    block = 0.30 * gear.interval_ms
+    assert block / gear.interval_ms > UplinkGovernor.DOWN_BLOCK_FRACTION
+    assert block / real_interval < UplinkGovernor.DOWN_BLOCK_FRACTION
+
+    nominal = UplinkGovernor('production')
+    assert nominal.observe(sent=30, delivered_ratio=1.0,
+                           block_ms_per_frame=block, now=100.0) == 'optimal'
+
+    measured = UplinkGovernor('production')
+    assert measured.observe(sent=30, delivered_ratio=1.0,
+                            block_ms_per_frame=block, now=100.0,
+                            interval_ms=real_interval) is None
+
+
+def test_a_nonsense_interval_falls_back_to_the_gear():
+    gov = UplinkGovernor('optimal')
+    assert gov.observe(sent=30, delivered_ratio=1.0, block_ms_per_frame=40.0,
+                       now=100.0, interval_ms=0.0) == 'fast'
+
+
 def test_an_idle_window_is_not_evidence_of_health():
     """
     A paused or starting stream produces ratios computed on two or three

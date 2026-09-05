@@ -238,6 +238,7 @@ class UplinkGovernor:
         delivered_ratio: float,
         block_ms_per_frame: float,
         now: float,
+        interval_ms: Optional[float] = None,
     ) -> Optional[str]:
         """
         Fold one window of link behaviour in, and shift gear if it warrants one.
@@ -247,6 +248,10 @@ class UplinkGovernor:
             delivered_ratio: Return rate over send rate, 0..1+
             block_ms_per_frame: Mean time inside `send()` per frame sent
             now: Monotonic seconds
+            interval_ms: Measured interval between sends. Prefer it to the gear's
+                nominal one — a camera that cannot reach the gear's rate makes
+                the nominal figure a fiction, and the fraction is a share of the
+                time each frame actually had
 
         Returns:
             The new preset name if the gear changed, else None
@@ -257,7 +262,16 @@ class UplinkGovernor:
             # towards a climb.
             return None
 
-        interval = self.gear.interval_ms or 1.0
+        # The denominator is "time available per frame", and the gear's own
+        # figure is only that when the camera can reach its rate. Measured on
+        # this machine 2026-09-05: the webcam delivers 15.1fps whatever it is
+        # asked for, so `production` is nominally 50ms per frame and really
+        # 66ms — and dividing by 50 overstates the pressure by a third, which
+        # would shift down on a link that was coping. Measured wins when it is
+        # available, which is always after the first window.
+        interval = interval_ms if interval_ms and interval_ms > 0 else 0.0
+        if interval <= 0.0:
+            interval = self.gear.interval_ms or 1.0
         block_fraction = block_ms_per_frame / interval
 
         saturated = (delivered_ratio < self.DOWN_DELIVERED
