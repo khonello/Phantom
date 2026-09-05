@@ -93,6 +93,18 @@ _API = "https://console.vast.ai/api/v0"
 _POLL_INTERVAL = 3       # seconds between status polls
 _READY_TIMEOUT = 600     # seconds to wait for an instance to reach 'running'
 _SSH_TIMEOUT = 300       # seconds to wait for the SSH port to answer
+# Seconds a remote command may produce NO OUTPUT before it is called dead.
+#
+# Not the command's total runtime - the gap between two lines. It was 60, which
+# is shorter than several legitimately silent steps: pip builds basicsr from a
+# source tarball, and `Installing backend dependencies: started` is the last
+# thing printed until it finishes. On a 24-core 5.7GHz host that fits inside a
+# minute; on a 6-core 4.4GHz host it does not, so a slower CPU turned a working
+# deploy into a TimeoutError halfway through pip.
+#
+# Sized for the slowest legitimate silence rather than the fastest host that
+# happened to be tried first.
+_SSH_READ_TIMEOUT = 900
 _PIPELINE_TIMEOUT = 180  # seconds to wait for the pipeline to bind port 9000
 _SSH_CMD_TIMEOUT = 1800  # seconds for any single remote command (pip is slow)
 
@@ -1059,6 +1071,13 @@ def _connect_ssh(instance: Dict[str, Any]) -> Any:
             print("  Connecting via SSH as root@{}:{} (attempt {}/{})...".format(
                 host, port, attempt, attempts))
             client.connect(hostname=host, port=port, username="root", pkey=key, timeout=30)
+            # A long silent build leaves this connection idle for minutes, and
+            # an idle session crossing a proxy and a home NAT is a candidate
+            # for being reaped by either. Keepalives cost nothing and stop a
+            # dropped connection being read as a failed install.
+            transport = client.get_transport()
+            if transport is not None:
+                transport.set_keepalive(30)
             return client
         except Exception as exc:
             client.close()
@@ -1155,7 +1174,7 @@ def _ssh_run(client: Any, command: str, label: str, check: bool = True,
 
     chunks: List[str] = []
     channel = stdout.channel
-    channel.settimeout(60.0)
+    channel.settimeout(float(_SSH_READ_TIMEOUT))
     for raw in iter(stdout.readline, ""):
         line = raw.rstrip("\n")
         chunks.append(raw)
