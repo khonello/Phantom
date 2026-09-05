@@ -1215,8 +1215,30 @@ def _require_direct_reachable(instance: Dict[str, Any]) -> None:
     Silent when the host is fine, and when no direct address is published to
     test against.
     """
+    # The mapping is published late. On the German host, `start` reached this
+    # point with no `ports` block at all - public_ipaddr known, 22/tcp and
+    # 9000/tcp both absent - so the first version of this check returned
+    # immediately and verified nothing, which is the one outcome it must not
+    # have. Docker publishes them within a minute of the container running, so
+    # it is worth waiting for rather than skipping.
+    instance_id = str(instance.get("id") or "")
     targets = _ssh_targets(instance)
+    if len(targets) < 2 and instance_id:
+        for _ in range(10):
+            time.sleep(6)
+            refreshed = _get_instance(instance_id)
+            if refreshed:
+                instance = refreshed
+                targets = _ssh_targets(instance)
+                if len(targets) >= 2:
+                    break
+
     if len(targets) < 2:
+        # Not provable either way. Say so rather than passing quietly: an
+        # unverified host is the state that cost two cold starts.
+        print("  WARNING: no direct address published yet, so reachability")
+        print("  could not be checked. If the deploy ends in a TLS timeout,")
+        print("  this is the first thing to test.")
         return
 
     host, port = targets[0]
