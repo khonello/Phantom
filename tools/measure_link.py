@@ -303,20 +303,46 @@ def _verdict(network: Dict[str, float], runs: List[Dict[str, Any]]) -> List[str]
         dear = max(usable, key=lambda r: r['uplink_mbps'])
         if cheap is not dear:
             saved = dear['p50_ms'] - cheap['p50_ms']
+            gained = cheap['delivered_pct'] - dear['delivered_pct']
             lines.append('')
             lines.append(
-                '  {} -> {} cuts the uplink {:.2f} -> {:.2f} Mbps and the p50 by {:.0f}ms.'
-                .format(dear['preset'], cheap['preset'], dear['uplink_mbps'],
-                        cheap['uplink_mbps'], saved))
-            if saved > 100.0:
+                '  {} -> {} cuts the uplink {:.2f} -> {:.2f} Mbps: p50 {:+.0f}ms, '
+                'delivery {:+.0f}pp.'.format(
+                    dear['preset'], cheap['preset'], dear['uplink_mbps'],
+                    cheap['uplink_mbps'], -saved, gained))
+
+            # Delivery is weighed with latency, not after it. Smoothness is
+            # frames arriving consistently, not a median - and a preset can
+            # hold its p50 while dropping one frame in six, which is what an
+            # operator sees. The first version of this keyed on p50 alone,
+            # reported "bitrate barely moved it" for a pair that differed by
+            # 7 points of delivery, and was corrected by someone watching the
+            # picture rather than the numbers.
+            if saved > 100.0 or gained >= 5.0:
+                reasons = []
+                if saved > 100.0:
+                    reasons.append('{:.0f}ms off the p50'.format(saved))
+                if gained >= 5.0:
+                    reasons.append('{:.0f}pp more frames delivered'.format(gained))
+                lines.append('  {} for a change worth ~10ms of compute.'.format(
+                    ' and '.join(reasons)))
                 lines.append(
-                    '  Far more than the compute the smaller preset saves, so the')
+                    '  The constraint is bandwidth, and no GPU or datacenter '
+                    'changes it.')
+            elif saved < 30.0 and abs(gained) < 5.0:
                 lines.append(
-                    '  constraint is bandwidth. No GPU and no datacenter changes it.')
-            elif saved < 30.0:
-                lines.append(
-                    '  Bitrate barely moved it, so the uplink is not the constraint')
-                lines.append('  under these conditions.')
+                    '  Neither latency nor delivery moved: bandwidth is not the '
+                    'constraint here.')
+
+    worst_spread = max(r['p95_ms'] - r['p50_ms'] for r in usable)
+    if worst_spread > 300.0:
+        lines.append('')
+        lines.append(
+            '  p95 sits {:.0f}ms above p50 at worst. That spread is jitter, and'
+            .format(worst_spread))
+        lines.append(
+            '  jitter is what the playout buffer turns into a fixed delay - so it')
+        lines.append('  costs more than the number looks.')
     return lines
 
 

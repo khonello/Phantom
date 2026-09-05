@@ -34,6 +34,7 @@ NETWORK = {'p50': 213.0, 'p95': 320.0, 'min': 192.0, 'max': 400.0, 'samples': 15
 
 # ── The reading ──────────────────────────────────────────────────────────────
 
+
 def test_a_large_saving_from_less_bitrate_names_bandwidth():
     """
     The measurement this tool exists for. CLAUDE.md predicted it and the first
@@ -45,7 +46,7 @@ def test_a_large_saving_from_less_bitrate_names_bandwidth():
         _run('fast', 1.58, 94.0, 366.0),
     ]))
     assert 'constraint is bandwidth' in text
-    assert 'No GPU and no datacenter changes it' in text
+    assert 'no GPU or datacenter' in text
 
 
 def test_a_small_saving_clears_the_uplink():
@@ -54,8 +55,36 @@ def test_a_small_saving_clears_the_uplink():
         _run('optimal', 3.96, 99.0, 320.0),
         _run('fast', 1.58, 99.0, 310.0),
     ]))
-    assert 'not the constraint' in text
-    assert 'constraint is bandwidth' not in text
+    assert 'bandwidth is not the constraint' in text
+    assert 'The constraint is bandwidth' not in text
+
+
+def test_delivery_alone_can_name_bandwidth_when_the_p50_does_not():
+    """
+    The case this got wrong in the field, and the reason delivery is weighed
+    beside latency rather than after it.
+
+    Measured 2026-09-05: fast 91% delivered at p50 671ms against optimal 84% at
+    692ms. Keying on p50 alone called that "bitrate barely moved it" - 21ms
+    apart, so no signal - and the operator who switched presets reported it as
+    "much smoother" straight away. optimal was dropping one frame in six.
+
+    Smoothness is frames arriving consistently. It is not a median.
+    """
+    text = chr(10).join(measure_link._verdict(NETWORK, [
+        _run('optimal', 3.96, 84.0, 692.0),
+        _run('fast', 1.58, 91.0, 671.0),
+    ]))
+    assert 'The constraint is bandwidth' in text
+    assert 'more frames delivered' in text
+
+
+def test_jitter_is_called_out_because_the_buffer_charges_for_it():
+    """A wide p50-to-p95 spread becomes a fixed delay through the playout buffer."""
+    wide = _run('fast', 1.58, 95.0, 300.0)
+    wide['p95_ms'] = 1400.0
+    text = chr(10).join(measure_link._verdict(NETWORK, [wide]))
+    assert 'jitter' in text
 
 
 def test_lost_frames_are_called_out_even_when_the_p50_looks_fine():
@@ -86,6 +115,7 @@ def test_nothing_returned_is_not_reported_as_a_link_result():
 
 
 # ── Arguments ────────────────────────────────────────────────────────────────
+
 
 def test_presets_come_from_the_schema_so_they_cannot_drift():
     for name in ('fast', 'optimal', 'production'):
