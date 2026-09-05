@@ -575,18 +575,57 @@ def test_the_gpu_band_is_coarse_enough_to_ignore_noise():
     assert orch._dlperf_band({}) == 0.0, 'a missing score must not crash the sort'
 
 
-# ── Verification is a badge, reliability is a measurement ────────────────────
+# ── Verification certifies an address, not a quality ─────────────────────
 
-def test_verification_is_not_filtered_on_by_default(monkeypatch):
+def test_verification_is_demanded_by_default(monkeypatch):
     """
-    Vast's "verified" is a datacenter badge. Left on it excluded the best UK
-    box on every axis that matters — $0.294 against $0.737, a 5.7GHz Ryzen
-    against a 3.5GHz EPYC, $1.70/month storage against $8.30 — for a measured
-    reliability difference of 0.993 against 0.997.
+    This assertion is the reverse of what it was, and the reversal is the
+    finding.
+
+    The old reasoning: "verified" is a datacenter badge rather than a
+    measurement, VAST_MIN_RELIABILITY already carries the measured signal, and
+    filtering on the badge excluded the best UK box on every axis that matters
+    - $0.294 against $0.737, 5.7GHz against 3.5GHz, $1.70/month storage against
+    $8.30 - for a reliability difference of 0.993 against 0.997.
+
+    Every one of those statements is true. The conclusion did not follow,
+    because it priced the badge as a claim about quality when what it certifies
+    is that the machine is in a datacenter - which is what decides whether
+    anything can reach it.
+
+    Two unverified hosts were rented on the old default, in two countries. Both
+    deployed perfectly and neither accepted a connection on the ports it
+    published. The second one's record explained both:
+
+        local_ipaddrs   192.168.178.106 ...     a private LAN address
+        static_ip       false
+
+    A FRITZ!Box range - a machine in a house, whose advertised "51 direct
+    ports" needed a port-forward nobody had configured. Six check-host.net
+    nodes on three continents all timed out, so it was not the client end.
+
+    The desktop connects straight to public_ipaddr:<mapped 9000> with no proxy,
+    so this is not a preference. An unreachable GPU is not a cheaper GPU.
     """
     for name in ('VAST_VERIFIED_ONLY', 'VAST_GEOLOCATIONS'):
         monkeypatch.delenv(name, raising=False)
+    assert orch._selection_settings()['verified_only'] is True
+
+
+def test_verification_can_be_waived_deliberately(monkeypatch):
+    """Explicitly, and only explicitly - see the docstring above for the cost."""
+    monkeypatch.setenv('VAST_VERIFIED_ONLY', 'false')
     assert orch._selection_settings()['verified_only'] is False
+
+
+def test_a_typo_does_not_waive_verification(monkeypatch):
+    """
+    `_env_flag` used to read anything unrecognised as False, which was right
+    while every flag it served turned off something already off. This one is a
+    safety filter, so an unparseable value must not be what disables it.
+    """
+    monkeypatch.setenv('VAST_VERIFIED_ONLY', 'flase')
+    assert orch._selection_settings()['verified_only'] is True
 
 
 def test_verification_can_still_be_demanded(monkeypatch):

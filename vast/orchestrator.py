@@ -361,17 +361,24 @@ def _update_env_key(key: str, value: str) -> None:
     print("  Updated .env  {}={}".format(key, shown))
 
 
-def _env_flag(name: str) -> bool:
+def _env_flag(name: str, default: bool = False) -> bool:
     """
     Read a boolean setting from the environment.
 
     Same spellings the pipeline accepts (`pipeline/core.py::_env_bool`), so a
-    `.env` shared between the two does not mean two different things. Unset or
-    unrecognised is False: every flag read through here turns something off
-    that is on by default, and a typo must not be the thing that disables it.
+    `.env` shared between the two does not mean two different things.
+
+    Unrecognised falls back to `default` rather than to False. Most flags here
+    turn off something that is off anyway, and for those the old "unset or
+    unparseable is False" was right; `verified_only` is not one of them, and a
+    typo must not be what disables a safety filter.
     """
     raw = (os.getenv(name) or "").strip().lower()
-    return raw in ("1", "true", "yes", "on")
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return default
 
 
 def _env_float(name: str, default: float) -> float:
@@ -1431,13 +1438,33 @@ def _selection_settings() -> Dict[str, Any]:
         "min_cpu_ghz": _env_float("VAST_MIN_CPU_GHZ", _DEFAULT_MIN_CPU_GHZ),
         "min_cpu_cores": _env_float("VAST_MIN_CPU_CORES", _DEFAULT_MIN_CPU_CORES),
         "max_compute_cap": _env_int("VAST_MAX_COMPUTE_CAP", _DEFAULT_MAX_COMPUTE_CAP),
-        # Default OFF. Vast's "verified" is a datacenter badge, not a
-        # measurement, and `reliability` already carries the measured signal.
-        # Left on, it excluded the best box in the UK on every axis that
-        # matters — $0.294 against $0.737, a 5.7GHz Ryzen against a 3.5GHz
-        # EPYC, $1.70/month storage against $8.30 — for a reliability
-        # difference of 0.993 against 0.997. The badge was costing 2.5x.
-        "verified_only": _env_flag("VAST_VERIFIED_ONLY"),
+        # Default ON, reversing the reasoning this line used to carry.
+        #
+        # It argued the badge is "a datacenter badge, not a measurement", that
+        # reliability already carries the measured signal, and that filtering
+        # on it cost 2.5x for a 0.004 reliability difference. Every one of
+        # those statements is true. The conclusion was still wrong, because it
+        # priced the badge as a quality signal when what it actually certifies
+        # is that the machine is in a datacenter - which is what decides
+        # whether anything can connect to it.
+        #
+        # Two unverified hosts were rented on that reasoning. Both deployed
+        # perfectly and neither was reachable on the ports it published. The
+        # second one explained the first:
+        #
+        #     local_ipaddrs   192.168.178.106 ...      a private LAN address
+        #     static_ip       false
+        #
+        # 192.168.178.x is a FRITZ!Box default range. It was a machine in
+        # somebody's house, and its "51 direct ports" needed a port-forward on
+        # a home router that nobody had configured. Confirmed from six
+        # check-host.net nodes across three continents: all timed out.
+        #
+        # A GPU behind an unreachable address is not a cheaper GPU. The desktop
+        # connects straight to public_ipaddr:<mapped 9000> with no proxy in
+        # front of it, so reachability is not a preference here - it is the
+        # product working or not.
+        "verified_only": _env_flag("VAST_VERIFIED_ONLY", True),
         "disk": _env_int("VAST_DISK", _DEFAULT_DISK),
     }
 
