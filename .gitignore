@@ -9,7 +9,12 @@ temp
 __pycache__
 
 environ
-*environ*
+# Directory-only, and that trailing slash is load-bearing. As `*environ*` this
+# also matched OPERATING_ENVIRONMENT.md — `core.ignorecase` is true on Windows —
+# so a document CLAUDE.md tells you to read before concluding anything is broken
+# was never committed to any branch, and existed on exactly one machine. It
+# still has to cover environ-orchestrator/ and environ-pipeline/.
+*environ*/
 
 models
 Python_3_12_0venv
