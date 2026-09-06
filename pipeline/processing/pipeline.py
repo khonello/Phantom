@@ -284,6 +284,10 @@ class ProcessingPipeline:
             self._compositor.source_texture = (
                 self._swapping_proc.source_texture if loaded else None
             )
+            # A new identity is a new chance to say the layer has nothing to
+            # work with. Without this, only the first failing source is ever
+            # reported and the second looks like a working layer set too low.
+            self._compositor._warned_no_texture = False
         return loaded
 
     def _reset_temporal_state(self) -> None:

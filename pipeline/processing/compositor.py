@@ -286,6 +286,15 @@ class FaceCompositor:
         # it — a file read and a full-resolution warp — on the live path.
         self.source_texture: Optional[SourceTexture] = None
 
+        # Said once, when the operator has asked for texture and there is none
+        # to apply. Every other way this layer declines is visible in the
+        # readings — `texture_headroom` and `texture_confidence` are recorded
+        # whenever it gets past its guards, so their absence from a REALISM
+        # block already means "it did not run". This case is the one that looks
+        # identical to a working layer set too low: the slider says 0.4, the
+        # frame is unchanged, and nothing anywhere disagrees.
+        self._warned_no_texture = False
+
         # High-band deviation the texture layer was allowed on the last frame,
         # in 8-bit units, or None when it did not run. Same pattern as
         # `masker.last_coverage`: the stage that measures a thing owns the
@@ -1381,7 +1390,24 @@ class FaceCompositor:
         self.last_texture_confidence = None
 
         strength = float(np.clip(getattr(self.config, 'texture_strength', 0.0), 0.0, 1.0))
-        if strength <= 0.0 or self.source_texture is None:
+        if strength <= 0.0:
+            return blended
+
+        if self.source_texture is None:
+            # Once per compositor, not per frame: this is the live path at
+            # 15-20fps, and a warning repeated thirty times a second is a
+            # denial of service on its own log.
+            if not self._warned_no_texture:
+                self._warned_no_texture = True
+                emit_warning(
+                    'texture_strength is {:.2f} but no source texture was '
+                    'extracted, so the layer is doing nothing. A source set of '
+                    'only .npy embeddings has no pixels to take skin detail '
+                    'from; otherwise the chosen photo had unusable keypoints. '
+                    'Look for a "Texture source:" line at source load.'.format(
+                        strength),
+                    scope='TEXTURE',
+                )
             return blended
 
         confidence = self._pose_confidence(face)
