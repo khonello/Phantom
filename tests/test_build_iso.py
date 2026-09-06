@@ -62,12 +62,28 @@ def test_the_flag_is_what_lets_them_through():
 @pytest.mark.parametrize('prefix', [
     'pipeline/models/',      # 912 MB of weights, re-downloaded on first use
     'environ-orchestrator/',  # a virtualenv
+    'environ-pipeline/',      # the second one, 412 MB, which the old fixed
+                              # list missed entirely
     'desktop/.qtcreator/',   # a virtualenv
     'build/',                # Nuitka output, tied to the Python that made it
 ])
 def test_excluded_trees_are_absent(prefix):
     paths, _ = build_iso._included(with_env=False)
     assert not [p for p in paths if p.startswith(prefix)], prefix
+
+
+def test_any_environ_venv_is_excluded_not_just_the_named_ones():
+    """
+    The rule is a prefix, so the next venv is covered before it exists.
+
+    `environ-orchestrator` was listed by name and `environ-pipeline` appeared
+    later, unlisted — 5041 of the image's 7504 files. Naming the two that exist
+    today would leave the same hole for the third.
+    """
+    paths, _ = build_iso._included(with_env=False)
+    carried = sorted({p.split('/', 1)[0] for p in paths
+                      if p.startswith(build_iso._EXCLUDE_DIR_PREFIX)})
+    assert carried == [], 'top-level environ* trees on the image: {}'.format(carried)
 
 
 def test_bytecode_is_not_carried():

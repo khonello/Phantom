@@ -11,7 +11,10 @@ that is the project:
 
     pipeline/models/          912 MB   weights; re-downloaded on first use
     desktop/.qtcreator/       966 MB   a virtualenv
-    environ-orchestrator/     114 MB   a virtualenv
+    environ-*/                636 MB   virtualenvs -- every top-level directory
+                                       whose name starts `environ`, matched by
+                                       prefix because a list of two became a
+                                       list of three without anyone noticing
     build/                    788 MB   Nuitka output, regenerable and tied to
                                        the Python that produced it
     __pycache__/                1 MB   bytecode, and stale copies of it on a
@@ -49,9 +52,22 @@ _VOLUME_ID = 'PHANTOM'
 _EXCLUDE_DIRS = (
     'pipeline/models',
     'desktop/.qtcreator',
-    'environ-orchestrator',
     'build',
 )
+
+# Top-level virtualenvs, matched by prefix rather than by name.
+#
+# This was `environ-orchestrator` alone, and the tree had since grown
+# `environ-pipeline` at 412 MB — which sailed onto the image and made up 5041 of
+# its 7504 files, two thirds of an image whose whole purpose is to be small. The
+# same mistake, and the same fix, as `_SECRET_PREFIX` below: a list of spellings
+# is not a rule, and the next venv would have been the third to walk around it.
+#
+# A venv is the least portable thing in the tree. Its scripts hard-code absolute
+# paths to a Python that does not exist on the target machine, and its compiled
+# extensions are built for one interpreter version and architecture, so carrying
+# one is worse than useless — it looks like a working environment and is not.
+_EXCLUDE_DIR_PREFIX = 'environ'
 
 # Directory *names* skipped wherever they appear.
 _EXCLUDE_NAMES = ('__pycache__', '.mypy_cache', '.pytest_cache')
@@ -101,6 +117,7 @@ def _included(with_env: bool) -> Tuple[List[str], int]:
             d for d in dirnames
             if d not in _EXCLUDE_NAMES
             and ('{}/{}'.format(rel_dir, d).lstrip('/') not in _EXCLUDE_DIRS)
+            and not (rel_dir == '' and d.startswith(_EXCLUDE_DIR_PREFIX))
         ]
 
         for name in filenames:
