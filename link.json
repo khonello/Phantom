@@ -1,0 +1,185 @@
+[
+  {
+    "network_rtt_ms": {
+      "max": 214.2,
+      "min": 179.1,
+      "p50": 199.0,
+      "p95": 214.2,
+      "samples": 15.0
+    },
+    "pipeline": "87.62.96.196:40122",
+    "presets": [
+      {
+        "delivered_pct": 248.2,
+        "fps": 15.0,
+        "frame_bytes": 13156,
+        "height": 270,
+        "jpeg_quality": 60,
+        "max_ms": -1010617141.1,
+        "min_ms": -1010617373.6,
+        "p50_ms": -1010617360.4,
+        "p95_ms": -1010617336.5,
+        "preset": "fast",
+        "received": 2234,
+        "sent": 900,
+        "uplink_mbps": 1.58,
+        "width": 480
+      },
+      {
+        "delivered_pct": 242.0,
+        "fps": 15.0,
+        "frame_bytes": 20441,
+        "height": 360,
+        "jpeg_quality": 60,
+        "max_ms": -1010617271.3,
+        "min_ms": -1010617373.5,
+        "p50_ms": -1010617360.8,
+        "p95_ms": -1010617335.8,
+        "preset": "optimal",
+        "received": 2178,
+        "sent": 900,
+        "uplink_mbps": 2.45,
+        "width": 640
+      },
+      {
+        "delivered_pct": 181.3,
+        "fps": 20.0,
+        "frame_bytes": 24746,
+        "height": 360,
+        "jpeg_quality": 70,
+        "max_ms": -1010616811.6,
+        "min_ms": -1010617372.9,
+        "p50_ms": -1010617359.7,
+        "p95_ms": -1010617332.7,
+        "preset": "production",
+        "received": 2177,
+        "sent": 1201,
+        "uplink_mbps": 3.96,
+        "width": 640
+      }
+    ],
+    "recorded_at": "2026-09-05T23:46:11"
+  },
+  {
+    "network_rtt_ms": {
+      "max": 215.1,
+      "min": 169.3,
+      "p50": 185.4,
+      "p95": 215.1,
+      "samples": 15.0
+    },
+    "pipeline": "87.62.96.196:40122",
+    "presets": [
+      {
+        "delivered_pct": 56.4,
+        "fps": 15.0,
+        "frame_bytes": 13156,
+        "height": 270,
+        "jpeg_quality": 60,
+        "max_ms": 1482.5,
+        "min_ms": 213.8,
+        "p50_ms": 250.2,
+        "p95_ms": 694.9,
+        "preset": "fast",
+        "received": 508,
+        "sent": 900,
+        "uplink_mbps": 1.58,
+        "width": 480
+      },
+      {
+        "delivered_pct": 93.8,
+        "fps": 15.0,
+        "frame_bytes": 20441,
+        "height": 360,
+        "jpeg_quality": 60,
+        "max_ms": 2004.4,
+        "min_ms": 242.8,
+        "p50_ms": 282.2,
+        "p95_ms": 384.3,
+        "preset": "optimal",
+        "received": 844,
+        "sent": 900,
+        "uplink_mbps": 2.45,
+        "width": 640
+      },
+      {
+        "delivered_pct": 93.2,
+        "fps": 20.0,
+        "frame_bytes": 24746,
+        "height": 360,
+        "jpeg_quality": 70,
+        "max_ms": 2540.2,
+        "min_ms": 250.4,
+        "p50_ms": 335.6,
+        "p95_ms": 1293.4,
+        "preset": "production",
+        "received": 1118,
+        "sent": 1200,
+        "uplink_mbps": 3.96,
+        "width": 640
+      }
+    ],
+    "recorded_at": "2026-09-05T23:52:15"
+  },
+  {
+    "network_rtt_ms": {
+      "max": 241.7,
+      "min": 159.1,
+      "p50": 200.9,
+      "p95": 241.7,
+      "samples": 15.0
+    },
+    "pipeline": "87.62.96.196:40122",
+    "presets": [
+      {
+        "delivered_pct": 96.9,
+        "fps": 20.0,
+        "frame_bytes": 24746,
+        "height": 360,
+        "jpeg_quality": 70,
+        "max_ms": 972.0,
+        "min_ms": 239.3,
+        "p50_ms": 286.0,
+        "p95_ms": 338.6,
+        "preset": "production",
+        "received": 1163,
+        "sent": 1200,
+        "uplink_mbps": 3.96,
+        "width": 640
+      },
+      {
+        "delivered_pct": 99.3,
+        "fps": 15.0,
+        "frame_bytes": 20441,
+        "height": 360,
+        "jpeg_quality": 60,
+        "max_ms": 616.1,
+        "min_ms": 240.3,
+        "p50_ms": 276.5,
+        "p95_ms": 320.4,
+        "preset": "optimal",
+        "received": 895,
+        "sent": 901,
+        "uplink_mbps": 2.45,
+        "width": 640
+      },
+      {
+        "delivered_pct": 99.6,
+        "fps": 15.0,
+        "frame_bytes": 13156,
+        "height": 270,
+        "jpeg_quality": 60,
+        "max_ms": 527.6,
+        "min_ms": 217.4,
+        "p50_ms": 255.1,
+        "p95_ms": 290.9,
+        "preset": "fast",
+        "received": 897,
+        "sent": 901,
+        "uplink_mbps": 1.58,
+        "width": 480
+      }
+    ],
+    "recorded_at": "2026-09-05T23:57:53"
+  }
+]

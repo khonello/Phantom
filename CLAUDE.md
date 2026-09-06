@@ -33,13 +33,27 @@ same compositor.
 Two things are queued, and they are queued in this order because the first is
 free and the second is not.
 
-**1. The pod run.** Everything realism-related is built, off by default, and
-unjudged: the texture layer, the scatter pass, the widened seam. Nothing more
-should be built until a stream has been watched. The runbook is
-[docs/PENDING_WORK.md](docs/PENDING_WORK.md); take §2.3b (the uplink test —
-**mind the `guard_min_frame_px` trap in it**, it will otherwise produce nothing
-but guarded frames) and then the `REALISM` block, whose `detail_ratio` reading
-decides how much of the texture work was necessary at all.
+**1. The pod run — half done, and the half that remains is the half that
+matters.** Run 2026-09-05 against the Denmark 4090.
+
+*Measured, and settled:* the uplink test (numbers in
+OPERATING_ENVIRONMENT.md §2 — every gear held that evening, and the same
+`optimal` had delivered 61% that morning); the `REALISM` block (the detail clamp
+binds on **0%** of 2267 frames, so the cheap lever does not exist and the texture
+work was necessary); the cost of both new layers on a real pod CPU (texture
+1.3ms, scatter 0.3ms marginal, inside a 25.9ms frame against a 66.7ms deadline);
+and `gpen_bfr_256` running composited at 7.7ms.
+
+*Still outstanding, and it is the whole point:* **nobody has looked at a face.**
+Every realism layer remains judged only by statistics. That needs §2.4 — a live
+stream from the operator's own camera, two to three minutes of real use per
+preset, with `--debug-frames`. Mind the `guard_min_frame_px` trap in §2.3b when
+running `fast`; it will otherwise produce nothing but guarded frames.
+
+Note what the statistics cannot settle, by construction: **texture at 0.3 and
+0.5 produce identical readings on every metric.** Texture is added in frame space
+inside `_paste`, after `_match_detail` has run in aligned space, so nothing
+downstream measures it. Only footage separates them.
 
 **2. Nothing else.** [docs/PERFORMANCE_AUDIT.md](docs/PERFORMANCE_AUDIT.md) §3 is
 **done** — measured end to end at 0.74ms saved at `optimal` and 6.77ms at
@@ -193,10 +207,12 @@ Note which way `gpen_bfr_512` falls: **slower** than CodeFormer at the same
 resolution. The saving is entirely **resolution**, not architecture. GPEN is
 not a lighter model; 256 is simply a quarter of the pixels.
 
-**`gpen_bfr_256` has never run in the pipeline.** It has not been composited,
-not judged on footage, and the ~27ms frame estimate for it is arithmetic on the
-numbers above rather than a measurement. Both GPEN files are on the volume at
-`/workspace/models/`.
+**`gpen_bfr_256` has now run in the pipeline** (2026-09-05, RTX 4090, 2267
+frames): `restore` p50 **7.7ms**, inside a 25.9ms frame against a 66.7ms
+deadline. The 5.4ms isolated figure was honest — compositing adds ~2.3ms of warp
+around it — and the ~27ms whole-frame estimate was pessimistic by nearly half.
+It still **has not been judged on footage**, which is the part that decides
+whether it belongs. Both GPEN files are on the volume at `/workspace/models/`.
 
 Why 256 is the interesting number rather than "off": restoring at 512 and
 warping down to a 128-192 aligned space is *supersampling*, and some of that
@@ -735,12 +751,17 @@ GPU work can reach.
 - **Realism readings**: reported beside it under a `REALISM` scope.
   `detail_ratio` is the correction `_match_detail` *wanted* before its clamp,
   with the share of frames that hit it — the only way to see a clamped quantity,
-  since percentiles of the clamped value cannot exceed the clamp. **This is the
-  reading that decides how much of the texture work was necessary**: if 1.6 binds
-  on most frames, part of the 0.42 face/frame detail gap is the clamp rather than
-  the swap, and raising a constant is the cheapest lever in the project.
-  `texture_headroom` and `texture_confidence` say whether the texture layer had
-  anything to spend and whether pose let it spend it
+  since percentiles of the clamped value cannot exceed the clamp. This was the
+  reading that decided how much of the texture work was necessary — if 1.6 bound
+  on most frames, part of the detail gap would be the clamp rather than the swap,
+  and raising a constant would be the cheapest lever in the project.
+  **Measured 2026-09-05: it binds on 0% of 2267 frames.** That lever does not
+  exist, so the texture layer was the necessary answer rather than an expensive
+  substitute for a one-line change. `texture_headroom` and `texture_confidence`
+  say whether the texture layer had anything to spend and whether pose let it
+  spend it — measured p50 **0.78** headroom, so `texture_strength=1.0` reaches
+  parity and the expected 0.3-0.5 working range spends under half of what is
+  available
 - **Guard calibration**: `python pipeline.py --stream --guard-observe --guard-report r.json`
 - **Realism**: `python pipeline.py --stream --debug-frames clip/` then
   `python tools/compare_frames.py clip/ [--against clip2/]`
@@ -1063,10 +1084,30 @@ can reach its rate. It cannot here — 15.1fps whatever it is asked — so divid
 overstates pressure by a third and would shift down on a link that was coping.
 `observe(interval_ms=...)` takes the measured one; the gear's is the fallback.
 
+**Measured 2026-09-05, and the premise came out stronger than the thresholds.**
+A clean run against the Denmark 4090, order reversed to control for it, gave
+`production` 97% / p50 286ms, `optimal` 99% / 276ms, `fast` 100% / 255ms against
+a 201ms network floor — every gear holding, the whole ladder worth 31ms.
+**The same `optimal` had delivered 61% at p50 1222ms earlier the same day.**
+
+So on that evening the governor would have sat at the ceiling and never moved,
+which is correct behaviour and also means its down-shift path is still unproven
+against a genuinely saturated link. What the pair of readings does prove is the
+premise: the link moved from "cannot carry 2.45 Mbps" to "carries 3.96
+comfortably" in hours, with nothing in the repository changing, and **no fixed
+preset is right on both**. That is the argument for adapting at all, and it is
+now measured rather than reasoned.
+
+One threshold is suspect as a result. `DOWN_DELIVERED` at 0.85 would not have
+fired at any gear that evening — correct — but delivery barely separated the
+gears at all (97/99/100), while p95 did more work. If the next saturated link
+also shows pressure in **jitter before loss**, delivery is the blunter of the
+two signals and the block-time fraction is carrying the decision. Read them
+apart before retuning either.
+
 **None of this is judged yet.** The thresholds are starting points reasoned from
-two measured points — 94% delivered on a gear that worked, 61% on one that did
-not — not from a sweep of the space between them. The pod run is what tells us
-whether the governor shifts when a person would have.
+measured endpoints, not from a sweep of the space between them, and no session
+has yet watched the governor shift when a person would have.
 
 ### Restoration strength — the one appearance control
 A dropdown in the sidebar under QUALITY: **auto / off / subtle / balanced /
@@ -1205,9 +1246,10 @@ survives, along with all the low-frequency work — tone, structure, artefact
 cleanup — that a downsample does not destroy. What is given up is the
 512-to-256 octave, which the final resize into a ~101px face deletes anyway.
 
-**This was adopted on speed evidence and has not been judged on footage.**
-`gpen_bfr_256` has never been composited or looked at. The measured comparison
-was restoration-off against CodeFormer-512 only.
+**This was adopted on speed evidence and has still not been judged on footage.**
+It has now been composited — 7.7ms per frame over 2267 frames on a 4090 — but
+nobody has *looked* at the result. The measured image comparison remains
+restoration-off against CodeFormer-512 only.
 
 **What changes with a model without a fidelity weight.** `enhancer_weight` is
 CodeFormer's input and nothing else's, so under GPEN it means nothing and

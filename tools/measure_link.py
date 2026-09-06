@@ -21,6 +21,25 @@ answer to. First run, 2026-09-05, against a Denmark RTX 4090:
 
 856ms for a preset change worth ~10ms of compute. Not a compute result.
 
+**Second run, later the same day, same pod — and the link had changed
+completely.** Order reversed to control for it, models warm:
+
+    production  3.96 Mbps   97% delivered   p50 286ms   p95  339ms
+    optimal     2.45 Mbps   99% delivered   p50 276ms   p95  320ms
+    fast        1.58 Mbps  100% delivered   p50 255ms   p95  291ms
+
+Every gear holds, and the whole ladder spans 31ms of p50 against a network
+floor of 201ms. **The same preset that delivered 61% in the morning delivered
+99% in the evening.** Nothing in the repository changed between them.
+
+Two lessons, and the second is the reason this file says to compare presets
+within one session rather than across days:
+
+  - A single row is weak evidence. `production` measured p95 1293ms in one pass
+    and 339ms ten minutes later.
+  - An absolute number describes an afternoon, not a product. Only the
+    ordering-controlled comparison inside one run survives.
+
 Two things make the numbers trustworthy:
 
   - **One clock.** The pipeline echoes the 8-byte capture timestamp back on the
@@ -60,10 +79,15 @@ from pipeline.api.schema import PRESETS  # noqa: E402
 DEFAULT_POD_SOURCE = '/workspace/Phantom/.github/examples/source.jpg'
 DEFAULT_LOCAL_FRAME = os.path.join(_REPO_ROOT, '.github', 'examples', 'source.jpg')
 
-# Discarded before each measurement. The first stream after a pipeline start pays
-# model load - tens of seconds - and those frames come back carrying round
-# trips of exactly that size.
+# Discarded before each measurement, so a preset change settles before the
+# clock starts.
 WARMUP_SECONDS = 12.0
+
+# A whole discarded pass before the first measured one. WARMUP_SECONDS is not
+# enough on its own: model load after a pipeline start is tens of seconds, and
+# 12 is not tens, so whichever preset ran first was charged for the models. See
+# the call site for the measurement that showed it.
+_WARMUP_RUN_SECONDS = 15.0
 _TS = '<q'
 
 
@@ -163,6 +187,7 @@ async def _measure_preset(
     name: str,
     seconds: float,
     frame_path: str,
+    quiet: bool = False,
 ) -> Dict[str, Any]:
     """
     Stream one preset at its own capture settings and time the round trip.
@@ -180,20 +205,21 @@ async def _measure_preset(
     jpeg = _encode_frame(frame_path, width, height, quality)
     mbps = len(jpeg) * 8 * fps / 1e6
 
-    print('')
-    print('{}: {}x{} q{} @ {:.0f}fps - {:.1f} KB/frame, {:.2f} Mbps up'.format(
+    say = (lambda *_a, **_k: None) if quiet else print
+    say('')
+    say('{}: {}x{} q{} @ {:.0f}fps - {:.1f} KB/frame, {:.2f} Mbps up'.format(
         name, width, height, quality, fps, len(jpeg) / 1024.0, mbps))
 
     await ws.send(json.dumps({'action': 'set_quality', 'preset': name}))
     await asyncio.sleep(1.0)
     await ws.send(json.dumps({'action': 'start_stream'}))
-    print('  warm-up {:.0f}s (model load lands here, not in the sample)'.format(
+    say('  warm-up {:.0f}s (model load lands here, not in the sample)'.format(
         WARMUP_SECONDS))
     await asyncio.sleep(WARMUP_SECONDS)
     await _drain(ws)
 
     samples: List[float] = []
-    counters = {'sent': 0, 'received': 0}
+    counters = {'sent': 0, 'received': 0, 'foreign': 0}
     finished = asyncio.Event()
     stop_at = time.time() + seconds
     # Belt to the drain's braces. A frame already on the wire when this window
@@ -222,11 +248,27 @@ async def _measure_preset(
             if not isinstance(raw, bytes) or len(raw) <= 8:
                 continue
             stamp = struct.unpack(_TS, raw[:8])[0]
-            if stamp >= run_start:
-                samples.append((time.perf_counter_ns() - stamp) / 1e6)
-                counters['received'] += 1
+            if stamp < run_start:
+                continue
+            latency_ms = (time.perf_counter_ns() - stamp) / 1e6
+            # A stamp that is not ours. `perf_counter_ns` is measured from an
+            # arbitrary per-process origin, so a frame carrying the *pipeline's*
+            # clock rather than an echo of ours produces an arbitrary number —
+            # and on the run that found this, a confident -1010617360ms.
+            #
+            # The cause is worth naming because it is silent: with `input_url`
+            # set, `ProcessingPipeline` streams that file and never drains the
+            # pushed-frame queue (pipeline.py:548), so every frame sent here is
+            # ignored while the pipeline's own frames come back stamped by it.
+            # Delivery then reads over 100% and the report concludes something
+            # about a link it never measured.
+            if latency_ms < 0 or latency_ms > (seconds + 30.0) * 1000.0:
+                counters['foreign'] += 1
+                continue
+            samples.append(latency_ms)
+            counters['received'] += 1
 
-    print('  measuring {:.0f}s...'.format(seconds))
+    say('  measuring {:.0f}s...'.format(seconds))
     await asyncio.gather(sender(), receiver())
     await ws.send(json.dumps({'action': 'stop_stream'}))
     await asyncio.sleep(2.0)
@@ -234,7 +276,28 @@ async def _measure_preset(
 
     sent = counters['sent']
     received = counters['received']
+    foreign = counters['foreign']
     delivered = 100.0 * received / sent if sent else 0.0
+
+    # Refuse to report rather than report something wrong. Both of these are
+    # impossible for a link that is actually being measured — a frame cannot
+    # come back before it was sent, and the pipeline cannot return more frames
+    # than it was given — so either means the frames coming back are not the
+    # ones going out, and every number below is about a stream nobody asked
+    # for. A run that stops here costs a minute; the alternative cost a whole
+    # measurement and read as a firm conclusion about bandwidth.
+    if foreign > max(5, received // 20) or delivered > 105.0:
+        raise SystemExit(
+            '\n  {} produced {} frames that are not echoes of ours and {:.0f}% '
+            '"delivery".\n'
+            '  The pipeline is streaming something else, so nothing here '
+            'measures the link.\n'
+            '  Almost always `input_url` is still set from a previous run '
+            '(tools/sweep_levers.py\n'
+            '  sets it): with a file input the pushed-frame queue is never '
+            'drained. Clear it with\n'
+            '  set_input_url "" , or restart the pipeline, and run this '
+            'again.'.format(name, foreign, delivered))
 
     result: Dict[str, Any] = {
         'preset': name,
@@ -255,12 +318,12 @@ async def _measure_preset(
             'min_ms': round(min(samples), 1),
             'max_ms': round(max(samples), 1),
         })
-        print('  {}/{} returned ({:.0f}%)  p50 {:.0f}ms  p95 {:.0f}ms  min {:.0f}ms'.format(
+        say('  {}/{} returned ({:.0f}%)  p50 {:.0f}ms  p95 {:.0f}ms  min {:.0f}ms'.format(
             received, sent, delivered, result['p50_ms'], result['p95_ms'],
             result['min_ms']))
     else:
-        print('  NOTHING RETURNED. A frame leaves the pipeline only if it was')
-        print('  swapped, so check the source loaded and the test frame has a face.')
+        say('  NOTHING RETURNED. A frame leaves the pipeline only if it was')
+        say('  swapped, so check the source loaded and the test frame has a face.')
     return result
 
 
@@ -390,6 +453,27 @@ async def _run(args: argparse.Namespace) -> int:
 
         await ws.send(json.dumps({'action': 'set_source', 'path': args.source}))
         await asyncio.sleep(3.0)
+
+        # A discarded pass, so model load lands outside every measured window.
+        #
+        # `WARMUP_SECONDS` is per preset and is not enough on its own: model
+        # load after a pipeline start is tens of seconds, and 12 is not tens.
+        # Measured 2026-09-05, the same preset on the same link ten minutes
+        # apart — `fast` returned **56%** running first after a restart and
+        # **100%** running last on warm models. Without this, whichever preset
+        # is measured first is charged for the models and reads as the worst
+        # gear on the ladder, which is a conclusion about nothing.
+        print('')
+        print('discarded warm-up pass ({:.0f}s), so model load lands in no '
+              "preset's window".format(_WARMUP_RUN_SECONDS))
+        try:
+            await _measure_preset(ws, args.presets[0], _WARMUP_RUN_SECONDS,
+                                  args.frame, quiet=True)
+        except SystemExit:
+            # The sanity checks fire here for the same reasons they fire in a
+            # real pass, and they are worth surfacing before spending three
+            # minutes measuring the wrong thing.
+            raise
 
         runs: List[Dict[str, Any]] = []
         for name in args.presets:

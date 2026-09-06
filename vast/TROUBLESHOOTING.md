@@ -164,6 +164,66 @@ A `VAR=value command` prefix binds only to the first word of a line, so the
 second half of any `&&` chain ran under `/usr/bin/python` instead of the venv.
 `cmd_run` uses `export PATH=... && cd ... && <command>`.
 
+## 10. On Windows, Git Bash rewrites the remote path in `push` and `pull`
+
+Hit 2026-09-05. A remote path is a path on the *instance*, and MSYS treats any
+argument starting with `/` as a Unix path it should helpfully convert to
+Windows:
+
+```
+$ python vast/orchestrator.py push pipeline/api/server.py /workspace/Phantom/pipeline/api/server.py
+  pipeline/api/server.py -> C:/Program Files/Git/workspace/Phantom/pipeline/api/server.py
+ERROR: FileNotFoundError: [Errno 2] No such file
+```
+
+The conversion happens in the shell, before Python sees the argument, so
+nothing in this repository can defend against it. Prefix the command:
+
+```bash
+MSYS_NO_PATHCONV=1 python vast/orchestrator.py push <local> /workspace/...
+```
+
+PowerShell and a Linux shell are both unaffected. It bites `run` too, wherever
+a command's argument is an absolute path — `ffmpeg -i /workspace/clip.mp4`
+included.
+
+Worth knowing because of how it fails when it does *not* error: omitting the
+remote path entirely is accepted and lands the file in `/workspace/`, so
+`push pipeline/api/server.py` writes `/workspace/server.py` and the pod goes on
+running the old copy. That looks like a successful push and produces a
+measurement of the wrong code — the failure the "pod runs whatever it last
+pulled" warning in docs/PENDING_WORK.md §2b.0 exists to prevent.
+
+## 11. `resume` reverts anything you pushed
+
+Hit 2026-09-05, immediately after §10 had already cost a measurement.
+
+`resume` runs remote-setup, and remote-setup runs `startup.sh`, which brings the
+checkout to what the remote branch says. So a file placed with
+`orchestrator.py push` survives only until the next `resume` — and `resume` is
+also the only clean way to restart the pipeline, because the launch command
+needs the API token that `startup.sh` reports. Push a file, restart to load it,
+and the restart is what throws it away:
+
+    push server.py      -> file is on the pod, old process still running
+    resume              -> git reset discards it, pipeline starts on origin's copy
+    measure             -> measures the code you were trying to replace
+
+Nothing errors. `get_stats` simply does not carry the new field, which reads as
+"the feature is not working" rather than "the file is gone".
+
+**So `push` is for data, not for code.** Clips, source faces and model weights
+have nothing in git to revert them. For code, commit and push to the branch the
+pod tracks, then `resume` — the pull is the delivery mechanism, and the runbook's
+"the pod runs whatever it last pulled" (docs/PENDING_WORK.md §2b.0) is the same
+warning from the other side.
+
+To confirm which code is actually loaded, ask the pod rather than assuming:
+
+```bash
+python vast/orchestrator.py run "cd /workspace/Phantom && git log --oneline -1"
+```
+
 ## Quick reference — a working `.env`
 
 ```bash
