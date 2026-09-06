@@ -103,6 +103,37 @@ _REALISM_SWEEP: List[Any] = [
     ('texture_0.3', {'texture_strength': 0.3, 'diffuse_strength': 0.0}),
     ('texture_0.5', {'texture_strength': 0.5, 'diffuse_strength': 0.0}),
 
+    # The shaping knobs, one at a time against a fixed strength. They decide
+    # *what* the layer carries rather than how much, and they are the answer to
+    # the layer reading present-but-soft: at band 1.0 the high-pass keeps pore
+    # noise and the rim of every larger mark, so a freckle, spot, mole or crease
+    # arrived with its middle subtracted.
+    #
+    # `pores_only` is the shipped behaviour, kept as the thing the rest is
+    # compared against — without it the three below are three numbers with no
+    # zero. Read `texture_headroom` and `detail_reserve` across the set: the
+    # headroom should roughly triple between `pores_only` and `band_2.0`, and if
+    # it does not, the reserve is not engaging and nothing further will help.
+    ('pores_only', {'texture_strength': 0.4, 'diffuse_strength': 0.0,
+                    'texture_band': 1.0, 'texture_relief': 0.0,
+                    'texture_contrast': 1.0}),
+    ('band_2.0', {'texture_strength': 0.4, 'diffuse_strength': 0.0,
+                  'texture_band': 2.0, 'texture_relief': 0.65,
+                  'texture_contrast': 1.0}),
+    ('band_3.0', {'texture_strength': 0.4, 'diffuse_strength': 0.0,
+                  'texture_band': 3.0, 'texture_relief': 0.65,
+                  'texture_contrast': 1.0}),
+    ('contrast_2.2', {'texture_strength': 0.4, 'diffuse_strength': 0.0,
+                      'texture_band': 2.0, 'texture_relief': 0.65,
+                      'texture_contrast': 2.2}),
+
+    # Past measured parity, deliberately. Not a shipping value — this is the run
+    # that separates "the map is weak" from "the budget is small", and it is
+    # cheaper to take it here than to discover mid-session that it needs a code
+    # change. Judge it on the frames, not on the readings.
+    ('texture_2.0_overshoot', {'texture_strength': 2.0,
+                               'diffuse_strength': 0.0}),
+
     # Answers a different complaint in a different band — "the skin reads
     # hard", not "the skin reads plastic" — so it is swept alone before it is
     # swept with texture.
@@ -160,6 +191,12 @@ _BASE: Dict[str, Any] = {
     # a per-frame cost, so a sweep started after someone A/B'd it live would
     # measure it in every configuration without saying so.
     'texture_strength': 0.0,
+    # Restored with it, for the same reason: these decide what the texture layer
+    # carries, so a sweep that left them wherever the last live A/B put them
+    # would be comparing configurations that differ in more than their label.
+    'texture_band': 2.0,
+    'texture_relief': 0.65,
+    'texture_contrast': 1.6,
     'mask_feather': 0.04,
     'mask_erode': 0.03,
     'diffuse_strength': 0.0,

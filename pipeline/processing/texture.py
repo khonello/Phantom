@@ -37,12 +37,32 @@ high resolution and the *map* is derived per working size, memoised. The high-pa
 sigma scales with that size against the same 256px reference `_match_detail` uses,
 so both stages mean the same physical detail by "texture".
 
+**The band is wider than one octave, because skin is more than pores.** The
+sigma is `DETAIL_SIGMA * texture_band`, and at the default that lands on
+`_SCATTER_SIGMA` — so the layer owns everything finer than the distance light
+diffuses under skin, and the scatter pass owns everything coarser. That split is
+physical rather than arbitrary: what sits above the diffusion length is *shading*,
+and what sits below it is *surface* — pores, freckles, moles, spots, scars,
+stubble shadow, fine creases. At `DETAIL_SIGMA` alone the high-pass keeps roughly
+the finest two pixels, which holds pore noise and cuts the low half off every mark
+larger than that. The visible result is a face that measures as textured and reads
+as smooth, because the marks a viewer actually names were subtracted at extraction.
+
+**Energy is redistributed toward structure, because RMS is the wrong statistic
+for a mark.** The map is normalised to unit deviation and spent against a budget
+denominated in deviation, and a *sparse* field spends that budget badly: a dozen
+spots on an otherwise flat cheek contribute little to a second moment, so matching
+second moments scales them down to the level of the dense pore noise they sit in.
+`texture_contrast` expands the amplitude distribution before renormalising — same
+total energy, more of it in the marks and less in the filler. It is a general
+statement about localised skin features, not about any one kind.
+
 The map is monochrome for the reason `_add_grain` is monochrome: independent
 per-channel high-frequency detail reads as coloured speckle, nothing like skin.
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -58,8 +78,10 @@ from pipeline.processing.geometry import (
 )
 
 # Re-exported so a caller working with textures has one import rather than two.
-__all__ = ['SourceTexture', 'CANONICAL_SIZE', 'TEXTURE_MAX', 'map_size',
-           'canonical_from_frame', 'extract']
+__all__ = ['SourceTexture', 'CANONICAL_SIZE', 'TEXTURE_MAX', 'STRENGTH_MAX',
+           'CONTRAST_RANGE', 'BAND_RANGE', 'RELIEF_RANGE', 'map_size',
+           'canonical_from_frame',
+           'extract']
 
 
 # Resolution the source crop is cached at. Above any working size the compositor
@@ -72,13 +94,46 @@ CANONICAL_SIZE = 512
 # two texture resolutions at the same points.
 _MAP_STEPS = ALIGNED_STEPS
 
-# Ceiling on how much detail `texture_strength` may add, in 8-bit units of
-# standard deviation. The map is normalised to unit deviation inside the skin
-# mask, so `texture_strength * _TEXTURE_MAX` is literally the standard deviation
-# of what gets added to the picture. Sits just above `_GRAIN_MAX` (6.0): pore
-# contrast on a webcam face is a few units, and detail that overwhelms the grain
-# it sits under is a texture the camera could not have recorded.
-TEXTURE_MAX = 8.0
+# Ceiling on how much detail the layer may add, in 8-bit units of standard
+# deviation. The map is normalised to unit deviation inside the skin mask, so the
+# amount the compositor computes is literally the standard deviation of what gets
+# added to the picture.
+#
+# Raised from 8.0 with the band. This is a *backstop against a broken estimate*,
+# not the control — the measured headroom is the control — and the band it now
+# bounds runs from the finest octave up to the subsurface diffusion length rather
+# than the finest octave alone, so the deviation a real face legitimately carries
+# across it is correspondingly larger. Left at 8.0 it would start binding on a
+# large, well-lit face and would silently cap the layer at the moment it has most
+# to say.
+TEXTURE_MAX = 12.0
+
+# Ceiling on `texture_strength`. Above 1.0 the layer deliberately exceeds the
+# measured parity bound — the point at which the face carries as much
+# high-frequency energy as the camera recorded of the real one. That is not a
+# shipping value and the desktop slider does not reach it; it exists because
+# separating "the map is weak" from "the budget is small" takes one run with the
+# bound lifted, and without it that diagnosis needs a code change.
+STRENGTH_MAX = 2.0
+
+# Bounds on the two shaping knobs. Both are clamped rather than rejected, for the
+# reason every `set_realism` field is: these get typed at a prompt between takes.
+CONTRAST_RANGE = (1.0, 3.0)
+BAND_RANGE = (1.0, 4.0)
+RELIEF_RANGE = (0.0, 0.95)
+
+# Deviation, in 8-bit units inside the skin mask, below which an octave is not a
+# signal. Each octave is normalised to unit deviation before it is weighted, so a
+# band holding nothing real would be amplified to parity with one that does — and
+# what is in that band on a clean, well-lit photograph is sensor noise and JPEG
+# ringing. Dropped rather than scaled, because an octave of amplified ringing
+# reprojected onto a moving face is exactly the crawl this layer must not add.
+_OCTAVE_FLOOR = 0.35
+
+# Working size the diagnostic octave reading is taken at. Fixed rather than
+# following the live config so the number means the same thing between sessions
+# and can be compared across source photographs.
+_REPORT_SIZE = 256
 
 # Feature exclusions, as radii in canonical units (the FFHQ template is
 # normalised, so these are constants rather than landmark lookups). Eyes, nostrils
@@ -112,7 +167,12 @@ class SourceTexture:
     skin: Mask                       # canonical skin mask, float32 [0, 1]
     native_px: int                   # face extent in the source image
     yaw: Optional[float] = None      # source pose, for the confidence mask
-    _maps: Dict[int, Frame] = field(default_factory=dict, repr=False)
+    _maps: Dict['_MapKey', Frame] = field(default_factory=dict, repr=False)
+    # Raw deviation of each octave in the chosen photograph, in 8-bit units, at
+    # a fixed reference size. Measured once at extraction and never used by the
+    # compositor — this is the diagnostic that answers "is my source photo good
+    # enough", which was otherwise a guess. (pores, marks).
+    octaves: Tuple[float, float] = (0.0, 0.0)
 
     @property
     def upsampled(self) -> bool:
@@ -125,30 +185,59 @@ class SourceTexture:
         """
         return self.native_px < CANONICAL_SIZE
 
-    def detail_for(self, size: int) -> Optional[Frame]:
+    def detail_for(
+        self,
+        size: int,
+        contrast: float = 1.0,
+        band: float = 1.0,
+        relief: float = 0.0,
+    ) -> Optional[Frame]:
         """
         Zero-mean, unit-deviation skin detail at a working resolution.
 
         Args:
             size: Edge length of the map, snapped by `map_size` to the ladder
+            contrast: Amplitude shaping on the mark octave; 1.0 is none
+            band: How far up in scale the layer reaches, as a multiple of
+                `DETAIL_SIGMA`; 1.0 is the finest octave alone
+            relief: The mark octave's share of the amplitude, in quadrature
+                against the pore octave. 0.0 is pores only
 
         Returns:
             Single-channel float32 map, masked to skin and normalised so that
             multiplying by a strength in 8-bit units gives that deviation. None
             if the crop holds no usable detail at this size.
         """
-        cached = self._maps.get(size)
+        # Keyed on the shaping, not on the size alone. These are live A/B knobs
+        # — `set_realism` moves them between takes — and a cache keyed on size
+        # would hand back the map built under the previous setting and make the
+        # comparison a measurement of nothing.
+        key = (size, round(float(contrast), 3), round(float(band), 3),
+               round(float(relief), 3))
+        cached = self._maps.get(key)
         if cached is not None:
-            return cached
+            return None if cached is _EMPTY else cached
 
-        built = self._build_map(size)
-        # Cached either way: a size that produced nothing will produce nothing
-        # again, and the alternative is rebuilding it every frame.
-        self._maps[size] = built if built is not None else _EMPTY
+        # A sweep across several values leaves one map per combination. They are
+        # small (64 KB at 128, 1 MB at 512) but not free, and the working set is
+        # one or two sizes — so drop the lot rather than grow without bound.
+        if len(self._maps) >= _MAP_CACHE_MAX:
+            self._maps.clear()
+
+        built = self._build_map(size, contrast, band, relief)
+        # Cached either way: a combination that produced nothing will produce
+        # nothing again, and the alternative is rebuilding it every frame.
+        self._maps[key] = built if built is not None else _EMPTY
         return built
 
-    def _build_map(self, size: int) -> Optional[Frame]:
-        """Derive the high-frequency band at `size`. See `detail_for`."""
+    def _build_map(
+        self,
+        size: int,
+        contrast: float,
+        band: float,
+        relief: float,
+    ) -> Optional[Frame]:
+        """Derive the skin-detail map at `size`. See `detail_for`."""
         # INTER_AREA on the way down: it is the resampling filter that does not
         # alias, which matters more here than anywhere else in the pipeline —
         # aliased high frequencies are exactly the shimmer this layer must not
@@ -159,33 +248,135 @@ class SourceTexture:
         crop = cv2.resize(self.crop, (size, size), interpolation=interpolation)
         skin = cv2.resize(self.skin, (size, size), interpolation=cv2.INTER_LINEAR)
 
-        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY).astype(np.float32)
-
-        # The same band split `_match_detail` uses, at the same 256px reference,
-        # so the additive layer here and the multiplicative one there describe
-        # the same physical detail rather than fighting over adjacent bands.
-        sigma = DETAIL_SIGMA * size / DETAIL_SIGMA_REFERENCE
-        high = cv2.subtract(gray, cv2.GaussianBlur(gray, (0, 0), sigma))
-
         binary = (skin > 0.5).astype(np.uint8)
         if cv2.countNonZero(binary) < 64:
             return None
 
-        # Normalise inside the mask only. Deviation over the whole square would
-        # be dominated by the excluded features and the crop's border, so the
-        # strength knob would mean something different for every source image.
-        _, deviation = cv2.meanStdDev(high, mask=binary)
-        energy = float(np.sqrt(np.mean(np.square(deviation))))
-        if energy < 1e-3:
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY).astype(np.float32)
+
+        contrast = float(np.clip(contrast, *CONTRAST_RANGE))
+        band = float(np.clip(band, *BAND_RANGE))
+        relief = float(np.clip(relief, *RELIEF_RANGE))
+
+        # Two cuts, giving two octaves. The fine one starts at the same
+        # `DETAIL_SIGMA` `_match_detail` splits on, at the same 256px reference,
+        # so the two stages still agree about where texture begins. The coarse
+        # one runs up to `band` times that, which at the default is the
+        # subsurface diffusion length — the scale above which a variation in the
+        # picture is shading rather than something on the skin.
+        fine_sigma = DETAIL_SIGMA * size / DETAIL_SIGMA_REFERENCE
+        coarse_sigma = fine_sigma * band
+
+        fine_low = cv2.GaussianBlur(gray, (0, 0), fine_sigma)
+        pores = cv2.subtract(gray, fine_low)
+
+        # Everything between the two cuts. This is where a mark of any kind
+        # lives — a freckle, a spot, a mole, a scar, a crease, the shadow of
+        # stubble — because what separates those from pore noise is that they
+        # are *larger*, not that they are a different kind of thing. It is also
+        # the half of every mark the single-octave version threw away: a 4px
+        # spot has most of its energy below the fine cut, so what survived was
+        # its rim.
+        marks = (
+            cv2.subtract(fine_low, cv2.GaussianBlur(gray, (0, 0), coarse_sigma))
+            if band > 1.0 else None
+        )
+
+        # Amplitude shaping, on the marks only. A second moment is the wrong
+        # statistic for a sparse field: a dozen spots on a flat cheek barely
+        # move it, so a budget denominated in deviation scales them down to the
+        # level of the dense noise they sit among, and the face measures as
+        # textured while reading as smooth. Expanding the amplitude
+        # distribution and renormalising moves the same energy into the marks.
+        #
+        # Deliberately not applied to `pores`. That octave is dense filler by
+        # nature, and expanding its amplitude distribution is how a pore field
+        # becomes speckle — the exact artefact the monochrome rule exists to
+        # avoid, arrived at from the other direction.
+        if marks is not None and contrast > 1.0:
+            marks = np.sign(marks) * (np.abs(marks) ** contrast)
+
+        # Each octave normalised on its own before it is weighted, so `relief`
+        # means "share of the budget" rather than "share of whatever this
+        # photograph happened to have most of". An octave holding no signal is
+        # dropped rather than amplified — see `_OCTAVE_FLOOR`.
+        levels: List[Tuple[Frame, float]] = []
+        pore_level = _normalise(pores, binary, floor=_OCTAVE_FLOOR)
+        mark_level = (
+            _normalise(marks, binary, floor=_OCTAVE_FLOOR)
+            if marks is not None else None
+        )
+
+        # Quadrature, like every other mix in this pipeline: independent
+        # zero-mean fields add that way, so these weights compose with the
+        # headroom arithmetic in `_texture_headroom` instead of fighting it.
+        if pore_level is not None:
+            levels.append((pore_level, float(np.sqrt(max(0.0, 1.0 - relief ** 2)))))
+        if mark_level is not None:
+            levels.append((mark_level, relief if pore_level is not None else 1.0))
+
+        levels = [(field_, weight) for field_, weight in levels if weight > 1e-3]
+        if not levels:
             return None
 
-        detail: Frame = (high / energy) * skin
-        return np.ascontiguousarray(detail, dtype=np.float32)
+
+        combined = levels[0][0] * levels[0][1]
+        for field_, weight in levels[1:]:
+            combined = combined + field_ * weight
+
+        # One last normalisation over the sum. The octaves are not perfectly
+        # independent — they were cut from one image — so their weighted sum
+        # does not land at unit deviation on its own, and the compositor's
+        # arithmetic depends on it doing exactly that.
+        unit = _normalise(combined, binary)
+        if unit is None:
+            return None
+
+        return np.ascontiguousarray(unit * skin, dtype=np.float32)
 
 
-# Sentinel for "this size yielded nothing", so a failed build is not retried per
-# frame. Never returned — `detail_for` maps it back to None.
+# Sentinel for "this combination yielded nothing", so a failed build is not
+# retried per frame. Never returned — `detail_for` maps it back to None.
 _EMPTY: Frame = np.zeros((1, 1), dtype=np.float32)
+
+# (size, contrast, band, relief) — everything the map is a function of.
+_MapKey = Tuple[int, float, float, float]
+
+# Distinct maps held before the cache is dropped wholesale. The working set is
+# one or two sizes; anything beyond that is a sweep walking through values it
+# will not come back to.
+_MAP_CACHE_MAX = 16
+
+
+def _normalise(
+    field_: Frame,
+    binary: Frame,
+    floor: float = 0.0,
+) -> Optional[Frame]:
+    """
+    Centre and scale a field to zero mean and unit deviation inside a mask.
+
+    Inside the mask only, and that is the whole point of taking a mask at all:
+    deviation over the entire square would be dominated by the excluded features
+    and by the crop's replicated border, so a strength knob calibrated against it
+    would mean something different for every source photograph.
+
+    Args:
+        field_: Single-channel float32 field over the canonical crop
+        binary: Where to measure, as an 8-bit 0/1 mask
+        floor: Deviation below which the field is not a signal. Zero accepts
+            anything measurable; callers separating real detail from sensor
+            noise pass `_OCTAVE_FLOOR`.
+
+    Returns:
+        The normalised field, or None when it holds nothing worth keeping.
+    """
+    mean, deviation = cv2.meanStdDev(field_, mask=binary)
+    energy = float(np.sqrt(np.mean(np.square(deviation))))
+    if energy < max(floor, 1e-3):
+        return None
+    result: Frame = (field_ - float(mean[0][0])) / energy
+    return result.astype(np.float32)
 
 
 def map_size(extent: float) -> int:
@@ -252,6 +443,52 @@ def extract(
         skin=skin,
         native_px=_face_extent(face),
         yaw=_face_yaw(face),
+        octaves=_measure_octaves(crop, skin),
+    )
+
+
+def _measure_octaves(crop: Frame, skin: Mask) -> Tuple[float, float]:
+    """
+    Raw deviation of each octave in the source crop, in 8-bit units.
+
+    A diagnostic, not an input: nothing in the compositor reads it. It exists
+    because "is the chosen photograph sharp enough" was a question this layer
+    could not answer about itself, and the visible symptom of a soft donor is
+    identical to the visible symptom of a starved budget — the operator sees a
+    face that is nearly smooth either way. One number per octave separates them
+    in the log, before anyone spends a pod session on it.
+
+    Fixed at `_REPORT_SIZE` with the default band split rather than following
+    the live config, so the reading means the same thing between sessions and
+    can be compared across source photographs.
+
+    Args:
+        crop: Canonical FFHQ-framed source face, BGR
+        skin: Canonical skin mask
+
+    Returns:
+        (pore deviation, mark deviation), both zero if unmeasurable
+    """
+    size = _REPORT_SIZE
+    small = cv2.resize(crop, (size, size), interpolation=cv2.INTER_AREA)
+    binary = (
+        cv2.resize(skin, (size, size), interpolation=cv2.INTER_LINEAR) > 0.5
+    ).astype(np.uint8)
+    if cv2.countNonZero(binary) < 64:
+        return (0.0, 0.0)
+
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    fine_sigma = DETAIL_SIGMA * size / DETAIL_SIGMA_REFERENCE
+    fine_low = cv2.GaussianBlur(gray, (0, 0), fine_sigma)
+
+    def deviation(field_: Frame) -> float:
+        _, dev = cv2.meanStdDev(field_, mask=binary)
+        return round(float(dev[0][0]), 2)
+
+    return (
+        deviation(cv2.subtract(gray, fine_low)),
+        deviation(cv2.subtract(
+            fine_low, cv2.GaussianBlur(gray, (0, 0), fine_sigma * 2.0))),
     )
 
 

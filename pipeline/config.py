@@ -236,7 +236,44 @@ class FaceSwapConfig:
     # **Defaults off.** It has never been judged on footage, and a realism knob
     # that arrives switched on is one nobody chose. 0.3-0.5 is the expected
     # working range; see docs/TEXTURE_PIPELINE.md.
+    #
+    # Above 1.0 (to `texture.STRENGTH_MAX`) deliberately exceeds measured parity.
+    # Not a shipping value — the desktop slider stops at 1.0 — but the one run
+    # that separates "the map is weak" from "the budget is small".
     texture_strength: float = 0.0
+
+    # The three shaping knobs behind that strength. They decide *what* the layer
+    # carries; `texture_strength` decides how much of it. All three only matter
+    # when the layer is on, which is why they carry working defaults rather than
+    # inert ones — the opt-in already happened at `texture_strength`.
+    #
+    # **`texture_band`** — how far up in scale the layer reaches, as a multiple
+    # of `DETAIL_SIGMA`. At 1.0 the high-pass keeps roughly the finest two
+    # pixels: pore noise, and the rim of anything larger. That is the setting
+    # that produced a face measuring as textured and reading as smooth, because
+    # a freckle, a spot, a mole or a crease is 2-8px at working resolution and
+    # most of each one was being subtracted as "shape". 2.0 puts the cut on
+    # `_SCATTER_SIGMA`, so this layer owns everything finer than the distance
+    # light diffuses under skin and the scatter pass owns everything coarser —
+    # surface against shading, which is the physical line rather than an
+    # arbitrary one.
+    texture_band: float = 2.0
+
+    # **`texture_relief`** — the mark octave's share of the amplitude, against
+    # the pore octave, in quadrature. The two octaves are normalised separately
+    # before they are mixed, so this is a share of the budget rather than a
+    # share of whatever the photograph happened to hold most of. 0.0 reproduces
+    # the pores-only behaviour exactly.
+    texture_relief: float = 0.65
+
+    # **`texture_contrast`** — amplitude shaping on the mark octave. A second
+    # moment is the wrong statistic for a sparse field: a dozen spots on a flat
+    # cheek barely move it, so a budget denominated in deviation scales them
+    # down to the level of the dense noise around them. This expands the
+    # amplitude distribution and renormalises, moving the same total energy into
+    # the marks. Applied to the marks only — expanding the pore octave is how a
+    # pore field turns into speckle.
+    texture_contrast: float = 1.6
     grain: bool = True              # match sensor noise on the composited face
     occluder: bool = True           # XSeg mask so hands/mics are not overpainted
 
@@ -473,6 +510,9 @@ class FaceSwapConfig:
             'mask_erode': self.mask_erode,
             'diffuse_strength': self.diffuse_strength,
             'texture_strength': self.texture_strength,
+            'texture_band': self.texture_band,
+            'texture_relief': self.texture_relief,
+            'texture_contrast': self.texture_contrast,
             'grain': self.grain,
             'occluder': self.occluder,
             'buffer_size': self.buffer_size,

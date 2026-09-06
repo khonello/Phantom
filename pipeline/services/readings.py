@@ -22,7 +22,15 @@ the number to read is `share_at_limit`.
 **`texture_headroom`** — how much high-frequency deviation the texture layer was
 allowed. Routinely zero means detail matching has already taken the face to the
 target's texture level and the layer has nothing to add, which would be worth
-knowing before tuning its strength.
+knowing before tuning its strength. It was, and it did: the measured p50 was
+**0.78** of an 8-bit unit against a face carrying several, which is why the layer
+was invisible at every strength.
+
+**`detail_reserve`** — the share of that budget `_match_detail` now holds back so
+the texture layer has something to fill. This is the reading that says whether
+the fix is engaged on a given clip, and it is the first thing to check when
+texture looks weak: a reserve of zero while `texture_strength` is set means the
+layer is declining for a reason that has nothing to do with the strength.
 
 Cheap enough to leave on: one float appended per frame per reading, percentiles
 computed once at the end. Same reasoning `LatencyBudget` records unconditionally
@@ -168,17 +176,37 @@ class Readings:
                     'which is the case for adding real detail.'.format(
                         share * 100.0))
 
+        reserve = data.get('detail_reserve')
+        if reserve is not None:
+            if reserve['p95'] <= 1e-6:
+                notes.append(
+                    '  -> detail matching reserved nothing for texture on any '
+                    'frame. Either the layer is off, or it is declining — no '
+                    'source photograph, or every frame too far from its pose. '
+                    'Read texture_confidence before touching a strength.')
+            else:
+                notes.append(
+                    '  -> detail matching held back {:.0%} of the target band '
+                    'for real skin detail (p50). Without that reservation this '
+                    'stage reaches parity on its own and leaves the texture '
+                    'layer a rounding error to spend.'.format(reserve['p50']))
+
         headroom = data.get('texture_headroom')
         if headroom is not None:
             if headroom['p95'] < 0.25:
                 notes.append(
                     '  -> texture had no headroom on this clip. The swap is '
                     'already at the real face\'s texture level, so '
-                    'texture_strength has nothing to spend.')
+                    'texture_strength has nothing to spend. If detail_reserve '
+                    'is also zero, that is the cause and not a property of the '
+                    'footage.')
             else:
                 notes.append(
-                    '  -> texture headroom p50 {:.2f} units, so '
-                    'texture_strength=1.0 would add that much and land at '
-                    'parity.'.format(headroom['p50']))
+                    '  -> texture headroom p50 {:.2f} units of deviation. That '
+                    'is what the layer may add at strength 1.0, and it lands at '
+                    'parity with the real face rather than past it. Judge it '
+                    'against the band the face carries, not against zero: a '
+                    'headroom under ~1 unit is invisible whatever the strength '
+                    'says.'.format(headroom['p50']))
 
         return notes

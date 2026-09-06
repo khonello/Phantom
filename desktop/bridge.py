@@ -311,6 +311,19 @@ class Bridge(QObject):
         self._texture_last = 0.4
         self._diffuse_last = 0.3
 
+        # How far up in scale the texture layer reaches. On the panel and the
+        # other two shaping knobs are not, because this is the one whose right
+        # value cannot be reasoned out: it depends on how large the operator's
+        # face is in frame and how large the marks on it are, which is a
+        # different answer per person and per camera. At 1.0 the high-pass
+        # keeps pore noise and the rim of every larger mark, so a freckle, spot
+        # or scar arrives with its middle missing — the measured difference
+        # between that and 2.0 was the largest single term in the whole layer.
+        # `texture_relief` and `texture_contrast` refine what this exposes and
+        # stay on `set_realism`, since they only mean anything once the band is
+        # right.
+        self._texture_band = 2.0
+
         self._awaiting_first_frame = False
         # When the wait for a first processed frame began, and whether the
         # watchdog has already spoken. See `_check_first_frame`.
@@ -838,13 +851,17 @@ class Bridge(QObject):
         # that is not, and either turns an A/B into a measurement of nothing.
         texture = data.get('texture_strength')
         diffuse = data.get('diffuse_strength')
-        if texture is not None or diffuse is not None:
+        band = data.get('texture_band')
+        if texture is not None or diffuse is not None or band is not None:
             changed = False
             if texture is not None and float(texture) != self._texture_strength:
                 self._texture_strength = float(texture)
                 changed = True
             if diffuse is not None and float(diffuse) != self._diffuse_strength:
                 self._diffuse_strength = float(diffuse)
+                changed = True
+            if band is not None and float(band) != self._texture_band:
+                self._texture_band = float(band)
                 changed = True
             # Only a non-zero reading updates the toggle's memory. Zero is the
             # off state, and letting it overwrite `_last` would make the next
@@ -1299,6 +1316,10 @@ class Bridge(QObject):
     def diffuseStrength(self) -> float:
         return self._diffuse_strength
 
+    @Property(float, notify=tuningChanged)
+    def textureBand(self) -> float:
+        return self._texture_band
+
     @Property(bool, notify=tuningChanged)
     def textureOn(self) -> bool:
         return self._texture_strength > 0.0
@@ -1315,11 +1336,11 @@ class Bridge(QObject):
 
     def _push_realism(self) -> None:
         """
-        Send both values, always.
+        Send every value the panel owns, always.
 
-        Both at once rather than only the one that changed, because the two
+        All of them rather than only the one that changed, because the two
         layers work in different bands and either can be blamed for what the
-        other did. Sending the pair makes the pipeline's state unambiguous
+        other did. Sending the set makes the pipeline's state unambiguous
         after any click.
         """
         if not self._client.connected:
@@ -1329,6 +1350,7 @@ class Bridge(QObject):
             values={
                 'texture_strength': self._texture_strength,
                 'diffuse_strength': self._diffuse_strength,
+                'texture_band': self._texture_band,
             },
         )
 
@@ -1369,6 +1391,20 @@ class Bridge(QObject):
         self._push_realism()
         self.tuningChanged.emit()
 
+    @Slot(float)
+    def setTextureBand(self, value: float) -> None:
+        """
+        How far up in scale the texture layer reaches.
+
+        No `_last` memory and no toggle, unlike the two strengths: this is not
+        a layer that can be off, it is a property of the one above it. 1.0 is
+        the narrowest useful setting rather than an off state, and the pipeline
+        clamps to `texture.BAND_RANGE` regardless of what arrives.
+        """
+        self._texture_band = max(1.0, min(4.0, float(value)))
+        self._push_realism()
+        self.tuningChanged.emit()
+
     @Slot()
     def bypassRealism(self) -> None:
         """
@@ -1377,6 +1413,11 @@ class Bridge(QObject):
         The baseline is the thing every comparison is against, so getting back
         to it must not take two clicks and a moment's thought about which knob
         was where.
+
+        `texture_band` is deliberately left alone. It is not a layer that can be
+        off — it says what the texture layer carries, and zeroing the strength
+        already silences that. Resetting it here would mean every bypass
+        discarded the band the operator had just spent a minute settling on.
         """
         if self._texture_strength > 0.0:
             self._texture_last = self._texture_strength

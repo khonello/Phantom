@@ -339,6 +339,148 @@ measured ratio is 0.584 *after* that stage ran, then either the clamp is binding
 the two measurements describe different bands. Knowing which decides how much of
 this document needs building.
 
+### 6.1 Agreeing on the band was necessary and not sufficient — they also compete for it
+
+*Added after the layer was first run on real footage and reported as present but
+too soft.*
+
+The two stages agreed on the band, as §6 required, and that turned out to be the
+setup for a different failure. **They also both aim at the same target** — the
+real face's high-frequency energy — and `_match_detail` runs first.
+
+It does not merely aim at it. The pod run measured its clamp binding on **0% of
+2267 frames**, which is the stronger statement: it *reaches* parity, on every
+frame. So by the time `_texture_headroom` runs in frame space, `fake ≈ real` by
+construction, and what it measures as "available" is only what the warp down
+happened to lose. Measured p50 **0.78** of an 8-bit unit, against a real face
+carrying several. At the 0.3–0.5 working range the layer was contributing well
+under 1% of the face's high-frequency energy.
+
+That also explains the observation §10 could not: **texture at 0.3 and 0.5
+produced identical readings on every metric.** They were both invisible.
+
+And the composition is worse than the amount. `_match_detail` can only amplify
+the band the swap already carries, which is upsampled 128-native output with no
+structure in it. The face lands at the correct *energy* with the wrong
+*content* — textured by measurement, smooth to the eye. Restoration was already
+shown not to close this gap (+0.03 of 0.42); this is the same deficit reappearing
+one stage later, disguised as a satisfied statistic.
+
+**The fix is to reserve, not to raise a ceiling.** `_texture_reserve` returns a
+share `r`, `_match_detail` aims at `sqrt(1 - r²)` of the target's energy, and the
+texture layer fills the rest with detail a camera actually recorded. Quadrature,
+so it composes with the `f² + g² + t² = r²` arithmetic already in
+`_texture_headroom` rather than fighting it. Total energy still lands at parity;
+overshoot is still impossible.
+
+Three things had to come with it, and two were found by measuring rather than by
+reasoning:
+
+1. **Reserve only when the layer will run.** A reservation is a deliberate
+   undershoot. If texture then declines — no source photograph, pose beyond
+   `_POSE_LIMIT`, no map at this working size — nothing fills the gap and the
+   face is *softer* than with no texture layer at all. Every gate `_add_texture`
+   applies is applied in `_texture_reserve` first, against the same clamped
+   values. The one gate that cannot be checked in advance is the headroom
+   itself, and that direction is safe: reserving makes headroom more likely.
+2. **The band has to travel with the reserve.** Reserving one octave of a field
+   measured across three barely moves anything. Measured on a synthetic face in
+   exactly the starved regime: reserving 0.4 over the narrow band took the
+   headroom from 0.30 to **0.31**. So when a reserve is requested,
+   `_match_detail` scales the same span the map will fill; with no reserve it
+   splits where it always did, bit-identically.
+3. **`_DETAIL_RATIO` has to move with the target it clamps.** The clamp bounds
+   how far the stage may deviate from what it is aiming at, and reserving lowers
+   what it is aiming at. Left fixed, the 0.6 floor refused the attenuation the
+   reservation had just asked for — at `reserve` 0.8 the wanted ratio was 0.54
+   against a floor of 0.60, so a quarter of the promised room was quietly kept.
+
+### 6.2 One octave was never enough, and that is the larger term
+
+The same footage report — marks visible in the source, barely visible in the
+output — has a second cause that is independent of the budget and, measured,
+**larger than it**.
+
+`DETAIL_SIGMA` is 1.5 at a 256px reference. At a 128px working size that is a
+high-pass at sigma 0.75, which keeps roughly the finest two pixels. Pore noise
+lives there. A freckle, a spot, a mole, a scar, a pockmark or a fine crease is
+**2–8px at working resolution**, so the bulk of each one sits *below* the cut and
+is subtracted as "shape" at extraction. What survives is its rim. That is the
+mechanism behind a face that measures as textured and reads as smooth: the marks
+a viewer would actually name were removed before anything else ran.
+
+So the band spans octaves. `texture_band` is the span as a multiple of
+`DETAIL_SIGMA`, and 2.0 puts the coarse cut on `_SCATTER_SIGMA` — **this layer
+owns everything finer than the distance light diffuses under skin, and §7's
+scatter pass owns everything coarser.** Surface against shading. That is a
+physical line rather than a chosen constant, and it means the two layers still
+cannot reach into each other's band.
+
+**Octaves are cut, normalised and weighted separately.** That makes this a pass
+per kind of skin feature, keyed on the property that actually distinguishes them
+— scale — rather than on a classifier. A detector for "spot vs mole vs crease"
+on one uploaded photograph under unknown lighting is the unreliable part, and
+applying the wrong gain to real detail because the classifier was wrong is a
+worse failure than a coarse split. `texture_relief` is the mark octave's share
+against the pore octave, in quadrature; `0.0` reproduces the shipped pores-only
+map exactly, which is what keeps the old behaviour available for A/B.
+
+An octave whose measured deviation falls below `_OCTAVE_FLOOR` is **dropped, not
+normalised up**. Per-octave normalisation is what makes the knob portable across
+photographs, but applied to a band holding nothing real it would amplify sensor
+noise and JPEG ringing — and an octave of amplified ringing, reprojected onto a
+moving face, is precisely the crawl §12 warns about.
+
+The octaves are summed into one map at extraction and memoised, so however many
+there are, **the live path still does one `warpAffine` of one single-channel
+image per frame.**
+
+### 6.3 RMS is the wrong statistic for a mark
+
+The third cause, and the subtlest.
+
+The map is normalised to unit deviation and spent against a budget denominated in
+deviation. A *sparse* field spends that budget badly. A dozen spots on an
+otherwise flat cheek contribute little to a second moment, so matching second
+moments scales them down until they sit at the level of the dense pore noise
+around them. Dense-and-uniform spends an RMS budget efficiently; sparse-and-
+strong does not — and sparse-and-strong is exactly what a blemish is.
+
+`texture_contrast` expands the amplitude distribution of the mark octave and
+renormalises: the same total energy, redistributed toward the structure. On a
+Gaussian field a γ of 1.6 raises the p99.5/RMS ratio by about a fifth; on a real
+skin band, which is already heavy-tailed where marks exist, more.
+
+**Applied to the mark octave only.** The pore octave is dense filler by nature,
+and expanding its amplitude distribution is how a pore field becomes speckle —
+the failure the monochrome rule exists to prevent, arrived at from the other
+direction.
+
+### 6.4 What the three are worth, measured
+
+On a synthetic face constructed to sit in the starved regime (`_match_detail`
+unclamped and reaching parity, which is the real condition), source carrying both
+pore noise and 3–8px marks:
+
+| configuration | headroom | reaching the picture |
+|---|---|---|
+| as shipped (band 1.0, no reserve, no shaping) | 0.30 | 0.364 |
+| + wider band alone | 0.78 | 0.378 |
+| + reserve alone, narrow band | 0.31 | 0.375 |
+| both, strength 0.4 | 0.80 | 0.455 |
+| both, strength 1.0 | 0.86 | 0.647 |
+| band 3.0, strength 1.0 | 1.17 | 0.770 |
+
+Read the attribution honestly. **The band widening is the dominant term; the
+reservation is secondary and does almost nothing without it.** The intuition that
+led here — that the budget was being taken by the previous stage — was correct
+about the mechanism and wrong about which term mattered most, and only the
+factorial showed that.
+
+It is also a synthetic fixture. It establishes the mechanism and the direction.
+It does not establish the magnitude on a real face, and nothing here substitutes
+for §10.
+
 ---
 
 ## 7. The diffuse / light-scatter pass

@@ -33,6 +33,7 @@ from pipeline.api.schema import (
     ResponseMessage,
 )
 from pipeline.processing.pipeline import ProcessingPipeline
+from pipeline.processing import texture
 from pipeline.services import guards
 from pipeline.services import swapper_models
 from pipeline.services import enhancer_models
@@ -454,6 +455,9 @@ def handle_get_state(
             # honest without re-making it: a pipeline holding 0.4 shows 0.40
             # rather than a slider at zero over a layer that is running.
             'texture_strength': config.texture_strength,
+            'texture_band': config.texture_band,
+            'texture_relief': config.texture_relief,
+            'texture_contrast': config.texture_contrast,
             'diffuse_strength': config.diffuse_strength,
             'pipeline_running': pipeline.is_running() if pipeline else False,
             'source_loaded': source_loaded,
@@ -947,7 +951,26 @@ _REALISM_FIELDS: Dict[str, Any] = {
     # The additive skin-detail layer. Live-switchable for the same reason the
     # restoration knobs are: whether it reads as skin or as noise is a footage
     # question, and A/B on one clip is the only way to answer it.
-    'texture_strength': lambda v: min(1.0, max(0.0, float(v))),
+    #
+    # Reaches past 1.0, unlike the desktop slider. Above parity is not a
+    # shipping value, but separating "the map is weak" from "the budget is
+    # small" takes one run with the bound lifted, and the alternative is a code
+    # change mid-session.
+    'texture_strength': lambda v: min(texture.STRENGTH_MAX, max(0.0, float(v))),
+    # What that strength is spent on, as opposed to how much of it. Three axes
+    # because the ways a skin mark goes missing are independent: `texture_band`
+    # is scale (a 4px spot cut off by a 1px high-pass), `texture_relief` is the
+    # mix between marks and pore noise, and `texture_contrast` is amplitude (a
+    # sparse mark flattened by a budget denominated in RMS). Each is separately
+    # switchable because either of the other two could be blamed for its
+    # artefact otherwise — the same argument that keeps `diffuse_strength` apart
+    # from `texture_strength`.
+    'texture_band': lambda v: min(
+        texture.BAND_RANGE[1], max(texture.BAND_RANGE[0], float(v))),
+    'texture_relief': lambda v: min(
+        texture.RELIEF_RANGE[1], max(texture.RELIEF_RANGE[0], float(v))),
+    'texture_contrast': lambda v: min(
+        texture.CONTRAST_RANGE[1], max(texture.CONTRAST_RANGE[0], float(v))),
     'grain': lambda v: bool(v),
     'occluder': lambda v: bool(v),
     # Restoration on/off. It has its own `set_enhance` command and is

@@ -2313,11 +2313,43 @@ Window {
                             }
                         }
 
+                        // BAND is not a third layer, it is what the texture
+                        // layer carries — so it gets a label rather than a
+                        // toggle. On the panel at all because it is the one
+                        // shaping knob whose right value cannot be reasoned
+                        // out: it follows how large the face is in frame and
+                        // how large the marks on it are. At 1.0 the high-pass
+                        // keeps pore noise and the rim of everything bigger,
+                        // so a freckle, spot or scar arrives with its middle
+                        // missing. `relief` and `contrast` refine what this
+                        // exposes and stay on set_realism.
+                        Column {
+                            spacing: 5
+                            Rectangle {
+                                width: 96; height: 28; radius: 6
+                                color: "#0d0d18"
+                                border.color: "#14142a"; border.width: 1
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "BAND"
+                                    color: bridge.textureOn ? "#c4b5fd" : "#475569"
+                                    font.pixelSize: 10; font.letterSpacing: 0.8
+                                }
+                            }
+                            Slider {
+                                width: 96
+                                from: 1.0; to: 4.0
+                                value: bridge.textureBand
+                                onMoved: bridge.setTextureBand(value)
+                            }
+                        }
+
                         // The reading, because a slider position is not a
                         // number and the value is what gets written down.
                         Text {
                             anchors.verticalCenter: parent.verticalCenter
                             text: "tex " + bridge.textureStrength.toFixed(2)
+                                  + "   band " + bridge.textureBand.toFixed(1)
                                   + "   dif " + bridge.diffuseStrength.toFixed(2)
                             color: "#475569"
                             font.pixelSize: 11

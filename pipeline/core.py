@@ -140,8 +140,20 @@ def parse_args() -> None:
                         help='subsurface scatter on the luminance channel (0.0-1.0, 0 disables)',
                         dest='diffuse_strength', type=float, default=_env_float('DIFFUSE_STRENGTH'))
     program.add_argument('--texture-strength',
-                        help='source skin detail added over the swap (0.0-1.0, 0 disables)',
+                        help='source skin detail added over the swap (0.0-2.0, 0 disables; '
+                             'above 1.0 deliberately exceeds measured parity)',
                         dest='texture_strength', type=float, default=_env_float('TEXTURE_STRENGTH'))
+    program.add_argument('--texture-band',
+                        help='how far up in scale the texture layer reaches, as a multiple of '
+                             'the detail band (1.0-4.0); 1.0 is pores only, 2.0 reaches marks',
+                        dest='texture_band', type=float, default=_env_float('TEXTURE_BAND'))
+    program.add_argument('--texture-relief',
+                        help='share of the texture budget spent on marks rather than pores '
+                             '(0.0-0.95)',
+                        dest='texture_relief', type=float, default=_env_float('TEXTURE_RELIEF'))
+    program.add_argument('--texture-contrast',
+                        help='amplitude shaping on the mark octave (1.0-3.0); 1.0 is none',
+                        dest='texture_contrast', type=float, default=_env_float('TEXTURE_CONTRAST'))
     program.add_argument('--aligned-size', help='ceiling on compositing resolution (128-512); actual size follows face size',
                         dest='aligned_size', type=int, default=_env_int('ALIGNED_SIZE'))
     program.add_argument('--restore-size', help='FFHQ crop edge fed to the restorer (128-512); '
@@ -239,6 +251,9 @@ def parse_args() -> None:
         ('mask_feather', args.mask_feather),
         ('mask_erode', args.mask_erode),
         ('texture_strength', args.texture_strength),
+        ('texture_band', args.texture_band),
+        ('texture_relief', args.texture_relief),
+        ('texture_contrast', args.texture_contrast),
         ('diffuse_strength', args.diffuse_strength),
         ('aligned_size', args.aligned_size),
         ('restore_size', args.restore_size),

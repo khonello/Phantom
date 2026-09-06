@@ -235,6 +235,24 @@ class FaceCompositor:
     # of an 8-bit unit costs a warp and changes nothing anyone can see.
     _TEXTURE_FLOOR = 0.25
 
+    # Ceiling on the share of the target's high band `_match_detail` will hold
+    # back for the texture layer. See `_texture_reserve` — this is the fix for
+    # the two stages competing over one budget, where the one that ran first
+    # took all of it.
+    #
+    # 0.8 leaves the swap 60% of the target's band amplitude. Past that the
+    # swap's own high frequencies are being gutted in favour of a reprojected
+    # map — and that map is fixed content warped per frame, so it cannot follow
+    # an expression the way the swap's own band does. A face whose surface
+    # detail is almost entirely reprojected is a different failure from a
+    # plastic one, not an improvement on it.
+    #
+    # Note this is no longer set by `_DETAIL_RATIO`'s floor: that clamp now
+    # scales with the reservation, since it bounds deviation from the target and
+    # reserving moves the target. It was, and the floor quietly kept a quarter
+    # of the room the reservation had promised.
+    _RESERVE_MAX = 0.8
+
     # Noise sigma is clamped to this range before grain is applied.
     _GRAIN_MAX = 6.0
     # Subsampling stride for the noise estimate.
@@ -312,6 +330,15 @@ class FaceCompositor:
         # that, because they cannot exceed the clamp.
         self.last_detail_ratio: Optional[float] = None
 
+        # The share of the target's high band that was held back for the texture
+        # layer on the last frame. Published because the two stages now share
+        # one budget and a reader has to be able to see the split: a reserve
+        # that is routinely zero while `texture_strength` is set means the layer
+        # is declining somewhere — no map at this working size, or a pose too
+        # far from the source photograph — and the visible symptom of that is
+        # identical to a strength set too low.
+        self.last_detail_reserve: Optional[float] = None
+
         # Pose agreement on the last frame, in [0, 1], or None when it could not
         # be measured. Published for the same reason as the others: a texture
         # layer that quietly does nothing because every frame is off-pose looks
@@ -346,6 +373,7 @@ class FaceCompositor:
         """
         self.last_stage_ms.clear()
         self.last_detail_ratio = None
+        self.last_detail_reserve = None
         self.last_texture_headroom = None
         self.last_texture_confidence = None
 
@@ -475,17 +503,25 @@ class FaceCompositor:
                 np.clip(fake_lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR,
             )
 
-        fake = self._match_detail(fake, real, mask)
-        elapsed('detail')
-
         # The face's extent in frame, from the affine's own determinant. Note
         # this is *not* `scale` above: that one is the ratio between the
         # swapper's crop and the working resolution, and passing it here read
         # 128 for a 400px face — which set the seam feather to a third of what
         # it should be and had the texture layer build its map at 128 for a face
         # four times that, which is the decimation it exists to avoid.
+        #
+        # Computed here rather than after detail matching because the reserve
+        # below needs it: the texture layer's working size follows the face, and
+        # whether a map exists at that size decides whether reserving is safe.
         geometric = float(np.sqrt(abs(float(np.linalg.det(aligned_matrix[:, :2])))))
         extent = (size / geometric) if geometric > 1e-6 else float(size)
+
+        fake = self._match_detail(
+            fake, real, mask,
+            reserve=self._texture_reserve(face, extent),
+            band=self._texture_shaping()[2],
+        )
+        elapsed('detail')
 
         pasted = self._paste(frame, fake, mask, aligned_matrix, face, extent)
         elapsed('paste')
@@ -1127,7 +1163,14 @@ class FaceCompositor:
         corrected: Frame = cv2.add(fake_lab, correction)
         return corrected
 
-    def _match_detail(self, fake: Frame, real: Frame, mask: Mask) -> Frame:
+    def _match_detail(
+        self,
+        fake: Frame,
+        real: Frame,
+        mask: Mask,
+        reserve: float = 0.0,
+        band: float = 1.0,
+    ) -> Frame:
         """
         Scale the swap's high-frequency band to match the target's.
 
@@ -1135,8 +1178,67 @@ class FaceCompositor:
         direction. Scaling the high band handles both cases, which is
         necessary here: the swap is softer than the frame before enhancement
         and sharper after it.
+
+        **`reserve` is the fix for two stages competing over one budget.** This
+        stage and `_add_texture` both aim at the same quantity — the target
+        face's high-frequency energy — and this one runs first, in aligned
+        space, while the other runs in frame space inside `_paste`. So this one
+        took all of it: the clamp was measured binding on 0% of 2267 frames,
+        meaning parity was not merely attempted but reached, every frame, and
+        the headroom the texture layer then measured was whatever the warp down
+        to frame space happened to lose. That was p50 **0.78** of an 8-bit unit,
+        against a real face carrying several, which is why the layer was
+        invisible at every strength and why 0.3 and 0.5 read identically on
+        every metric.
+
+        Worse than the amount is what the amount was spent on. This stage can
+        only amplify the band the swap already has, and that band is upsampled
+        128-native output with no structure in it. The face arrived at the
+        correct energy and the wrong content: textured by measurement, smooth to
+        look at.
+
+        So a share is held back. Reserving `r` aims at `sqrt(1 - r^2)` of the
+        target's energy, leaving `r` for real skin — quadrature, because the two
+        fields are independent, which is the same arithmetic
+        `_texture_headroom` uses to decide it may spend it. Total band energy
+        still lands at parity and overshoot is still impossible; what changes is
+        the *composition*, from amplified mush to detail a camera recorded.
+
+        **`band` comes with it, and has to.** Reserving is only coherent if both
+        stages mean the same band by "texture". Left at the narrowest octave
+        while the texture layer spans up to the subsurface diffusion length,
+        the reservation has almost no leverage on what the layer actually
+        measures: attenuating one octave of a field measured over three barely
+        moves the total, and the headroom stays where it was. Measured on a
+        synthetic face in exactly the starved regime, reserving 0.4 over the
+        narrow band moved the headroom 0.30 -> 0.31, which is nothing.
+
+        So when a reserve is requested, this stage scales the same span the map
+        will fill. That widens what it touches — mid-frequency content sits
+        closer to facial structure than pore noise does — and the trade is
+        deliberate: it is scaled *down*, and real recorded detail is put back in
+        its place. With `reserve` at 0.0 the split is the original
+        `DETAIL_SIGMA` and the stage is bit-identical to what it was.
+
+        The reservation is still approximate — the two stages work in different
+        spaces and the warp between them loses some — and it does not need to be
+        exact. The frame-space measurement remains the authority on what is
+        actually added. This only stops the authority from being handed an
+        already-empty budget.
+
+        Args:
+            fake: The swapped crop in aligned space
+            real: The target's own crop over the same geometry
+            mask: Where to measure, and where the result applies
+            reserve: Share of the target's band amplitude to leave unfilled,
+                for the texture layer to fill with real detail. 0.0 restores
+                the original behaviour exactly.
+            band: Span of that band, as a multiple of `DETAIL_SIGMA`. Read only
+                when reserving, so a run without the texture layer splits where
+                it always did.
         """
         self.last_detail_ratio = None
+        self.last_detail_reserve = None
 
         binary = (mask > 0.5).astype(np.uint8)
         if cv2.countNonZero(binary) < 64:
@@ -1146,8 +1248,15 @@ class FaceCompositor:
         real_f = real.astype(np.float32)
 
         # Scale the band split with the working resolution, so "texture" means
-        # the same physical detail at every quality preset.
-        sigma = self._DETAIL_SIGMA * fake.shape[0] / self._DETAIL_SIGMA_REFERENCE
+        # the same physical detail at every quality preset. The `band` widening
+        # applies only while reserving — see the docstring; without it the two
+        # stages would be reserving and spending across different spans.
+        reserve = float(np.clip(reserve, 0.0, self._RESERVE_MAX))
+        span = float(band) if reserve > 0.0 else 1.0
+        sigma = (
+            self._DETAIL_SIGMA * span * fake.shape[0]
+            / self._DETAIL_SIGMA_REFERENCE
+        )
 
         fake_low = cv2.GaussianBlur(fake_f, (0, 0), sigma)
         real_low = cv2.GaussianBlur(real_f, (0, 0), sigma)
@@ -1166,9 +1275,23 @@ class FaceCompositor:
         if fake_energy < 1e-3:
             return fake
 
-        wanted = real_energy / fake_energy
+        # Quadrature: leaving `reserve` of the amplitude for another field means
+        # aiming this one at the rest, not at all of it.
+        self.last_detail_reserve = reserve
+        held_back = float(np.sqrt(max(0.0, 1.0 - reserve * reserve)))
+
+        wanted = (real_energy * held_back) / fake_energy
         self.last_detail_ratio = float(wanted)
-        ratio = float(np.clip(wanted, *self._DETAIL_RATIO))
+
+        # The clamp moves with the target it is clamping. `_DETAIL_RATIO` bounds
+        # how far this stage may deviate from what it is aiming at, and
+        # reserving lowers what it is aiming at — so a fixed floor would refuse
+        # the very attenuation the reservation asked for. Measured: at reserve
+        # 0.8 the wanted ratio was 0.54 against a floor of 0.60, so the clamp
+        # silently kept a quarter of the room that had just been promised to the
+        # texture layer.
+        low, high = self._DETAIL_RATIO
+        ratio = float(np.clip(wanted, low * held_back, high * held_back))
 
         # fake_low + (fake - fake_low) * ratio, rearranged so it is one fused
         # pass rather than a multiply and an add over separate temporaries.
@@ -1389,7 +1512,7 @@ class FaceCompositor:
         self.last_texture_headroom = None
         self.last_texture_confidence = None
 
-        strength = float(np.clip(getattr(self.config, 'texture_strength', 0.0), 0.0, 1.0))
+        strength, contrast, band, relief = self._texture_shaping()
         if strength <= 0.0:
             return blended
 
@@ -1418,7 +1541,7 @@ class FaceCompositor:
         started = time.perf_counter()
 
         size = texture.map_size(extent)
-        detail = self.source_texture.detail_for(size)
+        detail = self.source_texture.detail_for(size, contrast, band, relief)
         if detail is None:
             return blended
 
@@ -1426,7 +1549,14 @@ class FaceCompositor:
         if canonical is None:
             return blended
 
-        headroom = self._texture_headroom(blended, target, mask, extent, face, roi)
+        # `band` goes to both, and it has to: the headroom is what the map is
+        # allowed to spend, so measuring a narrower band than the map carries
+        # would understate the energy about to be added and overshoot by the
+        # difference — the one failure this whole measured-budget design exists
+        # to make impossible.
+        headroom = self._texture_headroom(
+            blended, target, mask, extent, face, roi, band,
+        )
         self.last_texture_headroom = headroom
         if headroom <= self._TEXTURE_FLOOR:
             return blended
@@ -1453,6 +1583,82 @@ class FaceCompositor:
         # total does not change, this just says how much of paste it was.
         self.last_stage_ms['texture'] = (time.perf_counter() - started) * 1000.0
         return result
+
+    def _texture_shaping(self) -> Tuple[float, float, float, float]:
+        """
+        The four texture knobs, read and clamped in one place.
+
+        `_add_texture` and `_texture_reserve` both need them and must not
+        disagree: a reserve computed against one strength and an amount spent
+        against another would leave the face short by the difference, softer
+        than it was before any of this existed.
+
+        Returns:
+            (strength, contrast, band, relief), each clamped to its range
+        """
+        return (
+            float(np.clip(
+                getattr(self.config, 'texture_strength', 0.0),
+                0.0, texture.STRENGTH_MAX)),
+            float(np.clip(
+                getattr(self.config, 'texture_contrast', 1.0),
+                *texture.CONTRAST_RANGE)),
+            float(np.clip(
+                getattr(self.config, 'texture_band', 1.0),
+                *texture.BAND_RANGE)),
+            float(np.clip(
+                getattr(self.config, 'texture_relief', 0.0),
+                *texture.RELIEF_RANGE)),
+        )
+
+    def _texture_reserve(self, face: Face, extent: float) -> float:
+        """
+        Share of the target's high band to leave for real skin detail.
+
+        Non-zero only when the texture layer will actually run on this frame,
+        and that condition is the whole safety argument. A reservation is a
+        deliberate *undershoot* by `_match_detail`; if the layer then declines —
+        no source photograph, a pose too far from it, no map at this working
+        size — nothing fills the gap and the face comes out softer than it would
+        have with no texture layer at all. So every gate `_add_texture` applies
+        before it commits is applied here first, against the same clamped
+        values.
+
+        The one gate that cannot be checked in advance is the headroom itself,
+        which is measured in frame space after the warp. That direction is safe:
+        reserving makes headroom *more* likely to exist, not less.
+
+        Args:
+            face: Detection for this frame
+            extent: The face's extent in frame pixels
+
+        Returns:
+            Amplitude share in [0, `_RESERVE_MAX`]; 0.0 when the layer is off or
+            cannot run.
+        """
+        if self.source_texture is None:
+            return 0.0
+
+        strength, contrast, band, relief = self._texture_shaping()
+        if strength <= 0.0:
+            return 0.0
+
+        confidence = self._pose_confidence(face)
+        if confidence <= 0.0:
+            return 0.0
+
+        # Builds the map if this is the first frame at this size, which `_paste`
+        # would have done moments later anyway — `detail_for` memoises, so the
+        # work is paid once either way rather than twice.
+        if self.source_texture.detail_for(
+                texture.map_size(extent), contrast, band, relief) is None:
+            return 0.0
+
+        # `strength` may exceed 1.0 to overshoot parity deliberately; a reserve
+        # cannot. Above 1.0 the extra is spent on top of a full reservation.
+        return float(np.clip(
+            min(strength, 1.0) * confidence, 0.0, self._RESERVE_MAX,
+        ))
 
     def _pose_confidence(self, face: Face) -> float:
         """
@@ -1547,6 +1753,7 @@ class FaceCompositor:
         extent: float,
         face: Face,
         roi: Tuple[int, int, int, int],
+        band: float = 1.0,
     ) -> float:
         """
         How much high-frequency deviation the face can still take, in 8-bit units.
@@ -1560,9 +1767,12 @@ class FaceCompositor:
         Anything past that is a face with more texture than the camera recorded,
         which reads as noise rather than as skin.
 
-        The band is the same one `_match_detail` scales and the extractor cuts,
-        expressed here in frame pixels: `DETAIL_SIGMA` is specified at a 256px
-        face, so at `extent` pixels it is that fraction of it.
+        The band is the one the extractor cut, expressed here in frame pixels:
+        `DETAIL_SIGMA` is specified at a 256px face, so at `extent` pixels it is
+        that fraction of it, times `band`. That multiplier is not optional —
+        the map spans up to the subsurface diffusion length, and measuring the
+        finest octave alone would report a fraction of the energy the layer is
+        about to add and let it overshoot by the rest.
 
         **Measured on skin, not over everything inside the mask.** The window
         below sits at the centre of the region, and for a large face that centre
@@ -1579,6 +1789,8 @@ class FaceCompositor:
             extent: The face's extent in frame pixels
             face: Detection, for the keypoints the exclusions are placed on
             roi: (x0, y0, width, height) of the region in frame space
+            band: The texture band's span, as a multiple of `DETAIL_SIGMA` —
+                the same value the map was built with
 
         Returns:
             Deviation still available, in 8-bit units. Zero when the swap has
@@ -1608,7 +1820,10 @@ class FaceCompositor:
         if cv2.countNonZero(binary) < 64:
             return 0.0
 
-        sigma = max(0.6, DETAIL_SIGMA * extent / DETAIL_SIGMA_REFERENCE)
+        sigma = max(
+            0.6,
+            DETAIL_SIGMA * float(band) * extent / DETAIL_SIGMA_REFERENCE,
+        )
 
         def deviation(image: Frame) -> float:
             """High-band deviation of `image` inside the mask."""

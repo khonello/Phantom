@@ -344,6 +344,175 @@ check('no source texture is not fatal', not np.any(add(0.8)),
       'the layer is decorative; its absence must never break a swap')
 compositor.source_texture = extracted
 
+# ── The budget the two stages share ────────────────────────────────────
+#
+# `_match_detail` and `_add_texture` both aim at the target face's
+# high-frequency energy, and the first one to run used to take all of it: the
+# clamp was measured binding on 0% of 2267 frames, so parity was reached every
+# frame and the texture layer measured only what the warp had lost — p50 0.78 of
+# an 8-bit unit. What is pinned here is that the reservation exists, that it is
+# conditional on the layer actually running, and that the two stages describe
+# the same band. Getting any of the three wrong restores the silent no-op.
+print('\nBudget reservation')
+
+config.grain = False
+config.texture_strength = 0.0
+compositor.source_texture = extracted
+extracted.yaw = 0.0
+
+check('no reserve when the layer is off',
+      compositor._texture_reserve(TARGET, 100.0) == 0.0,
+      'reserving is a deliberate undershoot; with nothing to fill it the '
+      'face just comes out softer than before any of this existed')
+
+config.texture_strength = 0.5
+check('the reserve follows the strength',
+      abs(compositor._texture_reserve(TARGET, 100.0) - 0.5) < 1e-6,
+      '{:.2f}'.format(compositor._texture_reserve(TARGET, 100.0)))
+
+config.texture_strength = 1.0
+check('the reserve is bounded well short of the whole band',
+      compositor._texture_reserve(TARGET, 100.0) <= FaceCompositor._RESERVE_MAX
+      < 1.0,
+      'a face whose surface is entirely reprojected cannot follow an '
+      'expression — that is a different failure, not a better one')
+
+config.texture_strength = 2.0
+check('a strength past parity does not reserve past the ceiling',
+      compositor._texture_reserve(TARGET, 100.0)
+      == FaceCompositor._RESERVE_MAX,
+      'the overshoot is spent on top of a full reservation, not through it')
+
+config.texture_strength = 0.5
+def _posed(yaw):
+    """A target face at a given yaw. Defined here because the pose section
+    below runs later and this check must not depend on ordering."""
+    f = make_face(x=150.0, y=150.0, size=100.0)
+    f.pose = np.array([0.0, yaw, 0.0], dtype=np.float32)
+    return f
+
+
+check('an off-pose frame reserves nothing',
+      compositor._texture_reserve(_posed(70.0), 100.0) == 0.0,
+      'every gate _add_texture applies before it commits must be applied '
+      'here first, or the gap it left goes unfilled')
+
+compositor.source_texture = None
+check('no source texture reserves nothing',
+      compositor._texture_reserve(TARGET, 100.0) == 0.0)
+compositor.source_texture = extracted
+
+# The reservation has to reach the stage and lower what it aims at.
+detail_sharp = rng.normal(128, 20, (128, 128, 3)).astype(np.uint8)
+detail_soft = cv2.GaussianBlur(detail_sharp, (0, 0), 2.0)
+detail_mask = np.ones((128, 128), dtype=np.float32)
+
+compositor._match_detail(detail_soft, detail_sharp, detail_mask, reserve=0.0)
+unreserved = compositor.last_detail_ratio or 0.0
+compositor._match_detail(detail_soft, detail_sharp, detail_mask, reserve=0.6)
+reserved = compositor.last_detail_ratio or 0.0
+
+check('reserving lowers what detail matching aims at',
+      reserved < unreserved,
+      'wanted {:.2f} reserved vs {:.2f} not'.format(reserved, unreserved))
+check('it lowers it by exactly the quadrature share',
+      abs(reserved - unreserved * float(np.sqrt(1.0 - 0.36))) < 1e-4,
+      'independent fields add in quadrature; anything else and the two '
+      'stages do not sum to parity')
+check('the reserve is published for the readings',
+      compositor.last_detail_reserve == 0.6,
+      'a reserve of zero while texture_strength is set is the layer '
+      'declining, and looks exactly like a strength set too low')
+
+# The band has to travel with the reservation. Reserving one octave of a field
+# measured over three barely moves the headroom — measured at 0.30 -> 0.31,
+# which is the bug this check exists to catch.
+compositor._match_detail(detail_soft, detail_sharp, detail_mask,
+                         reserve=0.5, band=1.0)
+narrow = compositor.last_detail_ratio or 0.0
+compositor._match_detail(detail_soft, detail_sharp, detail_mask,
+                         reserve=0.5, band=3.0)
+wide = compositor.last_detail_ratio or 0.0
+check('the band travels with the reserve into detail matching',
+      abs(wide - narrow) > 1e-3,
+      'reserving over a narrower span than the map fills leaves the '
+      'headroom where it was: {:.3f} vs {:.3f}'.format(narrow, wide))
+
+compositor._match_detail(detail_soft, detail_sharp, detail_mask,
+                         reserve=0.0, band=3.0)
+check('band is ignored when nothing is reserved',
+      abs((compositor.last_detail_ratio or 0.0) - unreserved) < 1e-6,
+      'a run without the texture layer must split where it always did')
+
+# ── Octaves: one pass per kind of skin feature ─────────────────────────
+#
+# What separates a pore from a spot from a mole from a crease is *scale*, so the
+# map is cut into octaves and each is normalised and weighted on its own. That
+# is a general statement about localised skin features and deliberately not a
+# detector for any one of them.
+print('\nOctaves')
+
+pores_only = extracted.detail_for(128, contrast=1.0, band=1.0, relief=0.0)
+with_marks = extracted.detail_for(128, contrast=1.0, band=2.0, relief=0.65)
+shaped = extracted.detail_for(128, contrast=2.0, band=2.0, relief=0.65)
+assert pores_only is not None and with_marks is not None and shaped is not None
+
+check('the shaping is part of the cache key, not just the size',
+      with_marks is not pores_only and shaped is not with_marks,
+      'keyed on size alone, a live A/B would compare a setting against a '
+      'map built under the previous one')
+check('relief 0.0 reproduces the pores-only map exactly',
+      extracted.detail_for(128, 1.0, 2.0, 0.0) is not None
+      and np.allclose(extracted.detail_for(128, 1.0, 2.0, 0.0), pores_only,
+                      atol=1e-5),
+      'the new path must contain the old one, or nothing can be A/B\'d '
+      'against what shipped')
+check('a wider band changes what the map carries',
+      not np.allclose(with_marks, pores_only, atol=1e-3),
+      'a 4px mark has most of its energy below a 1px high-pass')
+check('every variant still normalises to unit deviation',
+      all(abs(float(m[cv2.resize(extracted.skin, (128, 128)) > 0.5].std())
+              - 1.0) < 0.2
+          for m in (pores_only, with_marks, shaped)),
+      'the compositor multiplies by a measured budget and depends on this')
+
+# Shaping moves energy from the filler into the marks, at constant total energy.
+# That is the whole argument: RMS is the wrong statistic for a sparse field.
+def peak_ratio(m):
+    """Peak amplitude against RMS, inside the skin mask."""
+    inside = m[cv2.resize(extracted.skin, (128, 128)) > 0.5]
+    return float(np.percentile(np.abs(inside), 99.5) / max(1e-6, inside.std()))
+
+
+check('shaping raises peak contrast at the same total energy',
+      peak_ratio(shaped) > peak_ratio(with_marks),
+      'p99.5/RMS {:.2f} shaped vs {:.2f} flat — a sparse mark is what a '
+      'second moment cannot see'.format(
+          peak_ratio(shaped), peak_ratio(with_marks)))
+check('contrast 1.0 is exactly no shaping',
+      extracted.detail_for(128, 1.0, 2.0, 0.65) is with_marks)
+
+check('the cache does not grow without bound',
+      (([extracted.detail_for(s, 1.0 + i * 0.1, 2.0, 0.5)
+         for i, s in enumerate([128] * 24)]),
+       len(extracted._maps) <= texture._MAP_CACHE_MAX)[1],
+      '{} entries after a 24-value sweep'.format(len(extracted._maps)))
+
+check('the source photograph reports what it contains',
+      len(extracted.octaves) == 2 and extracted.octaves[0] > 0.0,
+      'pores {:.2f}, marks {:.2f} — a soft donor and a starved budget look '
+      'identical in the output'.format(*extracted.octaves))
+
+check('the strength ceiling reaches past parity for diagnosis',
+      texture.STRENGTH_MAX > 1.0,
+      'separating "the map is weak" from "the budget is small" must not '
+      'need a code change mid-session')
+
+config.texture_strength = 0.0
+config.texture_band = FaceSwapConfig().texture_band
+config.texture_relief = FaceSwapConfig().texture_relief
+config.texture_contrast = FaceSwapConfig().texture_contrast
+
 # ── The seam ───────────────────────────────────────────────────────────
 print('\nSeam')
 
@@ -784,6 +953,21 @@ check('get_state reports texture_strength',
       _state.get('texture_strength') == 0.42)
 check('get_state reports diffuse_strength',
       _state.get('diffuse_strength') == 0.27)
+
+# `texture_band` is on the panel too, so it is under the same bargain: the
+# desktop does not assert it on connect, therefore it must be able to read it
+# back. The other two shaping knobs are reported for tools/stats.py rather than
+# for a slider, and cost nothing to include.
+_state_config.texture_band = 3.0
+_band_state = handle_get_state(_state_config, None).data
+check('get_state reports the shaping knobs the panel can move',
+      _band_state.get('texture_band') == 3.0,
+      'a BAND slider reading 2.0 over a pipeline running 3.0 turns an A/B '
+      'into a measurement of nothing')
+check('get_state reports the shaping knobs it cannot',
+      _band_state.get('texture_relief') is not None
+      and _band_state.get('texture_contrast') is not None,
+      'set over set_realism, so the only way to see them is to read them back')
 check('get_state still reports what it did before',
       all(key in _state for key in
           ('quality', 'enhance', 'restoration_preset', 'source_loaded')))

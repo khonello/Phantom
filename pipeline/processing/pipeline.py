@@ -1000,6 +1000,12 @@ class ProcessingPipeline:
                 'detail_ratio', ratio, limit=self._compositor._DETAIL_RATIO[1],
             )
 
+        reserve = self._compositor.last_detail_reserve
+        if reserve is not None:
+            self._readings.record(
+                'detail_reserve', reserve, limit=self._compositor._RESERVE_MAX,
+            )
+
         headroom = self._compositor.last_texture_headroom
         if headroom is not None:
             self._readings.record('texture_headroom', headroom)

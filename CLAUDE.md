@@ -91,7 +91,16 @@ before a paying customer. Read it before assuming a gap is unnoticed.
   IMAGE tabs
 - No templates are bundled yet — the machinery runs against an empty library.
   The assets are a content decision, including licensing for this use
-- Not exposed: realism knobs have no desktop UI (API/CLI only)
+- Not exposed: most realism knobs are API/CLI only. The exception is the
+  **TUNING** strip in the viewport — `texture_strength`, `diffuse_strength` and
+  `texture_band`, plus BYPASS. It is an instrument for deciding what the
+  defaults should be, not a consumer control, and what earns a place on it is a
+  value that **cannot be settled by reasoning** — `texture_band` follows how
+  large the operator's face and their skin's marks are, which differs per person
+  and per camera. `texture_relief` and `texture_contrast` refine what the band
+  exposes and only mean anything once it is right, so they stay on
+  `set_realism`; so does `texture_strength` above 1.0, which is a diagnostic
+  overshoot rather than something to hand a customer a slider for
 - Batch video is wired but has only been exercised against a stubbed swapper —
   the FFmpeg plumbing, frame ordering, audio sync, cancellation and cleanup are
   verified; a real run with the models in the loop has not been done locally
@@ -759,9 +768,13 @@ GPU work can reach.
   exist, so the texture layer was the necessary answer rather than an expensive
   substitute for a one-line change. `texture_headroom` and `texture_confidence`
   say whether the texture layer had anything to spend and whether pose let it
-  spend it — measured p50 **0.78** headroom, so `texture_strength=1.0` reaches
-  parity and the expected 0.3-0.5 working range spends under half of what is
-  available
+  spend it — measured p50 **0.78** headroom.
+  **That 0.78 was read the wrong way round at the time**, as "so
+  `texture_strength=1.0` reaches parity". True inside the model and misleading
+  in fact: parity had *already* been reached by `_match_detail` one stage
+  earlier, so 0.78 was not a budget, it was the rounding error left after
+  another stage spent it. See "Two stages, one budget" below. `detail_reserve`
+  is the new reading that says whether the fix is engaged
 - **Guard calibration**: `python pipeline.py --stream --guard-observe --guard-report r.json`
 - **Realism**: `python pipeline.py --stream --debug-frames clip/` then
   `python tools/compare_frames.py clip/ [--against clip2/]`
@@ -1318,6 +1331,35 @@ Four properties carry it:
   high-pass sigma scaled against the same 256px reference `_match_detail` uses.
   Both stages therefore mean the same physical detail — one adds to the band the
   other scales, and stages describing adjacent-but-different bands would fight.
+- **The band spans octaves, because skin is more than pores.** `texture_band`
+  is the span as a multiple of `DETAIL_SIGMA`, and at the default 2.0 it lands
+  on `_SCATTER_SIGMA`: this layer owns everything finer than the distance light
+  diffuses under skin, the scatter pass owns everything coarser. Surface against
+  shading, which is a physical line rather than an arbitrary one. At 1.0 — what
+  shipped — the high-pass keeps roughly the finest two pixels, which is pore
+  noise and *the rim of everything else*. A freckle, a spot, a mole, a scar or a
+  fine crease is 2-8px at working resolution, so most of each one was being
+  subtracted as "shape" at extraction. That is the mechanism behind a face that
+  measures as textured and reads as smooth.
+
+  The octaves are cut, normalised and weighted **separately** — `texture_relief`
+  is the mark octave's share against the pore octave — so this is a pass per
+  kind of skin feature, keyed on the thing that actually separates them, which
+  is scale. Not on a classifier: telling a mole from a spot on one uploaded
+  photograph under unknown light is the unreliable part, and getting it wrong
+  would put the wrong gain on real detail. They are summed into one map at
+  extraction, so the live path still does **one** warp per frame regardless of
+  how many octaves there are.
+- **Energy is redistributed toward structure, because RMS is the wrong
+  statistic for a mark.** The map is normalised to unit deviation and spent
+  against a budget denominated in deviation — and a *sparse* field spends that
+  budget badly. A dozen spots on an otherwise flat cheek barely move a second
+  moment, so matching second moments scales them down to the level of the dense
+  pore noise they sit among. `texture_contrast` expands the amplitude
+  distribution before renormalising: same total energy, more of it in the marks.
+  Applied to the mark octave only — expanding the pore octave is how a pore
+  field turns into speckle, which is the monochrome rule's failure reached from
+  the other direction.
 - **One source image, not the average.** Every accepted photo feeds the identity
   embedding, because identity is a distributed representation. Texture is not —
   it is spatially localised, so blending maps taken at different angles and focal
@@ -1343,9 +1385,73 @@ Four properties carry it:
   texture. Normalised to unit deviation inside that mask, so `texture_strength`
   means the same thing for a contrasty photograph and a flat one.
 
-**Off by default, and it has never been judged on footage.** 0.3-0.5 is the
-expected working range; A/B it with
-`tools/realism.py --host ... texture_strength=0.4`.
+**Two stages, one budget — and the one that ran first took all of it.** This is
+why the layer read as present-but-soft on the first real footage it was tried
+on, and it was not the strength knob and not the source photograph.
+
+`_match_detail` (aligned space) and `_add_texture` (frame space) both aim at the
+same quantity: the target face's high-frequency energy. `_match_detail` runs
+first and **reaches** it — the clamp binds on 0% of 2267 frames, so parity is
+not merely attempted but achieved, every frame. What `_texture_headroom` then
+measured was whatever the warp down to frame space happened to lose: p50 **0.78**
+of an 8-bit unit against a real face carrying several. At the 0.3-0.5 working
+range that is well under 1% of the face's high-frequency energy, which is why
+0.3 and 0.5 produced identical readings on every metric — both were invisible.
+
+Worse than the amount is what the amount bought. `_match_detail` can only
+amplify the band the swap already has, and that band is upsampled 128-native
+output with no structure in it. The face arrived at the correct energy and the
+wrong content.
+
+So a share is now held back: `_texture_reserve` asks detail matching for
+`sqrt(1 - r²)` of the target's energy and leaves `r` for real skin. Total energy
+still lands at parity and overshoot is still impossible — what changes is the
+composition. Three properties make it safe rather than merely bolder:
+
+- **It reserves only when the layer will actually run.** A reservation is a
+  deliberate undershoot; if texture then declines (no source, pose too far, no
+  map at this size) nothing fills the gap and the face comes out *softer* than
+  before any of this existed. Every gate `_add_texture` applies is applied in
+  `_texture_reserve` first, against the same clamped values.
+- **The band travels with the reserve.** Reserving one octave of a field
+  measured over three has almost no leverage — measured on a synthetic face in
+  exactly the starved regime, it moved the headroom 0.30 to 0.31. So when
+  reserving, `_match_detail` scales the same span the map fills. With no reserve
+  it splits where it always did, bit-identically.
+- **`_DETAIL_RATIO` moves with the target it clamps.** The clamp bounds
+  deviation from what the stage is aiming at, and reserving lowers that; a fixed
+  floor refused the very attenuation the reservation asked for, quietly keeping
+  a quarter of the room at `reserve` 0.8.
+
+**Measured on a synthetic face in the starved regime** (`_match_detail`
+unclamped and reaching parity, which is the real condition):
+
+| | headroom | reaching the picture |
+|---|---|---|
+| as shipped | 0.30 | 0.364 |
+| + wider band alone | 0.78 | 0.378 |
+| + reserve alone (narrow band) | 0.31 | 0.375 |
+| both, strength 0.4 | 0.80 | 0.455 |
+| both, strength 1.0 | 0.86 | 0.647 |
+
+Read the attribution honestly: **the band widening is the dominant term and the
+reservation is secondary.** Reserving without widening does essentially nothing,
+which is the trap the second property above exists to name. And this is a
+synthetic fixture — it establishes the mechanism and the direction, not the
+magnitude on a real face.
+
+**Off by default, and still never judged on footage.** 0.3-0.5 is the expected
+working range; A/B with `tools/realism.py --host ... texture_strength=0.4`, then
+`texture_band`, `texture_relief` and `texture_contrast` one at a time — they are
+separately switchable precisely so one cannot be blamed for another's artefact.
+
+**`texture_strength` reaches 2.0 over the API, and the desktop slider does
+not.** Above 1.0 deliberately exceeds measured parity. It is not a shipping
+value; it exists because separating "the map is weak" from "the budget is small"
+otherwise needs a code change mid-session. Run it once at 2.0: if the marks
+appear, the map is fine and the budget was the problem; if they stay soft, look
+at the `Texture source:` line, which now reports the chosen photograph's own
+pore and mark deviations alongside its face size.
 
 **Subsurface scatter is built and off** (`diffuse_strength`). Real skin is
 translucent: light enters, scatters through a millimetre or two and leaves
@@ -1465,7 +1571,10 @@ Two things it deliberately does **not** do, both recorded rather than forgotten:
 | `enhance_strength` | `0.7` | How much of the restored face to keep. Full strength reads as AI; partial keeps believable imperfection |
 | `restore_size` | `512` | Edge of the FFHQ crop fed to the restorer. A model with fixed spatial dims overrides it and says so once — see below |
 | `restore_min_face` | `0` | Skip restoration below this face size (px, shorter side). `0` never skips |
-| `texture_strength` | `0.0` | Skin detail lifted from the operator's own source photo and warped onto the face each frame. **The fraction of the measured gap to close** — the compositor measures the real face's high-frequency energy in the same pixels, less what the swap and grain already carry, so `1.0` is parity and overshoot is impossible. **Off by default, never judged on footage.** 0.3-0.5 expected |
+| `texture_strength` | `0.0` | Skin detail lifted from the operator's own source photo and warped onto the face each frame. **The fraction of the measured gap to close** — the compositor measures the real face's high-frequency energy in the same pixels, less what the swap and grain already carry, so `1.0` is parity and overshoot is impossible. Reaches `2.0` over the API for diagnosis only; the desktop slider stops at 1.0. **Off by default, never judged on footage.** 0.3-0.5 expected |
+| `texture_band` | `2.0` | How far up in scale that layer reaches, as a multiple of `DETAIL_SIGMA`. `1.0` is pores and the rims of everything else — what shipped, and why marks vanished. `2.0` lands on `_SCATTER_SIGMA`, so texture owns surface and scatter owns shading |
+| `texture_relief` | `0.65` | The mark octave's share of the budget against the pore octave, in quadrature. The two are normalised separately, so this is a share of the budget rather than of whatever the photo held most of. `0.0` is the pores-only behaviour exactly |
+| `texture_contrast` | `1.6` | Amplitude shaping on the mark octave, at constant total energy. A sparse mark is invisible to a second moment, so an RMS budget flattens it into the dense noise around it; this moves the same energy back into it. Mark octave only — shaping the pore octave makes speckle |
 | `mask_feather` | `0.04` | Frame-space seam transition, as a fraction of the face's extent in frame (floor 2px). Was effectively 1%, giving a ~1.4px transition on a 101px face — a hard edge, and the reported "pasted on" look |
 | `mask_erode` | `0.03` | Pulls the mask in, in aligned space, **before** it is feathered, so the transition sits on skin rather than straddling the expanded hull onto neck and hair |
 | `diffuse_strength` | `0.0` | Subsurface scatter — softens *shading* the way light under skin does, on LAB's L channel only, with eyes/nose/mouth cut out. Answers "the skin reads hard", which is a different complaint from "plastic" and a different band. **Off by default, never judged on footage.** 0.2-0.4 expected |
@@ -2071,7 +2180,8 @@ alternating detections would zero a consecutive counter every other frame. See
 Three ways to set them:
 - **Quality preset** — the desktop dropdown; see the table above.
 - **CLI / env** — `--enhancer-model`, `--enhancer-weight`, `--enhance-strength`,
-  `--aligned-size`, `--restore-size`, `--restore-min-face`, `--temporal-alpha`, `--color-strength`, `--texture-strength`, `--no-enhance`,
+  `--aligned-size`, `--restore-size`, `--restore-min-face`, `--temporal-alpha`, `--color-strength`, `--texture-strength`, `--texture-band`,
+  `--texture-relief`, `--texture-contrast`, `--no-enhance`,
   `--no-grain`, `--no-occluder`. Each also reads an env var
   (`ENHANCER_MODEL`, `ENHANCER_WEIGHT`, …) since the pod is configured via `.env`.
   Precedence: preset first, then CLI/env overrides.

@@ -264,9 +264,17 @@ class SwappingProcessor(FrameProcessor):
         if self.source_texture is None:
             return
 
+        # The octave readings are what make "was my photo good enough" a
+        # question with an answer. A soft donor and a starved budget look
+        # identical in the output — a face that is nearly smooth — and this is
+        # the line that tells them apart before anyone spends a session on it.
+        pores, marks = self.source_texture.octaves
         emit_status(
             f'Texture source: {os.path.basename(path)} '
-            f'({self.source_texture.native_px}px face)',
+            f'({self.source_texture.native_px}px face, '
+            f'pores {pores:.2f}, marks {marks:.2f})'
+            + (' - upsampled, so the band is thinner than it looks'
+               if self.source_texture.upsampled else ''),
             scope='TEXTURE',
         )
 
