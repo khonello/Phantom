@@ -828,6 +828,34 @@ class Bridge(QObject):
             self._restoration = preset
             self.restorationChanged.emit(preset)
 
+        # The tuning panel, read back rather than asserted.
+        #
+        # `_push_realism` only fires from the panel's own slots, so nothing sent
+        # these on connect — deliberately, since pushing the desktop's defaults
+        # would revert a pipeline launched with TEXTURE_STRENGTH set. The cost
+        # was that the panel could disagree with the pipeline and say nothing:
+        # a slider reading 0.00 over a layer that is running, or 0.40 over one
+        # that is not, and either turns an A/B into a measurement of nothing.
+        texture = data.get('texture_strength')
+        diffuse = data.get('diffuse_strength')
+        if texture is not None or diffuse is not None:
+            changed = False
+            if texture is not None and float(texture) != self._texture_strength:
+                self._texture_strength = float(texture)
+                changed = True
+            if diffuse is not None and float(diffuse) != self._diffuse_strength:
+                self._diffuse_strength = float(diffuse)
+                changed = True
+            # Only a non-zero reading updates the toggle's memory. Zero is the
+            # off state, and letting it overwrite `_last` would make the next
+            # toggle restore nothing — an off/on that does not come back on.
+            if self._texture_strength > 0.0:
+                self._texture_last = self._texture_strength
+            if self._diffuse_strength > 0.0:
+                self._diffuse_last = self._diffuse_strength
+            if changed:
+                self.tuningChanged.emit()
+
         enhance = data.get('enhance', self._enhance_active)
         if enhance != self._enhance_active:
             self._enhance_active = enhance

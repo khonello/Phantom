@@ -445,6 +445,16 @@ def handle_get_state(
             # So a reconnecting desktop shows the strength that is actually in
             # force rather than resetting its dropdown to the default.
             'restoration_preset': config.restoration_preset,
+            # The tuning panel's two knobs, for the same reason and a sharper
+            # one. They are the only appearance controls the desktop can set
+            # while a stream runs, and it deliberately does not assert them on
+            # connect — pushing its own defaults would revert a pipeline
+            # launched with TEXTURE_STRENGTH in `.env`, which is the
+            # `set_enhance` mistake. Reading back is what keeps the panel
+            # honest without re-making it: a pipeline holding 0.4 shows 0.40
+            # rather than a slider at zero over a layer that is running.
+            'texture_strength': config.texture_strength,
+            'diffuse_strength': config.diffuse_strength,
             'pipeline_running': pipeline.is_running() if pipeline else False,
             'source_loaded': source_loaded,
         },

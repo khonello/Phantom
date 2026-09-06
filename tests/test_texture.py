@@ -763,6 +763,135 @@ check('it pulls in, it does not erase',
       'the transition moves onto skin; the coverage stays')
 
 
+# ── The desktop panel and the pipeline must agree ────────────────────────────
+#
+# The tuning panel is the only appearance control the desktop can move while a
+# stream runs, and it deliberately does not push its values on connect: doing so
+# would revert a pipeline launched with TEXTURE_STRENGTH in `.env`, which is the
+# `set_enhance` mistake CLAUDE.md records. The other half of that bargain is
+# that the desktop must READ the values back, or the slider and the layer
+# disagree in silence — a panel reading 0.00 over a running layer turns an A/B
+# into a measurement of nothing.
+
+from pipeline.api.handlers import handle_get_state  # noqa: E402
+
+_state_config = FaceSwapConfig()
+_state_config.texture_strength = 0.42
+_state_config.diffuse_strength = 0.27
+_state = handle_get_state(_state_config, None).data
+
+check('get_state reports texture_strength',
+      _state.get('texture_strength') == 0.42)
+check('get_state reports diffuse_strength',
+      _state.get('diffuse_strength') == 0.27)
+check('get_state still reports what it did before',
+      all(key in _state for key in
+          ('quality', 'enhance', 'restoration_preset', 'source_loaded')))
+
+# -- End to end: do both layers survive into the finished frame? ----------
+#
+# Everything above tests the two stages in isolation, which proves they compute
+# something. It does not prove the result reaches the output: texture is added
+# inside `_paste` and scatter runs before `_match_color`, so either could be
+# computed and then overwritten, warped away, or masked to nothing without a
+# single stage-level check noticing.
+#
+# That gap is not hypothetical for texture in particular. It is applied AFTER
+# `_match_detail`, so no reading downstream sees it — the pod sweep measured
+# identical `detail_ratio` at texture 0.0, 0.3 and 0.5, and could not have told
+# a working layer from a dead one.
+print('')
+print('End to end through composite()')
+
+e2e_face = make_face(x=150.0, y=150.0, size=160.0)
+e2e_frame = np.clip(
+    rng.normal(120, 10, (360, 640, 3)), 0, 255).astype(np.uint8)
+# A smooth swap, the way a 128-native swapper actually delivers one.
+e2e_swap = cv2.GaussianBlur(
+    rng.normal(130, 6, (256, 256, 3)).astype(np.float32), (0, 0), 3.0)
+e2e_swap = np.clip(e2e_swap, 0, 255).astype(np.uint8)
+e2e_matrix = canonical_from_frame(e2e_face, 256).astype(np.float32)
+
+
+def composite_with(texture_strength, diffuse_strength):
+    """A full composite at these two strengths, everything else held still."""
+    cfg = FaceSwapConfig()
+    cfg.texture_strength = texture_strength
+    cfg.diffuse_strength = diffuse_strength
+    cfg.grain = False          # random per frame; would swamp the difference
+    cfg.temporal_alpha = 1.0   # no EMA, so one call is one call
+    cfg.enhance = False        # no model weights in this environment
+    # A masker that returns a real soft-edged mask rather than a MagicMock:
+    # `composite` warps and multiplies by it, so a mock would raise instead of
+    # compositing. Full coverage, so the occlusion guard passes.
+    masker = MagicMock()
+    masker.last_coverage = 1.0
+
+    def _build(_face, _matrix, real_crop, _shape):
+        edge = real_crop.shape[0]
+        m = np.zeros((edge, edge), dtype=np.float32)
+        cv2.circle(m, (edge // 2, edge // 2), int(edge * 0.42), 1.0, -1)
+        return cv2.GaussianBlur(m, (0, 0), edge * 0.03)
+
+    masker.build.side_effect = _build
+
+    comp = FaceCompositor(cfg, MagicMock(available=False), masker)
+    comp.source_texture = extracted
+    out = comp.composite(e2e_frame.copy(), e2e_face, e2e_swap.copy(),
+                         e2e_matrix.copy())
+    return out, comp.last_stage_ms
+
+
+e2e_base, e2e_base_ms = composite_with(0.0, 0.0)
+check('the baseline composites at all', e2e_base is not None,
+      'nothing below means anything if this is None')
+
+if e2e_base is not None:
+    e2e_tex, e2e_tex_ms = composite_with(0.5, 0.0)
+    e2e_dif, e2e_dif_ms = composite_with(0.0, 0.3)
+    e2e_both, _ = composite_with(0.5, 0.3)
+
+    def face_box(f, pad=10):
+        x1, y1, x2, y2 = [int(v) for v in f.bbox]
+        return (max(0, y1 - pad), min(e2e_frame.shape[0], y2 + pad),
+                max(0, x1 - pad), min(e2e_frame.shape[1], x2 + pad))
+
+    top, bottom, left, right = face_box(e2e_face)
+
+    def spread(other):
+        """Mean |difference| from the baseline, inside the face and outside."""
+        d = cv2.absdiff(e2e_base, other).astype(np.float32).mean(axis=2)
+        inside = float(d[top:bottom, left:right].mean())
+        blanked = d.copy()
+        blanked[top:bottom, left:right] = 0.0
+        outside = float(blanked.sum() / max(1, (blanked > 0).sum()))
+        return inside, outside
+
+    tex_in, tex_out = spread(e2e_tex)
+    dif_in, dif_out = spread(e2e_dif)
+
+    check('texture changes the finished frame', tex_in > 0.05,
+          'mean |diff| {:.3f} units inside the face'.format(tex_in))
+    check('scatter changes the finished frame', dif_in > 0.05,
+          'mean |diff| {:.3f} units inside the face'.format(dif_in))
+    check('texture changes the face, not the frame around it',
+          tex_out < tex_in,
+          'inside {:.3f} vs outside {:.3f} - a difference spread over the '
+          'whole frame would be a paste bug'.format(tex_in, tex_out))
+    check('scatter changes the face, not the frame around it',
+          dif_out < dif_in,
+          'inside {:.3f} vs outside {:.3f}'.format(dif_in, dif_out))
+    check('they are not each other',
+          float(cv2.absdiff(e2e_tex, e2e_dif).mean()) > 0.01,
+          'two layers in two bands must not produce the same frame')
+    check('together they differ from either alone',
+          float(cv2.absdiff(e2e_both, e2e_tex).mean()) > 0.005
+          and float(cv2.absdiff(e2e_both, e2e_dif).mean()) > 0.005)
+    check('each bills itself only when it runs',
+          'texture' in e2e_tex_ms and 'texture' not in e2e_base_ms
+          and e2e_dif_ms.get('scatter', 0.0) > e2e_base_ms.get('scatter', 0.0),
+          'a stage that reports time while off would hide a no-op')
+
 print('=' * 70)
 print(f'{len(PASS)} passed, {len(FAIL)} failed')
 if FAIL:
