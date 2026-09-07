@@ -722,6 +722,34 @@ than a refusal: a VoiceMeeter user routing a real microphone through a virtual
 device would rather lose their routing than lose the call, and both cases are
 told exactly what happened.
 
+**The machine had both ends of the cable as system defaults at once** — default
+recording `CABLE Output`, default playback `CABLE Input` — so the second is
+checked too, and reported rather than routed around: this app resolves the cable
+explicitly and its audio reaches it either way, so what is broken there is the
+operator's machine. On that setting everything the machine plays, the call's own
+incoming audio included, is pushed into the pipe the conferencing app records as
+its microphone; the operator hears nothing and the other party hears themselves.
+
+Four settings carry the whole path, and the rule under them is that **the
+system defaults are the operator's real hardware, and the cable appears only
+inside the conferencing app, as its microphone**:
+
+| Setting | Where | Value |
+|---|---|---|
+| Default **recording** device | Windows Sound settings | the real microphone |
+| Default **playback** device | Windows Sound settings | headphones / speakers |
+| Microphone | inside the conferencing app | `CABLE Output` — **by name** |
+| Speaker | inside the conferencing app | headphones — by name |
+
+**"By name" is load-bearing, and fixing the defaults is what makes it so.**
+While the default recording device was the cable, a conferencing app left on
+"Default" resolved to the right device by accident — correct for the wrong
+reason. Restore the default to a real microphone and that app immediately sends
+the real, undelayed voice: audible, badly out of sync with the swapped video,
+and sounding like it works, which is worse than the silence it replaced. Full
+symptom-by-symptom version in
+[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+
 ### Running the pipeline on your own GPU
 **[docs/LOCAL_GPU_SETUP.md](docs/LOCAL_GPU_SETUP.md)** and
 `python tools/setup_local_gpu.py`. `requirements-pipeline-gpu.txt` is written

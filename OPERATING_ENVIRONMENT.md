@@ -233,6 +233,27 @@ the product or the provider, and was not.
   one is a display side buffer, the other pipeline side compute — but with both
   outstanding, nothing was attributable. **Change one thing at a time when the
   environment is not stable.**
+- **"The call receives no audio."** Reported with the conferencing app's
+  microphone correctly set to `CABLE Output`, a running stream and a working
+  virtual camera. The machine had **both ends of the virtual cable as the system
+  defaults at once** — default recording `CABLE Output`, default playback
+  `CABLE Input`. Capture took the system default, so the desktop read from the
+  same cable it was writing into: a loop with no microphone in it. Measured at
+  an RMS of 0.000015 against the real microphone's 0.0093 on the same machine.
+
+  Half environment, half product: the machine was misconfigured, and the app had
+  no check for it while already refusing to be quiet about the *absent* cable.
+  Both ends are checked now. The settings that have to be right are tabulated in
+  [docs/SETUP_CHECKLIST.md](docs/SETUP_CHECKLIST.md) and
+  [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md), and the short version is:
+  **the Windows defaults are your real hardware; the cable appears only inside
+  the conferencing app, and only as its microphone.**
+
+  The sequel is worth expecting. Fixing the default recording device silently
+  redirects any app whose microphone is left on **"Default"** to the real
+  microphone — audible, undelayed, and out of sync with the swapped video. It
+  sounds like it is working, which is worse than the silence it replaces. Select
+  `CABLE Output` **by name**.
 
 ---
 

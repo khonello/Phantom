@@ -159,10 +159,13 @@ cable, the call's audio goes into the cable. Set both by name.
 
 | Setting | Where | Value |
 |---|---|---|
-| Default recording device | Windows Sound settings | your real microphone |
-| Default playback device | Windows Sound settings | your headphones / speakers |
-| Microphone | inside the conferencing app | `CABLE Output` — by name |
-| Speaker | inside the conferencing app | your headphones — by name |
+| Default **recording** device | Windows Sound settings | your real microphone |
+| Default **playback** device | Windows Sound settings | your headphones / speakers |
+| Microphone | **inside the conferencing app** | `CABLE Output` — **by name** |
+| Speaker | **inside the conferencing app** | your headphones — by name |
+
+The rule underneath it: **the Windows defaults are your real hardware. The cable
+appears only inside the conferencing app, and only as its microphone.**
 
 Windows lists the same cable once per audio API, and the difference is large: on
 one machine the same device measured **90ms on MME, 120ms on DirectSound and

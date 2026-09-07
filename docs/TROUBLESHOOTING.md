@@ -382,15 +382,86 @@ This is included in `requirements.txt` and `requirements-ci.txt`. If upgrading a
    ```
 4. Check task manager (Windows) or Activity Monitor (macOS) for CPU/GPU usage
 
-### "Audio not working in video call"
+### Audio: the four settings, and the three ways they go wrong
 
-**Cause:** Virtual camera driver only handles video, not audio.
+Audio does not travel to the pipeline at all — it never leaves the operator's
+machine. The desktop captures the microphone locally, holds it by the same delay
+the swapped video is held by, and plays it into a **virtual audio cable** that the
+conferencing app records as its microphone. That is the only reason the sound
+lines up with the picture.
 
-**Solution:**
-- Audio comes from your microphone (a separate device)
-- Ensure microphone is selected in the video call app **Settings** → **Microphone**
-- Test microphone separately to verify it works
-- Virtual camera is video-only by design
+Four settings carry it, and three of them are somewhere different from where
+people look:
+
+| Setting | Where | Value |
+|---|---|---|
+| Default **recording** device | Windows Sound settings | your real microphone |
+| Default **playback** device | Windows Sound settings | your headphones / speakers |
+| Microphone | **inside the conferencing app** | `CABLE Output` — **by name** |
+| Speaker | **inside the conferencing app** | your headphones — by name |
+
+The rule underneath it: **the Windows defaults are your real hardware. The cable
+appears only inside the conferencing app, and only as its microphone.**
+
+#### "The other person hears nothing"
+
+**Cause:** `CABLE Output` is the Windows default recording device, so the desktop
+captured from the same cable it plays into — a loop with no microphone anywhere
+in it. The stream, the connection and the virtual camera all look healthy, which
+is what makes this one hard: nothing appears to be wrong.
+
+**Solution:** set the default recording device to your real microphone. The app
+detects this case, captures from a real microphone instead and says so at
+startup:
+
+```
+[AUDIO] The default recording device is "CABLE Output (VB-Audio Virtual Cable)",
+which is the output end of the same virtual cable this app plays into ...
+```
+
+Treat that message as a prompt rather than as the fix: it picks the
+lowest-latency real input it can find, which is not necessarily the microphone
+you meant.
+
+#### "I hear nothing, and the other person hears themselves"
+
+**Cause:** `CABLE Input` is the Windows default **playback** device. Everything
+the machine plays — the call's incoming audio included — is being pushed into the
+pipe the conferencing app records as its microphone.
+
+**Solution:** set the default playback device to your headphones or speakers. The
+app reports this but does not route around it, because there is nothing to route
+around: its own audio reaches the cable either way. What is misconfigured is the
+machine.
+
+#### "Audio works, but it is out of sync with the face"
+
+**The one that looks like success.** The conferencing app's microphone is set to
+**"Default"** rather than to `CABLE Output` by name, so it is sending the real,
+undelayed voice — the delay is skipped entirely and the sound arrives ahead of
+the picture.
+
+This is a trap created by *fixing* the first fault above. While the Windows
+default recording device was the cable, "Default" happened to resolve to the
+right device, so the setup looked correct for the wrong reason. Setting the
+default back to a real microphone silently redirects any app left on "Default"
+to that microphone.
+
+**Solution:** select `CABLE Output` by name in the conferencing app. Same for the
+speaker — on "Default", it follows whatever the Windows default playback device
+happens to be.
+
+#### Checking it without making a call
+
+```
+python -c "import sounddevice as sd; print(sd.query_devices())"
+```
+
+The two devices marked as defaults should both be real hardware. Then start the
+desktop: if neither `[AUDIO]` warning appears and the log says
+`Playing to virtual output: CABLE Input ...`, the machine side is correct and
+anything left is a setting inside the conferencing app.
+
 
 ## Webcam Mode
 
