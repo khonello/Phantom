@@ -299,13 +299,23 @@ def test_sustained_repeats_raise_the_delay(monkeypatch):
     """
     One repeat is invisible; a sustained rate is a frozen face while audio
     continues, which reads as a broken swap rather than a slow link.
+
+    Frames keep arriving here, at half the display's rate — the shape of a
+    15fps stream against a 30fps tick — and each is already past its deadline
+    on arrival. That is a link the delay is too small for. A single frame
+    followed by silence is a dead pipeline and no longer steps anything; see
+    the warm-up test below.
     """
-    buf = _buf_with([(0, b'a')], now=0)
+    clock = {'now': 200 * _MS}
     monkeypatch.setattr('desktop.audio.time.perf_counter_ns',
-                        lambda: 200 * _MS)
+                        lambda: clock['now'])
+    buf = _buf_with([(0, b'a')], now=0)
     before = buf.target_delay_ns
 
-    for _ in range(400):
+    for i in range(400):
+        clock['now'] += 33 * _MS
+        if i % 2 == 0:
+            buf.push(clock['now'] - 600 * _MS, b'a')
         buf.next_for_slot()
 
     assert buf.target_delay_ns > before
@@ -391,15 +401,22 @@ def test_escalation_moves_the_delay_video_reads(monkeypatch):
 
     buf = _buf_with([(1, b'a')], now=0)
     assert buf.next_for_slot() == (1, b'a')
-    for _ in range(400):
+    for i in range(400):
+        clock['now'] += 33 * _MS
+        if i % 2 == 0:                      # arriving, and always too late
+            buf.push(clock['now'] - 600 * _MS, b'a')
         buf.next_for_slot()
 
     assert buf.sync_stats()['escalations'] >= 1
     assert buf.target_delay_ns > 100 * _MS
 
-    # A frame younger than the raised delay must now be held back too.
+    # A frame younger than the raised delay must now be held back too — so the
+    # slot repeats the last one shown, whichever of the `a` frames that was.
     buf.push(clock['now'] - 150 * _MS, b'b')
-    assert buf.next_for_slot() == (1, b'a'), 'video ignored the raised delay'
+    shown = buf.next_for_slot()
+    assert shown is not None and shown[1] == b'a', (
+        'video ignored the raised delay'
+    )
 
 
 # ── Calibrate once, then freeze ────────────────────────────────────────
@@ -578,6 +595,33 @@ def test_a_stream_slower_than_the_display_tick_never_escalates(monkeypatch):
     assert stats['repeats'] > 0, 'the mismatch this is about did not happen'
     assert stats['escalations'] == 0, 'a healthy 20fps stream escalated'
     assert buf.target_delay_ns == 200 * _MS
+
+
+def test_warm_up_starvation_does_not_step_the_delay(monkeypatch):
+    """
+    The first window of a stream is model load — tens of seconds — and the few
+    frames that do come back leave nearly every slot starved. That reading is
+    true, and it is not evidence about the link: a logged session raised D to
+    650ms on it, seconds before calibration measured the link at 525ms.
+
+    So "arriving" has to mean arriving at something like the stream rate. A
+    link that is merely under-buffered still delivers at full rate; its frames
+    are late, not missing.
+    """
+    clock = {'now': 0}
+    monkeypatch.setattr('desktop.audio.time.perf_counter_ns',
+                        lambda: clock['now'])
+
+    buf = JitterBuffer(fixed_delay_ns=500 * _MS, calibrate=False)
+    for i in range(900):                         # ~30s, three whole windows
+        clock['now'] += 33 * _MS
+        if i % 150 == 0:                         # a trickle, as warm-up gives
+            buf.push(clock['now'] - 600 * _MS, b'f')
+        buf.next_for_slot()
+
+    stats = buf.sync_stats()
+    assert stats['escalations'] == 0, 'stepped the delay on warm-up'
+    assert stats['target_delay_ms'] == 500.0
 
 
 def test_a_dead_stream_does_not_escalate(monkeypatch):

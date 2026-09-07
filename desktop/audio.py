@@ -112,6 +112,12 @@ _DELAY_QUANTUM_NS = 25_000_000       # a delay reported to 1ms invites tuning it
 # generous, and raising it is precisely backwards.
 _ESCALATE_AFTER_SLOTS = 300        # ~10s at 30fps
 _ESCALATE_STARVED_RATIO = 0.20
+# What share of the window's slots must have had a frame pushed for the
+# starvation reading to be about the *link*. At 15fps against a 30fps tick a
+# healthy stream pushes on half of them, and a link that is merely
+# under-buffered still delivers at full rate — its frames are late, not
+# missing. A stream still loading models pushes on almost none.
+_ESCALATE_MIN_ARRIVED = 0.25
 _ESCALATE_STEP_NS = 100_000_000
 _ESCALATE_CEILING_NS = 2_000_000_000
 
@@ -1055,14 +1061,20 @@ class JitterBuffer:
             return
 
         ratio = self._starved / float(self._slots)
-        arriving = self._pushes > 0
+        # "Arriving" has to mean arriving at something like the stream rate,
+        # not "at least one frame in the last ten seconds". The first window of
+        # a stream is model warm-up: a handful of frames against 300 slots
+        # reads as 98% starved, which is true and is not evidence about the
+        # link — and a session that started that way stepped D to 650ms before
+        # calibration had measured anything.
+        arriving = self._pushes >= self._slots * _ESCALATE_MIN_ARRIVED
         self._slots = 0
         self._repeats = 0
         self._starved = 0
         self._pushes = 0
 
-        # Nothing arrived at all, so there is nothing a bigger buffer would
-        # have held. A dead pipeline is not a slow link, and stepping D for it
+        # Too little arrived for a bigger buffer to have held anything. A
+        # pipeline still warming up is not a slow link, and stepping D for it
         # only delays the picture that does eventually come back.
         if not arriving:
             return
@@ -1184,6 +1196,13 @@ class AudioPlayback:
     discarded (the listener would hear them as stale). Gaps are filled with
     silence.
 
+    **The delay is built, not found.** Playback drains the ring, so the ring
+    never accumulates D of history on its own — at the first block every chunk
+    it holds is newer than ``now - D``. So the first D of output is silence
+    while capture ages into position, once per session, counted as ``holds``
+    rather than as underruns. Reading whatever is at the head instead is what
+    left audio playing near-live against video held half a second.
+
     Example::
 
         playback = AudioPlayback(capture.ring_buffer, jitter_buffer)
@@ -1244,6 +1263,7 @@ class AudioPlayback:
         # could be an underrun, a trim, or the device itself, and until these
         # were counted there was no way to tell which.
         self._underruns = 0
+        self._holds = 0
         self._trims = 0
         self._resyncs = 0
 
@@ -1294,10 +1314,22 @@ class AudioPlayback:
                 continue
 
             if chunk_ts >= playback_point:
-                # Future audio; playback starts at its head, which is later
-                # than asked for. Say so, rather than reporting the age we
-                # wanted — that gap is the underrun about to be counted.
-                self._cursor_ts = chunk_ts
+                # Everything held was captured *after* the instant being
+                # played, so there is nothing to play yet. The cursor stays
+                # where it was asked to be and the fill emits silence until
+                # this chunk's own moment arrives. That silence is the delay
+                # being built, and it is built exactly once.
+                #
+                # Moving the cursor onto this chunk and starting there is what
+                # destroyed the delay. At start the ring is empty — playback
+                # drains it, so D of history never accumulates on its own —
+                # and the first seek therefore took this branch and anchored
+                # the cursor one chunk behind live. Every later block
+                # continued from there, because the cursor is deliberately
+                # continuous, and neither the trim nor the resync path pushes
+                # it *backwards*. Audio played ~100ms behind capture against
+                # video held 525ms, for the whole session: a measured skew of
+                # +448ms, the sound leading the lips by half a second.
                 return
 
             self._ring.popleft()
@@ -1379,44 +1411,86 @@ class AudioPlayback:
                 self._trims += 1
                 self._seek(playback_point)
 
+        block_ns = int(frames / self.sample_rate * 1_000_000_000)
         written = 0
-        cursor_ts = self._cursor_ts
+        first_ts = self._cursor_ts
+        pos = self._cursor_ts          # capture instant of the next sample out
 
         if self._leftover is not None and self._leftover.shape[0] > 0:
             n = min(self._leftover.shape[0], frames - written)
             outdata[written:written + n] = self._leftover[:n]
             written += n
+            pos += int(n / self.sample_rate * 1_000_000_000)
             self._leftover = (self._leftover[n:]
                               if n < self._leftover.shape[0] else None)
 
+        # Whether an unfilled block was the delay being served or a fault. Both
+        # are silence, and both had the same counter — which is how a delay
+        # that was never applied at all presented as five underruns.
+        held = False
+
         while written < frames:
-            chunk = self._ring.popleft()
+            chunk = self._ring.peek_oldest()
             if chunk is None:
                 break
             chunk_ts, pcm = chunk
-            if written == 0:
-                # Nothing carried over, so this block begins exactly at this
-                # chunk. Re-anchoring on its own stamp keeps the reported age
-                # true across a gap in capture, which a running count would
-                # quietly absorb.
-                cursor_ts = chunk_ts
+            chunk_dur = int(pcm.shape[0] / self.sample_rate * 1_000_000_000)
+
+            if chunk_ts + chunk_dur <= pos:
+                # Its whole slot passed while this cursor was emitting silence.
+                # Playing it now would shift every sample after it later and
+                # nothing pulls them back, which is how a fixed delay stops
+                # being fixed. Same rule as `next_for_slot`'s second: material
+                # that missed its slot is dropped, not presented late.
+                self._ring.popleft()
+                continue
+
+            if chunk_ts - pos > block_ns:
+                # Not due yet. This is the delay being served, not a fault.
+                # One block of slack, because a chunk is stamped from the clock
+                # at the callback that delivered it and that wobbles by a
+                # millisecond or two — a tighter test would insert silence on
+                # ordinary scheduling jitter, which is a click.
+                held = True
+                break
+
+            self._ring.popleft()
+            offset = int(max(0, pos - chunk_ts)
+                         / 1_000_000_000 * self.sample_rate)
+            if offset >= pcm.shape[0]:
+                continue
+            pcm = pcm[offset:]
             n = min(pcm.shape[0], frames - written)
             outdata[written:written + n] = pcm[:n]
             written += n
+            pos += int(n / self.sample_rate * 1_000_000_000)
             if n < pcm.shape[0]:
                 self._leftover = pcm[n:]
 
-        if written > 0:
-            self._last_audio_age_ns = now - cursor_ts
-            self._cursor_ts = cursor_ts + int(
-                written / self.sample_rate * 1_000_000_000)
-
         if written < frames:
-            # Underrun: nothing captured yet for this block. Silence is the
-            # only option, but the next block continues from here rather than
-            # from a recomputed clock position, so one gap stays one gap.
-            self._underruns += 1
             outdata[written:] = 0.0
+            if held:
+                self._holds += 1
+            else:
+                self._underruns += 1
+
+        # The cursor advances by the whole block whatever went into it. It is a
+        # position on the capture clock and the device consumes blocks in real
+        # time, so silence occupies its slot exactly as audio would. Advancing
+        # only by what was written is the other half of the lost delay: the
+        # cursor fell behind the clock by every gap, and the next block
+        # re-anchored onto whatever had arrived — which is live audio.
+        self._cursor_ts += block_ns
+
+        if written > 0:
+            # Measured at the ear, not at the callback. This block is audible
+            # once the device has played what it already holds, and
+            # `playback_point` above already subtracts that — so leaving it out
+            # here reported audio as `out_latency` younger than it presents,
+            # and the skew line carried a permanent 'audio early' of 2ms on
+            # WASAPI or 90ms on MME. `JitterBuffer.video_age_ns` is the
+            # counterpart, and the difference between them is the A/V skew.
+            self._last_audio_age_ns = now + self._output_latency_ns - first_ts
 
     def stats(self) -> Dict[str, Any]:
         """Playback health, for the periodic sync log.
@@ -1434,6 +1508,13 @@ class AudioPlayback:
             # the A/V skew, and nothing measured it before.
             'audio_age_ms': round(self._last_audio_age_ns / 1_000_000, 1),
             'underruns': self._underruns,
+            # Blocks deliberately left silent because the audio for that
+            # instant had not been captured yet. Expected once, at the start,
+            # while the delay is built — about D worth of them — and again
+            # after any step that raises D. A count rising mid-session means
+            # capture is falling behind, which is a fault. Both are silence,
+            # and only one is broken.
+            'holds': self._holds,
             'trims': self._trims,
             'resyncs': self._resyncs,
             'drift_ms': drift_ms,

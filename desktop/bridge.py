@@ -2361,6 +2361,15 @@ class Bridge(QObject):
         self._upload_progress = max(0.0, min(1.0, value))
         self.uploadProgressChanged.emit(self._upload_progress)
 
+    def _finish_render(self) -> None:
+        """Fetch the preview, then the file itself.
+
+        Worker thread only — both calls block on a socket reply, so neither may
+        run on the receive thread. See the caller in `_on_pipeline_event`.
+        """
+        self._refresh_output_thumbnail()
+        self._download_output()
+
     def _refresh_output_thumbnail(self) -> None:
         """
         Fetch the finished render's first frame.
@@ -2912,10 +2921,12 @@ class Bridge(QObject):
                 )
             # Audio faults are audible but were invisible. An underrun, a trim
             # and a dead output device all sound like "it is breaking up".
-            if audio['underruns'] or audio['trims'] or audio['resyncs']:
+            if (audio['underruns'] or audio['trims'] or audio['resyncs']
+                    or audio['holds']):
                 print(
                     f'[SYNC] audio buf={audio["buffered_ms"]}ms '
                     f'underruns={audio["underruns"]} '
+                    f'holds={audio["holds"]} '
                     f'trims={audio["trims"]} resyncs={audio["resyncs"]} '
                     f'drift={audio["drift_ms"]}ms '
                     f'out={audio["device"]} (+{audio["out_latency_ms"]}ms)',
@@ -3221,17 +3232,21 @@ class Bridge(QObject):
                 else:
                     self._batch_complete = True
                     self.batchCompleteChanged.emit(True)
-                    self._refresh_output_thumbnail()
-                    # On a worker thread. This runs inside the WebSocket
-                    # receive callback, and the download is a request/response
-                    # — the reply can only be delivered by the very thread
-                    # that would be blocked waiting for it. It timed out, the
-                    # error dict had no `success` key so it read as a success
-                    # with no data, and the finished render was left on the
-                    # pod until the pod was terminated.
+                    # On a worker thread, and the thumbnail goes with it.
+                    # Both are request/response over the socket, and this runs
+                    # inside the WebSocket receive callback — the reply can
+                    # only be delivered by the very thread that would be
+                    # blocked waiting for it. It timed out, the error dict had
+                    # no `success` key so it read as a success with no data,
+                    # and the finished render was left on the pod until the pod
+                    # was terminated. The download was moved out; the thumbnail
+                    # was left behind, so every completed render printed the
+                    # controller's own BUG line and came back without a
+                    # preview. One worker rather than two, so the two requests
+                    # queue behind each other instead of racing one socket.
                     threading.Thread(
-                        target=self._download_output,
-                        name='download-output',
+                        target=self._finish_render,
+                        name='finish-render',
                         daemon=True,
                     ).start()
                     if self._photo_targets:

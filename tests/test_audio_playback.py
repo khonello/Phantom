@@ -71,7 +71,11 @@ def test_consecutive_blocks_are_contiguous(rig, monkeypatch):
     """
     playback, ring, _ = rig
     _fill(ring, 8)
-    monkeypatch.setattr('desktop.audio.time.perf_counter_ns', lambda: 0)
+    # The clock sits one delay past the first chunk, so chunk 1 is due now.
+    # With it at 0 nothing in the ring has reached its playout instant and the
+    # correct answer is silence — see the delay-building test below.
+    monkeypatch.setattr('desktop.audio.time.perf_counter_ns',
+                        lambda: 200_000_000)
 
     values = []
     for _ in range(6):
@@ -89,7 +93,9 @@ def test_a_moving_target_delay_does_not_break_the_stream(rig, monkeypatch):
     """
     playback, ring, jitter = rig
     _fill(ring, 12)
-    monkeypatch.setattr('desktop.audio.time.perf_counter_ns', lambda: 0)
+    # Far enough on that the first chunk is due at the first of these delays.
+    monkeypatch.setattr('desktop.audio.time.perf_counter_ns',
+                        lambda: 380_000_000)
 
     values = []
     for delay_ms in (380, 500, 420, 490, 400, 460):
@@ -105,7 +111,8 @@ def test_partial_chunks_carry_over(rig, monkeypatch):
     """A block smaller than a chunk must resume mid-chunk, not restart it."""
     playback, ring, _ = rig
     _fill(ring, 4)
-    monkeypatch.setattr('desktop.audio.time.perf_counter_ns', lambda: 0)
+    monkeypatch.setattr('desktop.audio.time.perf_counter_ns',
+                        lambda: 200_000_000)
 
     first = _pull(playback, frames=_CHUNK // 2)
     second = _pull(playback, frames=_CHUNK // 2)
@@ -154,21 +161,33 @@ def test_empty_ring_is_silence_and_is_counted(rig, monkeypatch):
     assert playback._underruns == 1
 
 
-def test_one_gap_stays_one_gap(rig, monkeypatch):
+def test_a_gap_costs_only_the_audio_whose_slot_it_covered(rig, monkeypatch):
     """
-    After silence, the next block continues from where audio resumes rather
-    than from a recomputed clock position — so an underrun costs exactly the
-    audio that was missing.
+    Silence occupies its slot exactly as audio would, and the stream resumes
+    where the clock says it should be.
+
+    The cursor used to hold still through an underrun and then re-anchor onto
+    whatever had arrived by the next block — so a gap cost nothing and the
+    delay quietly became however far behind live that chunk happened to be.
+    That is the mechanism behind audio leading the picture by half a second.
+    Now the silent block advances the cursor, the chunk whose slot it covered
+    is dropped as stale, and everything after it stays on time. It is the same
+    rule `next_for_slot` holds for video: material that missed its slot is
+    discarded, never presented late.
     """
     playback, ring, _ = rig
-    monkeypatch.setattr('desktop.audio.time.perf_counter_ns', lambda: 0)
+    monkeypatch.setattr('desktop.audio.time.perf_counter_ns',
+                        lambda: 200_000_000)
 
-    _pull(playback)                      # underrun
+    _pull(playback)                      # underrun: nothing captured yet
     _fill(ring, 3)
-    values = [float(_pull(playback)[0][0]) for _ in range(3)]
+    values = [float(_pull(playback)[0][0]) for _ in range(2)]
 
-    assert values == [1.0, 2.0, 3.0]
     assert playback._underruns == 1
+    assert values == [2.0, 3.0], (
+        'chunk 1 was played into a slot that had already passed, shifting '
+        'every sample after it later'
+    )
 
 
 # ── Latency is corrected by depth, rarely ──────────────────────────────
@@ -234,7 +253,7 @@ def test_stats_report_the_counters():
     playback = AudioPlayback(ring, _FakeJitter(0), sample_rate=_RATE,
                              channels=1, block_size=_CHUNK)
     stats = playback.stats()
-    for key in ('buffered_ms', 'underruns', 'trims', 'resyncs'):
+    for key in ('buffered_ms', 'underruns', 'holds', 'trims', 'resyncs'):
         assert key in stats
 
 
@@ -358,7 +377,8 @@ def test_a_delay_epoch_change_repositions_the_cursor(rig, monkeypatch):
     """
     playback, ring, jitter = rig
     _fill(ring, 20)
-    monkeypatch.setattr('desktop.audio.time.perf_counter_ns', lambda: 0)
+    monkeypatch.setattr('desktop.audio.time.perf_counter_ns',
+                        lambda: 200_000_000)
 
     assert float(_pull(playback)[0][0]) == 1.0
     assert float(_pull(playback)[0][0]) == 2.0
@@ -380,7 +400,8 @@ def test_the_delay_alone_never_moves_the_cursor(rig, monkeypatch):
     """
     playback, ring, jitter = rig
     _fill(ring, 12)
-    monkeypatch.setattr('desktop.audio.time.perf_counter_ns', lambda: 0)
+    monkeypatch.setattr('desktop.audio.time.perf_counter_ns',
+                        lambda: 380_000_000)
 
     values = []
     for delay_ms in (380, 500, 420, 490, 400, 460):
@@ -408,6 +429,76 @@ def test_output_device_latency_is_taken_off_the_read_point(rig, monkeypatch):
 
     # 20 - 10 + 5 lands on chunk index 15, whose value is 16.
     assert float(_pull(playback)[0][0]) == 16.0
+
+
+# ── The delay is built, not assumed ────────────────────────────────────
+
+
+def test_the_delay_is_built_from_an_empty_ring(monkeypatch):
+    """
+    The test whose absence let audio run half a second ahead of the picture for
+    a whole session.
+
+    Every other test here pre-fills the ring with more history than D. A real
+    session never has one: playback drains the ring, so it holds only what
+    arrived since the last block, and at the first seek *every* chunk is newer
+    than `now - D`. Playback answered that by starting at the newest chunk it
+    had — and permanently, because the cursor is continuous afterwards and
+    neither the trim nor the resync path pushes it backwards. Measured on a
+    live call: video +563ms against audio +116ms, held for the whole session.
+
+    So this drives it the way the machine does — capture and playback both
+    running in step from nothing — and asks the only question that matters:
+    how old is the audio it presents?
+    """
+    clock = {'now': 0}
+    monkeypatch.setattr('desktop.audio.time.perf_counter_ns',
+                        lambda: clock['now'])
+
+    delay = 20 * _CHUNK_NS
+    ring = AudioRingBuffer(max_chunks=400, sample_rate=_RATE)
+    jitter = _FakeJitter(delay)
+    playback = AudioPlayback(ring, jitter, sample_rate=_RATE, channels=1,
+                             block_size=_CHUNK)
+    playback._delay_epoch = jitter.delay_epoch
+
+    out = np.zeros((_CHUNK, 1), dtype=np.float32)
+    for i in range(60):
+        clock['now'] += _CHUNK_NS
+        ring.append(clock['now'] - _CHUNK_NS, _pcm(i + 1))
+        playback._output_callback(out, _CHUNK, None, None)
+
+    stats = playback.stats()
+    assert abs(stats['audio_age_ms'] - delay / 1_000_000) <= 1.0, (
+        'audio presented +{}ms against a delay of {}ms'.format(
+            stats['audio_age_ms'], delay / 1_000_000)
+    )
+    # The silence that builds the delay is bounded by D and is not a fault;
+    # anything after it is. The two are separate counters for that reason.
+    assert stats['holds'] <= delay / _CHUNK_NS
+    assert stats['underruns'] == 0
+
+
+def test_a_raised_delay_is_rebuilt_rather_than_faked(rig, monkeypatch):
+    """
+    Escalation steps D up by 100ms. The ring holds only the old D, so the extra
+    cannot come from history — it has to come from silence, once, exactly as it
+    does at the start.
+    """
+    playback, ring, jitter = rig
+    clock = {'now': 10 * _CHUNK_NS}
+    monkeypatch.setattr('desktop.audio.time.perf_counter_ns',
+                        lambda: clock['now'])
+    _fill(ring, 11)                        # ~10 chunks of history, the old D
+    jitter.target_delay_ns = 10 * _CHUNK_NS
+    assert float(_pull(playback)[0][0]) == 1.0
+
+    jitter.target_delay_ns = 20 * _CHUNK_NS
+    jitter.delay_epoch += 1
+    block = _pull(playback)
+
+    assert not block.any(), 'played history it does not have'
+    assert playback._holds == 1 and playback._underruns == 0
 
 
 # ── The two streams present the same moment ────────────────────────────
