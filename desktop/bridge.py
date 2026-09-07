@@ -34,6 +34,7 @@ from desktop.audio import (
     AudioCapture,
     AudioPlayback,
     JitterBuffer,
+    check_default_playback,
     find_virtual_output,
     resolve_input_device,
     resolve_sample_rate,
@@ -467,6 +468,13 @@ class Bridge(QObject):
         input_device, input_note = resolve_input_device(self._audio_device)
         if input_note:
             print('[AUDIO] {}'.format(input_note), file=sys.stderr)
+
+        # Advisory, and about the operator's machine rather than about this
+        # app's own path — but it is the other half of the same mis-setup, and
+        # it breaks the call in a way that is harder to attribute than silence.
+        playback_note = check_default_playback()
+        if playback_note:
+            print('[AUDIO] {}'.format(playback_note), file=sys.stderr)
 
         self._sample_rate = resolve_sample_rate(self._audio_device, input_device)
 

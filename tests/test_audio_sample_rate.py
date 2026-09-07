@@ -314,6 +314,45 @@ check('and the aggregate endpoints are skipped',
       'under suspicion')
 
 
+
+# The other half of the same mis-setup, found on the same machine: both ends of
+# the cable were the system defaults at once. This one the app does not route
+# around -- its own audio reaches the cable either way -- but it silences the
+# operator and can feed the call back to the other party.
+from desktop.audio import check_default_playback                   # noqa: E402
+
+SPEAKERS = {
+    'name': 'Speakers / Headphones (Realtek Audio)',
+    'max_input_channels': 0, 'max_output_channels': 2,
+    'default_low_output_latency': 0.003, 'default_samplerate': 48000.0,
+}
+
+
+class OutStub(FakeSoundDevice):
+    """`FakeSoundDevice` with a settable default *output*."""
+
+    def __init__(self, devices, default_output):
+        super().__init__(devices)
+        self.default = type('D', (), {'device': (0, default_output)})()
+
+
+def with_output(devices, default_output):
+    sys.modules['sounddevice'] = OutStub(devices, default_output)
+
+
+with_output([CABLE_48, SPEAKERS], default_output=0)
+said = check_default_playback()
+check('a default playback that is the cable is reported',
+      said is not None and 'CABLE Input' in said, (said or '')[:60])
+check('and the message says what it does to the call',
+      'hear themselves' in (said or ''),
+      'the operator hears nothing and the other party hears themselves — '
+      'harder to attribute than silence, so it has to be named')
+
+with_output([CABLE_48, SPEAKERS], default_output=1)
+check('real speakers are left alone',
+      check_default_playback() is None)
+
 print('=' * 70)
 print('{} passed, {} failed'.format(len(PASS), len(FAIL)))
 if FAIL:

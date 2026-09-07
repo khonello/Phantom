@@ -135,6 +135,35 @@ the conferencing app can select as a microphone.
    itself: it picks the lowest-latency real input it can find, which is not
    necessarily the microphone you meant.
 
+6. **Leave your headphones or speakers as the Windows default playback
+   device.** The other half of the same mistake, and on the machine where this
+   was found, both ends of the cable were the system defaults at once. With
+   `CABLE Input` as the default playback everything the machine plays — the
+   call's incoming audio included — is pushed into the pipe the conferencing
+   app records as its microphone. You hear nothing and the other party hears
+   themselves. The app reports it but does not route around it, because unlike
+   the input there is nothing to route around: its own audio reaches the cable
+   either way.
+
+**The trap that fixing the default creates.** In the conferencing app, the
+microphone must be selected as `CABLE Output` **by name**, never left on
+"Default". While the Windows default recording device was the cable, "Default"
+happened to resolve to the right device — so the setup could look correct for
+the wrong reason. The moment you set the default back to your real microphone,
+an app on "Default" starts sending your **real, undelayed voice**, which is
+audible and completely out of sync with the swapped video. That is worse than
+the silence it replaces, because it sounds like it is working.
+
+The same applies to the speaker: on "Default" while the default playback is the
+cable, the call's audio goes into the cable. Set both by name.
+
+| Setting | Where | Value |
+|---|---|---|
+| Default recording device | Windows Sound settings | your real microphone |
+| Default playback device | Windows Sound settings | your headphones / speakers |
+| Microphone | inside the conferencing app | `CABLE Output` — by name |
+| Speaker | inside the conferencing app | your headphones — by name |
+
 Windows lists the same cable once per audio API, and the difference is large: on
 one machine the same device measured **90ms on MME, 120ms on DirectSound and
 2ms on WASAPI**. The app picks the lowest-latency instance automatically, so the

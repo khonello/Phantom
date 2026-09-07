@@ -325,6 +325,48 @@ def resolve_input_device(
     )
 
 
+def check_default_playback() -> Optional[str]:
+    """
+    Warn when the system default *playback* device is a virtual cable.
+
+    The app never uses the default output — it resolves the cable explicitly —
+    so this changes nothing about its own path. It is checked anyway because the
+    same mis-setup that steals the input steals this too, and here it breaks the
+    call in a way that is even harder to attribute: everything the machine plays
+    goes into the cable the conferencing app is recording as its microphone.
+    The operator hears nothing, and the other party hears themselves.
+
+    Found alongside the input loop on the development machine, where **both**
+    ends of the cable were the system defaults at once.
+
+    Advisory only. Nothing is changed on the operator's behalf here, because
+    unlike the input there is no failure to route around: the app's own audio
+    reaches the cable either way.
+
+    Returns:
+        A message, or None when the default output is a real device.
+    """
+    try:
+        import sounddevice as sd
+        default = sd.default.device[1]
+        name = str(sd.query_devices(default).get('name', ''))
+    except Exception:
+        return None
+
+    lowered = name.lower()
+    if not any(hint in lowered for hint in _VIRTUAL_OUTPUT_HINTS):
+        return None
+
+    return (
+        'The default playback device is "{}", a virtual cable. Everything this '
+        'machine plays — including the call\'s incoming audio — is being pushed '
+        'into the pipe your conferencing app records as its microphone, so you '
+        'will hear nothing and the other party may hear themselves. Set your '
+        'headphones or speakers as the default playback device in Windows Sound '
+        'settings.'.format(name.strip())
+    )
+
+
 def device_sample_rate(index: Optional[int]) -> Optional[int]:
     """
     The rate a device says it wants, or None if it will not say.
