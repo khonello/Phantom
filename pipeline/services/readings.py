@@ -1,5 +1,6 @@
 """
-Per-frame realism readings, reported as distributions when a stream stops.
+Per-frame realism readings, reported as distributions when a stream stops or a
+batch job finishes.
 
 `LatencyBudget` answers "does this preset hold". This answers the questions the
 realism work keeps needing and keeps not having: whether a limit is binding,

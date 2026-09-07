@@ -307,9 +307,21 @@ check('added deviation is a fraction of the headroom, not an open gain',
       float(delta[:, :, 0].std()) <= headroom + 0.5,
       '{:.2f} added against {:.2f} available'.format(
           float(delta[:, :, 0].std()), headroom))
-check('strength scales what is added',
-      float(add(0.8)[:, :, 0].std()) > float(add(0.2)[:, :, 0].std()),
-      'the knob still means something after the cap')
+# `strength` is spent once, in `_texture_reserve`. It used to be spent again
+# here, so the delivered amplitude went as its square — 0.4 asked detail
+# matching to stand back by 40%, then filled 40% of what that freed, delivering
+# 16%. With the base fixed (no `_match_detail` in front of these calls) the
+# headroom is the same at every strength, so below parity every strength must
+# now spend the same amount: all of it.
+below_parity = [float(add(s)[:, :, 0].std()) for s in (0.3, 0.5, 1.0)]
+check('below parity the whole measured headroom is spent, whatever the strength',
+      max(below_parity) - min(below_parity) < 1e-3,
+      '{} — the reservation is the control, not a second multiplier'.format(
+          ', '.join('{:.3f}'.format(v) for v in below_parity)))
+check('past parity the knob still multiplies',
+      abs(float(add(2.0)[:, :, 0].std()) - 2.0 * below_parity[-1]) < 0.05,
+      'the diagnostic overshoot has no reservation left to act through, so '
+      'above 1.0 it has to scale the amount directly')
 
 # The case the bound exists for: a swap that already carries as much texture as
 # the frame does. Nothing may be added, because past parity the face is noisier
@@ -415,10 +427,21 @@ reserved = compositor.last_detail_ratio or 0.0
 check('reserving lowers what detail matching aims at',
       reserved < unreserved,
       'wanted {:.2f} reserved vs {:.2f} not'.format(reserved, unreserved))
+
+# The quadrature share is checked *within* the reserve path, against a
+# vanishing reserve rather than against no reserve at all. Reserving switches
+# the measurement to the basis `_texture_headroom` uses — grayscale, skin only,
+# the same centred window — because the two stages reading the same face three
+# different ways is what left the reservation short. So the two paths are no
+# longer numerically comparable, deliberately, and a test that compared them
+# would be pinning the bug rather than the property.
+compositor._match_detail(detail_soft, detail_sharp, detail_mask, reserve=1e-4)
+barely = compositor.last_detail_ratio or 0.0
 check('it lowers it by exactly the quadrature share',
-      abs(reserved - unreserved * float(np.sqrt(1.0 - 0.36))) < 1e-4,
+      abs(reserved - barely * float(np.sqrt(1.0 - 0.36))) < 1e-3,
       'independent fields add in quadrature; anything else and the two '
       'stages do not sum to parity')
+compositor._match_detail(detail_soft, detail_sharp, detail_mask, reserve=0.6)
 check('the reserve is published for the readings',
       compositor.last_detail_reserve == 0.6,
       'a reserve of zero while texture_strength is set is the layer '
@@ -437,6 +460,119 @@ check('the band travels with the reserve into detail matching',
       abs(wide - narrow) > 1e-3,
       'reserving over a narrower span than the map fills leaves the '
       'headroom where it was: {:.3f} vs {:.3f}'.format(narrow, wide))
+
+# ── The reserve must survive the grain term ────────────────────────────
+# The defect this section exists for: the target's band is skin *and* sensor
+# noise, and `_add_grain` supplies the noise separately, so aiming detail
+# matching at the total spent that budget twice. `_texture_headroom` then
+# subtracted `grain^2` from a difference the double count had already closed,
+# and returned **exactly zero** across the whole 0.3-0.5 range the layer
+# documents as its working range — while detail matching had already undershot
+# to honour a reservation nothing then filled. Softer than the layer switched
+# off, silently, which is the one outcome `_texture_reserve` exists to prevent.
+print('\nThe reserve against grain')
+
+config.grain = True
+compositor._match_detail(detail_soft, detail_sharp, detail_mask, reserve=0.5)
+discounted = compositor.last_detail_ratio or 0.0
+config.grain = False
+compositor._match_detail(detail_soft, detail_sharp, detail_mask, reserve=0.5)
+undiscounted = compositor.last_detail_ratio or 0.0
+
+check('with grain on, detail matching aims lower still',
+      discounted < undiscounted,
+      'wanted {:.3f} with grain vs {:.3f} without — matching the swap to '
+      'skin plus noise and then adding the noise again spends it '
+      'twice'.format(discounted, undiscounted))
+compositor._match_detail(detail_soft, detail_sharp, detail_mask, reserve=1e-4)
+barely_off = compositor.last_detail_ratio or 0.0
+check('with grain off it is exactly the quadrature share and no more',
+      abs(undiscounted - barely_off * float(np.sqrt(1.0 - 0.25))) < 1e-3,
+      'the discount is gated on grain, so with grain off the reserve is the '
+      'only thing lowering the aim')
+
+# The path nothing may disturb: no reserve means no texture layer waiting, and
+# every measurement this project has taken was taken there.
+before = compositor._match_detail(detail_soft, detail_sharp, detail_mask)
+after = compositor._match_detail(detail_soft, detail_sharp, detail_mask,
+                                 reserve=0.0, band=3.0)
+check('without a reserve the stage is untouched, band included',
+      np.array_equal(before, after),
+      'the reserve path changes the measurement basis; the unreserved one '
+      'must stay bit-identical to what every existing measurement was taken '
+      'against')
+
+# End to end, both stages, on a target that carries noise as a real photograph
+# does. The property is the one that failed: a reservation made must be a
+# reservation filled.
+config.grain = True
+
+# **Channel-correlated, and with the noise a realistic share of the band.**
+# Both matter. Per-channel independent content puts the pooled deviation
+# `_match_detail` measures a factor of sqrt(3) above the grayscale one
+# `_texture_headroom` measures, and no arithmetic here survives that; a
+# demosaiced photograph is nothing like it. And the noise has to be a
+# *plausible* share of the band — measured on a real freckled photograph at
+# 275px, the band is 5.50 and the sensor noise 2.32, a ratio of 0.42. These
+# numbers reproduce that ratio; drift far above it and the fixture is a
+# photograph with no skin detail in it, where finding no headroom is the
+# correct answer rather than the defect.
+# Its own generator: drawing from the shared one here would shift every
+# fixture built after this block and make an unrelated test fail.
+_rng = np.random.default_rng(11)
+_structure = cv2.GaussianBlur(_rng.normal(0, 45.0, (120, 120)), (0, 0), 1.4)
+_sensor = _rng.normal(0, 0.8, (120, 120))
+noisy_real = np.clip(
+    128.0 + np.repeat((_structure + _sensor)[:, :, None], 3, axis=2),
+    0, 255).astype(np.float32)
+# A swap that kept 70% of the band: soft, but inside `_DETAIL_RATIO`, which is
+# the regime the pipeline actually runs in. A heavier blur puts the wanted gain
+# past the clamp, and then the clamp rather than the reserve decides everything.
+_low = cv2.GaussianBlur(noisy_real, (0, 0), FaceCompositor._DETAIL_SIGMA * 2.0
+                        * 120.0 / FaceCompositor._DETAIL_SIGMA_REFERENCE)
+flat_swap = _low + (noisy_real - _low) * 0.7
+
+
+def two_stage(strength):
+    """`_texture_reserve` -> `_match_detail` -> `_add_texture`, as composite does."""
+    config.texture_strength = strength
+    compositor._warned_no_headroom = True          # measuring, not reporting
+    reserve = compositor._texture_reserve(TARGET, 100.0)
+    matched = compositor._match_detail(
+        flat_swap.copy(), noisy_real, alpha,
+        reserve=reserve, band=compositor._texture_shaping()[2],
+    ).astype(np.float32)
+    out = compositor._add_texture(
+        matched.copy(), noisy_real, alpha, TARGET, 100.0, ROI,
+    )
+    return float((out - matched)[:, :, 0].std()), compositor.last_texture_headroom
+
+
+working = {s: two_stage(s) for s in (0.3, 0.4, 0.5)}
+check('a reservation in the working range is actually filled',
+      all(added > 0.0 for added, _ in working.values()),
+      'added ' + ', '.join('{:.2f}@{:.1f}'.format(v[0], k)
+                           for k, v in working.items())
+      + ' — every one of these was 0.00 before the grain term was counted once')
+check('and more of it is filled as the strength rises',
+      working[0.5][0] > working[0.4][0] > working[0.3][0],
+      'the reservation is what the knob moves, so the delivered amount has '
+      'to follow it')
+
+# The state that has to be said out loud rather than merely recorded: a reserve
+# made, and no room found to fill it. The readings carry the zero, but only a
+# stream reports them and a still render is exactly where this lands.
+config.texture_strength = 0.5
+compositor._warned_no_headroom = False
+compositor._add_texture(
+    noisy_real.copy(), noisy_real, alpha, TARGET, 100.0, ROI,
+)
+check('an unfilled reservation says so',
+      compositor._warned_no_headroom,
+      'a face softer than with the layer off, reported once rather than '
+      'per frame')
+config.grain = False
+config.texture_strength = 0.0
 
 compositor._match_detail(detail_soft, detail_sharp, detail_mask,
                          reserve=0.0, band=3.0)

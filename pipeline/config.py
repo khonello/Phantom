@@ -233,9 +233,16 @@ class FaceSwapConfig:
     # contrast. `texture.TEXTURE_MAX` survives only as a backstop against an
     # estimate gone wrong.
     #
+    # It is spent **once**, as the reservation `_match_detail` makes: below
+    # parity the layer then fills the whole measured headroom. It used to be
+    # spent twice — reserve, then a fraction of what the reserve freed — so the
+    # delivered amplitude went as the square and 0.4 delivered 0.16.
+    #
     # **Defaults off.** It has never been judged on footage, and a realism knob
-    # that arrives switched on is one nobody chose. 0.3-0.5 is the expected
-    # working range; see docs/TEXTURE_PIPELINE.md.
+    # that arrives switched on is one nobody chose. The response is linear from
+    # about 0.2 up — both stages measure the same band over the same skin in the
+    # same window, so the reserved room is the room that gets found — and 0.5 is
+    # the place to start. See docs/TEXTURE_PIPELINE.md.
     #
     # Above 1.0 (to `texture.STRENGTH_MAX`) deliberately exceeds measured parity.
     # Not a shipping value — the desktop slider stops at 1.0 — but the one run

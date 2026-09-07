@@ -308,7 +308,12 @@ class Bridge(QObject):
         self._tuning_panel = False
         self._texture_strength = 0.0
         self._diffuse_strength = 0.0
-        self._texture_last = 0.4
+        # 0.5 rather than 0.4: the strength is spent once now, as the
+        # reservation, so the old value sat at the bottom edge of what the
+        # budget can actually deliver. Clicking the chip has to land somewhere
+        # the layer is visibly doing something, or the first thing an operator
+        # sees of it is the ambiguous case.
+        self._texture_last = 0.5
         self._diffuse_last = 0.3
 
         # How far up in scale the texture layer reaches. On the panel and the

@@ -708,6 +708,21 @@ class GuardTelemetry:
             if yaw is not None:
                 self._add('yaw_abs', abs(yaw))
 
+    def reset(self) -> None:
+        """
+        Drop everything measured. Called when a job starts, never mid-run.
+
+        The sibling of `Readings.reset` and `LatencyBudget.reset`, and here for
+        the same reason: this outlives any one job, so a report printed for the
+        second one would otherwise describe both. `capabilities` is kept — it
+        describes the model pack, which does not change between jobs.
+        """
+        self.samples.clear()
+        self.reasons.clear()
+        self.yaw_sources.clear()
+        self.frames = 0
+        self.would_guard = 0
+
     def _add(self, metric: str, value: float) -> None:
         """Append a sample, respecting the cap."""
         bucket = self.samples.setdefault(metric, [])

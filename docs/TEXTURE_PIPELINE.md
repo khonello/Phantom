@@ -481,6 +481,153 @@ It is also a synthetic fixture. It establishes the mechanism and the direction.
 It does not establish the magnitude on a real face, and nothing here substitutes
 for §10.
 
+### 6.5 The reservation was made and never filled
+
+*Added 2026-09-07, after §10 was finally run on a still: freckles obvious in the
+source, absent from the output. The measurement is on that source —
+`source/Two`, IMG_3745, a 275px face with clear freckles — through the shipped
+code rather than a reimplementation of it.*
+
+Everything in §6.1–6.4 was in place, and the layer was still adding **exactly
+nothing** at the strengths this document recommends:
+
+| | 0.2 | 0.3 | 0.4 | 0.5 | 0.7 | 1.0 |
+|---|---|---|---|---|---|---|
+| headroom | 0.00 | 0.00 | 0.00 | 1.17 | 2.81 | 3.48 |
+| added | 0.00 | 0.00 | 0.00 | 0.59 | 1.97 | 3.48 |
+
+Two defects, and the first is the one that made the range dead.
+
+**The grain budget was spent twice.** `_texture_headroom` computes
+`real² − fake² − grain²`. The target's band is skin *and* sensor noise, so
+`real` already contains the noise — and `_match_detail`, aiming at `real`,
+amplified the swap's own structureless band until it covered the noise too.
+Grain then added the noise a second time, and the subtraction was left with
+nothing:
+
+    real  5.50    grain 2.32    (42% of the amplitude, 18% of the energy)
+    reserve 0.3 -> real² - fake² = 3.59  <  grain² = 5.39   ->  0
+    reserve 0.4 ->                  4.52  <          5.39   ->  0
+    reserve 0.5 ->                  6.76  >          5.39   ->  1.17
+
+Note what this does to §6.1's safety property. That section says a reservation
+must only be made when the layer will run, because an unfilled reservation
+leaves the face *softer* than with no layer at all — and it lists the gates
+checked in advance, then explicitly excuses the headroom: "that direction is
+safe: reserving makes headroom more likely to exist, not less." **That is true
+of `real² − fake²` and false of the whole expression**, because `grain²` is
+subtracted unconditionally and, below reserve 0.5, exceeded what reserving had
+freed. The one failure the section was written to prevent was reached through
+the one term it declined to check.
+
+`_match_detail` now discounts the noise once, when reserving. Measured on the
+**grayscale** band, not the pooled per-channel one it uses for the ratio:
+`_estimate_noise` returns a luma sigma and `_add_grain` adds a luma field, so
+only a grayscale denominator makes the conventions cancel. Since it is gated on
+reserving *and* grain, a run without either is bit-identical — which also means
+the pre-existing over-parity (swap matched to skin+noise, then given grain on
+top, ~8% over in amplitude) is untouched and remains open.
+
+**`texture_strength` was applied twice.** The reserve is `strength`, and the
+spend was `strength × headroom`. Since headroom is what the reserve freed, the
+delivered amplitude went as the **square**: 0.4 asked detail matching to stand
+back by 40%, then filled 40% of what that freed, delivering 16%. The knob is
+documented in §B1 as "the fraction of the measured gap to close", so closing the
+gap it opened is what it has to do. Below parity the layer now spends the whole
+measured headroom; `f² + g² + t² = r²` still lands the total exactly at parity,
+so overshoot remains impossible. Above 1.0 the diagnostic overshoot keeps
+multiplying, since past parity there is no reservation left to act through.
+
+Before and after, in one rig, on that source — added deviation in 8-bit units,
+against a source freckle carrying 12.8:
+
+| strength | before | after |
+|---|---|---|
+| 0.3 | **0.00** | 0.56 |
+| 0.4 | 0.28 | 1.00 |
+| 0.5 | 0.58 | 1.25 |
+| 1.0 | 2.30 | 2.34 |
+
+The correction does its work where the knob is meant to be used and converges
+where the old behaviour already worked, which is the shape a fix to a budget
+should have.
+
+**A reservation that finds no room now says so**, once, naming both numbers.
+That state was completely silent before: the readings carry the zero, but until
+this was found only a *stream* reported readings at all, so a still render — the
+one job shape where a face can be studied closely — printed no `REALISM` block.
+Both are fixed together, because neither is much use without the other.
+
+**A third correction, and it is what removed the dead zone entirely.** With both
+fixes above, a reserve of 0.2–0.3 *still* found no room. The cause was that the
+two stages were reading the same face through three different instruments:
+
+| | `_match_detail` | `_texture_headroom` |
+|---|---|---|
+| statistic | pooled per-channel deviation | grayscale deviation |
+| region | the whole crop | a centred 160px window |
+| mask | the full compositing mask | skin only, features cut out |
+
+Each difference is small. Together they left detail matching overshooting its
+own aim by ~2.5% — nothing against a large reservation, and the whole of a small
+one. **The region was the dominant term**; aligning the mask and the colour
+convention alone moved the numbers by under 0.2%. When reserving, `_match_detail`
+now measures exactly what `_texture_headroom` will:
+
+| reserve | aim wanted | fake before | fake after | headroom before | after |
+|---|---|---|---|---|---|
+| 0.2 | 5.21 | 5.35 | 5.09 | **0.00** | 1.56 |
+| 0.3 | 5.07 | 5.25 | 4.99 | 0.83 | 1.83 |
+| 0.4 | 4.87 | 5.06 | 4.88 | 1.66 | 2.11 |
+| 0.6 | 4.26 | 4.21 | 4.17 | 3.25 | 3.30 |
+| 0.8 | 3.19 | 3.55 | 3.41 | 3.96 | 4.08 |
+
+Headroom is now `reserve × skin_only` to within a few percent, which is positive
+for every reserve above zero — so the knob is linear with no dead zone whose edge
+nobody could predict. Cost, measured: `_scatter_weight` 0.2ms, `_estimate_noise`
+0.5ms, two band deviations 0.3–0.8ms — about **1.0ms at aligned 128 and 1.2ms at
+256**, paid only while the layer is on. The unreserved path is untouched.
+
+**And the reason none of this was noticed for so long.** With texture off, the
+composite lands at **1.002** of the target's band: `_match_detail` under-reaches
+by 5.6% (the clamp and the warp) and grain adds ~6% back. The double count and
+the under-reach cancel almost exactly. That is why the tuning settled where it
+did, and why the moment a reservation is made — which lowers `fake` deliberately
+while grain stays fixed — the cancellation breaks and the entire reserve
+disappears. It is also why the noise discount is gated on `reserve > 0`: applied
+unconditionally it would take a composite sitting at 1.002 of parity down to
+~0.92, which is strictly worse.
+
+**Two hypotheses tested and dropped, one of them a retraction.**
+
+- **Not chroma.** The extractor is monochrome (`texture.py`, `_build_map`), and
+  a freckle is a pigment feature, so a colour-carrying channel looked like the
+  answer. At the freckles themselves it is worth **9%** of their ΔE — dL* −3.17
+  against |chroma| 0.30 on IMG_3745, and −3.84 against 0.39 on a second source.
+  The whole-skin ratio looks far better (chroma 0.58 of luminance) but that is
+  measuring uncorrelated chroma *noise*, not freckle signal. Not worth building.
+- **The shaping knobs were briefly written off here, wrongly.** p99 of the
+  delivered map is ~3.6× its own deviation at every setting of `texture_contrast`
+  and `texture_relief`, which reads as inert. It is not: p99 is an order
+  statistic over a field the pore octave dominates by count, and the map is
+  normalised to unit deviation, so its shape barely moves by construction.
+  Scored where it matters — mean |map| at freckle pixels against mean |map| on
+  plain skin, the same pixels every run — the knobs work as §6.3 claims:
+
+  | band | relief | contrast | freckle : plain skin |
+  |---|---|---|---|
+  | 1.0 | any | any | 5.2 |
+  | 2.0 | 0.65 | 1.0 | 10.0 |
+  | 2.0 | 0.65 | 1.6 | 13.5 (default) |
+  | 2.0 | 0.90 | 1.6 | 23.7 |
+  | 2.0 | 0.90 | 2.4 | 28.6 |
+
+  Two things follow. **At `texture_band` 1.0 both knobs are exactly inert** —
+  there is no mark octave for them to act on — so a BAND slider at the bottom
+  silently disables two of the four texture controls. And the defaults are
+  conservative: 0.9 / 2.4 puts roughly twice the contrast into the marks, which
+  is now a measured range to judge on footage rather than a guess.
+
 ---
 
 ## 7. The diffuse / light-scatter pass
@@ -891,7 +1038,7 @@ set too low.
 
 ### Phase C — judge it
 
-**C1. Footage, with the toggle**, at `texture_strength` 0.3-0.5. Both
+**C1. Footage, with the toggle**, starting at `texture_strength` 0.5 (see §6.5 — 0.2-0.4 was the range in which the layer added nothing at all, and the response is linear from 0.2 now). Both
 `compare_frames.py` (once A1 has made its seam metric trustworthy) and a person
 looking at a face — the metric will not see swimming.
 

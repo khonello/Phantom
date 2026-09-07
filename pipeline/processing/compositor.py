@@ -313,6 +313,10 @@ class FaceCompositor:
         # frame is unchanged, and nothing anywhere disagrees.
         self._warned_no_texture = False
 
+        # Said once, when a reserve was made and the headroom to fill it was not
+        # there — the state that leaves a face softer than with the layer off.
+        self._warned_no_headroom = False
+
         # High-band deviation the texture layer was allowed on the last frame,
         # in 8-bit units, or None when it did not run. Same pattern as
         # `masker.last_coverage`: the stage that measures a thing owns the
@@ -520,6 +524,11 @@ class FaceCompositor:
             fake, real, mask,
             reserve=self._texture_reserve(face, extent),
             band=self._texture_shaping()[2],
+            # Only used while reserving, to measure on the same skin the
+            # frame-space stage will measure. Passed rather than derived so
+            # this stage stays callable without a detection.
+            face=face,
+            matrix=aligned_matrix,
         )
         elapsed('detail')
 
@@ -1170,6 +1179,8 @@ class FaceCompositor:
         mask: Mask,
         reserve: float = 0.0,
         band: float = 1.0,
+        face: Optional[Face] = None,
+        matrix: Optional[Matrix] = None,
     ) -> Frame:
         """
         Scale the swap's high-frequency band to match the target's.
@@ -1275,6 +1286,96 @@ class FaceCompositor:
         if fake_energy < 1e-3:
             return fake
 
+        # **The target's band is skin *and* sensor noise, and grain supplies the
+        # noise separately.** Aiming at the total therefore spends that budget
+        # twice — once here, amplifying the swap's own structureless band until
+        # it carries as much energy as skin plus noise, and again in `_add_grain`
+        # a moment later — after which `_texture_headroom` correctly reports
+        # there is nothing left to add. Measured on a freckled source at aligned
+        # 256: band 5.50, noise 2.32, so 42% of the amplitude was double
+        # counted, and `real^2 - fake^2` stayed under `grain^2` for every
+        # reserve below 0.5. The headroom came out at **exactly zero** across
+        # the whole 0.3-0.5 range this layer documents as its working range: the
+        # reservation was made, this stage undershot to honour it, and nothing
+        # filled the gap. Softer than no texture layer at all, which is the one
+        # outcome `_texture_reserve` exists to prevent.
+        #
+        # Discounted only while reserving, like the band above. With no reserve
+        # nothing downstream is waiting for the room, so the stage stays
+        # bit-identical to what every existing measurement was taken against —
+        # and the pre-existing overshoot (matched to skin+noise, then given
+        # grain on top) stays where it is rather than being changed silently in
+        # the same edit. It is worth revisiting on its own.
+        #
+        # The estimate is taken in aligned space while grain lands in frame
+        # space, which is approximate — but the reservation is approximate by
+        # construction, and `_texture_headroom` re-measures in frame space and
+        # remains the authority on what is actually spent. This only stops that
+        # authority being handed an already-empty budget.
+        discount = 1.0
+        if reserve > 0.0:
+            # **Measured exactly as `_texture_headroom` will measure it**, and
+            # that correspondence is the whole point rather than a tidiness.
+            # The two stages were reading the same face through three different
+            # instruments: pooled per-channel deviation against grayscale, the
+            # full compositing mask against the skin-weighted one with the
+            # features cut out, and a broadband noise sigma subtracted from
+            # both. Each difference is small — together they left this stage
+            # overshooting its own aim by ~2.5%, which is nothing at a large
+            # reserve and is the *entire* reservation at a small one. Traced on
+            # a 275px face: reserve 0.2 asked for 1.06 units of room and the
+            # measured headroom came back 0.00, because fake landed at 5.34
+            # where the reservation wanted 5.21.
+            #
+            # Reading the same pixels the same way makes the arithmetic close:
+            # headroom is then `reserve * skin_only`, which is positive for
+            # every reserve above zero, so the knob is linear instead of having
+            # a dead zone whose edge nobody can predict.
+            weight = (
+                self._scatter_weight(mask, face, matrix, fake.shape[0])
+                if face is not None and matrix is not None else None
+            )
+            measured = (
+                (weight > 0.5).astype(np.uint8) if weight is not None else binary
+            )
+            if cv2.countNonZero(measured) < 64:
+                measured = binary
+
+            # The same centred window too, for the same reason: skin at the
+            # nose and inner cheek is not the skin at the jaw and forehead, and
+            # measuring the whole crop here against a 160px centre there is the
+            # last of the three ways these stages were reading different faces.
+            srows, scols = self._stat_window(mask.shape)
+            measured = measured[srows, scols]
+            if cv2.countNonZero(measured) < 64:
+                measured = binary[srows, scols]
+
+            def band_dev(image: Frame) -> float:
+                """Grayscale high-band deviation over the skin, as headroom takes it."""
+                gray = cv2.cvtColor(
+                    np.clip(image[srows, scols], 0, 255).astype(np.uint8),
+                    cv2.COLOR_BGR2GRAY,
+                ).astype(np.float32)
+                high = cv2.subtract(gray, cv2.GaussianBlur(gray, (0, 0), sigma))
+                return float(cv2.meanStdDev(high, mask=measured)[1][0][0])
+
+            real_energy = band_dev(real)
+            fake_energy = band_dev(fake)
+            if real_energy < 1e-3 or fake_energy < 1e-3:
+                return fake
+
+            # Grain is about to supply the sensor noise separately, so the swap
+            # must not also be amplified to cover it — see the note above.
+            if self.config.grain:
+                noise = self._estimate_noise(real)
+                skin_only = float(np.sqrt(
+                    max(0.0, real_energy * real_energy - noise * noise),
+                ))
+                if skin_only < 1e-3:
+                    return fake
+                discount = skin_only / real_energy
+                real_energy = skin_only
+
         # Quadrature: leaving `reserve` of the amplitude for another field means
         # aiming this one at the rest, not at all of it.
         self.last_detail_reserve = reserve
@@ -1284,14 +1385,17 @@ class FaceCompositor:
         self.last_detail_ratio = float(wanted)
 
         # The clamp moves with the target it is clamping. `_DETAIL_RATIO` bounds
-        # how far this stage may deviate from what it is aiming at, and
-        # reserving lowers what it is aiming at — so a fixed floor would refuse
-        # the very attenuation the reservation asked for. Measured: at reserve
-        # 0.8 the wanted ratio was 0.54 against a floor of 0.60, so the clamp
-        # silently kept a quarter of the room that had just been promised to the
-        # texture layer.
+        # how far this stage may deviate from what it is aiming at, and both the
+        # reserve and the noise discount lower what it is aiming at — so a fixed
+        # floor would refuse the very attenuation they asked for. Measured: at
+        # reserve 0.8 the wanted ratio was 0.54 against a floor of 0.60, so the
+        # clamp silently kept a quarter of the room that had just been promised
+        # to the texture layer. Both factors have to appear here for the same
+        # reason, and `attenuation` is deliberately one number so a third one
+        # cannot be added to the aim and forgotten here.
+        attenuation = held_back * discount
         low, high = self._DETAIL_RATIO
-        ratio = float(np.clip(wanted, low * held_back, high * held_back))
+        ratio = float(np.clip(wanted, low * attenuation, high * attenuation))
 
         # fake_low + (fake - fake_low) * ratio, rearranged so it is one fused
         # pass rather than a multiply and an add over separate temporaries.
@@ -1559,6 +1663,27 @@ class FaceCompositor:
         )
         self.last_texture_headroom = headroom
         if headroom <= self._TEXTURE_FLOOR:
+            # A reservation was made and nothing filled it: `_match_detail`
+            # undershot by `reserve` for this layer, and this layer then found
+            # no room. That leaves the face softer than with the layer switched
+            # off, and it is invisible without being said — the readings carry
+            # the zero, but only a stream reports them, and this is exactly the
+            # state a still render lands in. Once per compositor, like the
+            # missing-source warning beside it.
+            if not self._warned_no_headroom:
+                self._warned_no_headroom = True
+                emit_warning(
+                    'texture_strength is {:.2f} but the measured headroom is '
+                    '{:.2f}, under the {:.2f} floor — the layer added nothing '
+                    'while detail matching had already held back {:.2f} of the '
+                    'band for it, so this face is softer than with texture off. '
+                    'The target may already carry as much high-frequency energy '
+                    'as it can, or the region may be too small to '
+                    'measure.'.format(
+                        strength, headroom, self._TEXTURE_FLOOR,
+                        self.last_detail_reserve or 0.0),
+                    scope='TEXTURE',
+                )
             return blended
 
         x0, y0, roi_w, roi_h = roi
@@ -1576,7 +1701,23 @@ class FaceCompositor:
         # `TEXTURE_MAX` as a backstop rather than as the control: the measurement
         # is what sets the level, and the constant only catches an estimate that
         # has gone wrong — a busy background inside the ROI, say.
-        amount = min(strength * headroom * confidence, texture.TEXTURE_MAX)
+        #
+        # **`strength` is spent once, in `_texture_reserve`, not again here.**
+        # It used to appear in both places: the reserve is `strength` and this
+        # was `strength * headroom`, so the delivered amplitude went as the
+        # *square* — 0.4 asked `_match_detail` to stand back by 40% and then
+        # filled 40% of what that freed, delivering 16%. The knob is documented
+        # as "the fraction of the measured gap to close", so closing the gap it
+        # opened is what it has to do. Below 1.0 that means spending the whole
+        # measured headroom: the reservation decides the share, the frame-space
+        # measurement decides the amount, and `f^2 + g^2 + t^2 = r^2` still puts
+        # the total exactly at parity — overshoot remains impossible.
+        #
+        # Above 1.0 is the diagnostic overshoot and keeps multiplying, since
+        # past parity there is no reservation left to be the control.
+        amount = min(
+            max(strength, 1.0) * headroom * confidence, texture.TEXTURE_MAX,
+        )
         result: Frame = blended + (warped * amount)[:, :, None] * mask[:, :, None]
 
         # Contained within the `paste` bucket rather than added to it — the frame

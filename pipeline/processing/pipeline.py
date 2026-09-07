@@ -288,6 +288,7 @@ class ProcessingPipeline:
             # work with. Without this, only the first failing source is ever
             # reported and the second looks like a working layer set too low.
             self._compositor._warned_no_texture = False
+            self._compositor._warned_no_headroom = False
         return loaded
 
     def _reset_temporal_state(self) -> None:
@@ -791,25 +792,42 @@ class ProcessingPipeline:
         """
         Emit the guard calibration summary, and write it if asked.
 
-        Called once when the stream stops. The text form goes to the log so a
-        session is self-documenting; `guard_report` additionally writes JSON,
-        which is what a calibration run should keep.
+        Called once when a stream stops and once when a batch job finishes. The
+        text form goes to the log so a session is self-documenting;
+        `guard_report` additionally writes JSON, which is what a calibration run
+        should keep.
+
+        **Each section is emitted on its own evidence.** They used to share one
+        early return on the guard telemetry, which is only recorded on the
+        stream path — so a render or a photo job produced no `REALISM` block at
+        all, and `texture_headroom`, `detail_reserve` and `texture_confidence`
+        were dark on exactly the path a still is judged on. Every reading built
+        to answer "did this layer have anything to spend" was unavailable to the
+        one job shape where the answer can be looked at closely.
         """
-        if not self._telemetry.frames:
-            return
+        if self._telemetry.frames:
+            if self._detector is not None:
+                self._telemetry.capabilities = dict(self._detector.capabilities)
+            emit_status(self._telemetry.format_report(self.config), scope='GUARD')
 
-        if self._detector is not None:
-            self._telemetry.capabilities = dict(self._detector.capabilities)
+            # The JSON goes with the block, not beside it. It used to be written
+            # unconditionally, which was harmless while only a stream could
+            # reach here and is not now: a batch job records no guard telemetry,
+            # so an unconditional write would replace a calibration run's report
+            # with an empty one the moment a render followed it.
+            path = self.config.guard_report
+            if path and self._telemetry.write(path, self.config):
+                emit_status(f'Guard telemetry written to {path}', scope='GUARD')
+            elif path:
+                emit_error(
+                    f'Could not write guard telemetry to {path}', scope='GUARD',
+                )
 
-        emit_status(self._telemetry.format_report(self.config), scope='GUARD')
-        emit_status(self._latency.format_report(self.config), scope='PERF')
-        emit_status(self._readings.format_report(), scope='REALISM')
+        if self._latency.frames:
+            emit_status(self._latency.format_report(self.config), scope='PERF')
 
-        path = self.config.guard_report
-        if path and self._telemetry.write(path, self.config):
-            emit_status(f'Guard telemetry written to {path}', scope='GUARD')
-        elif path:
-            emit_error(f'Could not write guard telemetry to {path}', scope='GUARD')
+        if self._readings.values:
+            emit_status(self._readings.format_report(), scope='REALISM')
 
     def _emit_guarded(
         self,
@@ -1145,10 +1163,23 @@ class ProcessingPipeline:
         finally:
             self._running = False
             self._stop_event.set()
+            # Before PIPELINE_STOPPED, so the summary sits above the line a
+            # reader scrolls to when the job ends — the same ordering the
+            # stream path uses, and for the same reason.
+            self._report_telemetry()
             self.bus.emit(PIPELINE_STOPPED)
 
     def _run_batch_impl(self) -> None:
         """Implementation of batch mode."""
+        # A report has to describe the job it is printed for. All three
+        # accumulators outlive any one job, and a batch job feeds only the
+        # readings — so without this a render finishing in a process that had
+        # run a stream would print that stream's guard and latency blocks as if
+        # they described the render, and dilute its own readings with the
+        # stream's. The stream has already reported its own by then.
+        self._readings.reset()
+        self._latency.reset()
+        self._telemetry.reset()
         self._build_processors()
         emit_status('Batch pipeline started', scope='PIPELINE')
         self.bus.emit(PIPELINE_STARTED)
@@ -1275,6 +1306,12 @@ class ProcessingPipeline:
                 face = self._stabilizer.stabilize(face)
 
             swapped = self._swap_face(frame, face)
+            # Recorded whether or not the composite succeeded, and before the
+            # failure return: the compositor may have measured several stages
+            # before declining, and those readings describe this frame as much
+            # as a successful one's do. The stream path records from its timing
+            # hook, which batch has no equivalent of.
+            self._record_readings()
             if swapped is None:
                 self._reset_temporal_state()
                 return FrameSwap(

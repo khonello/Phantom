@@ -757,7 +757,12 @@ GPU work can reach.
   (provision / setup / pip / model load), labelled warm or empty volume
 - **Latency budget**: reported per preset when a stream stops — p50/p95/p99 per
   stage against the frame deadline, with a HOLDS/MISSES verdict
-- **Realism readings**: reported beside it under a `REALISM` scope.
+- **Realism readings**: reported beside it under a `REALISM` scope, **when a
+  stream stops and when a batch job finishes**. The two used to share one
+  early return on the guard telemetry, which only the stream path records, so
+  a render or a photo job printed no `REALISM` block at all — every reading
+  built to answer "did this layer have anything to spend" was dark on the one
+  job shape a still can be studied on.
   `detail_ratio` is the correction `_match_detail` *wanted* before its clamp,
   with the share of frames that hit it — the only way to see a clamped quantity,
   since percentiles of the clamped value cannot exceed the clamp. This was the
@@ -1440,10 +1445,111 @@ which is the trap the second property above exists to name. And this is a
 synthetic fixture — it establishes the mechanism and the direction, not the
 magnitude on a real face.
 
-**Off by default, and still never judged on footage.** 0.3-0.5 is the expected
-working range; A/B with `tools/realism.py --host ... texture_strength=0.4`, then
-`texture_band`, `texture_relief` and `texture_contrast` one at a time — they are
-separately switchable precisely so one cannot be blamed for another's artefact.
+### The reservation was made and never filled (2026-09-07)
+
+The layer was then run on a real still and the freckles that are obvious in the
+source did not appear in the output. Traced on that source — `source/Two`,
+IMG_3745, a 275px freckled face — against the shipped code, and the answer was
+not the donor, not the band, not the picker and not chroma:
+
+    real (target's band)      5.50
+    grain (sensor noise)      2.32     42% of the amplitude
+    reserve 0.3   ->  real^2 - fake^2 = 3.59   -  grain^2 = 5.39   ->  0.00
+    reserve 0.4   ->                    4.52   -            5.39   ->  0.00
+    reserve 0.5   ->                    6.76   -            5.39   ->  1.17
+
+**Headroom came out at exactly zero across the whole documented working range.**
+Two defects behind it, both now fixed:
+
+- **The grain budget was spent twice.** The target's band is skin *and* sensor
+  noise, and `_add_grain` supplies the noise separately in frame space. Aiming
+  detail matching at the *total* therefore amplified the swap's own
+  structureless band until it covered the noise, and then grain added the noise
+  again on top — after which `_texture_headroom` correctly reported nothing
+  left. `_match_detail` now discounts the noise once when reserving, measured on
+  the grayscale band so it is the same convention `_estimate_noise` and
+  `_texture_headroom` use. Without a reserve the stage is bit-identical, so the
+  pre-existing over-parity (matched to skin+noise, then given grain) is
+  untouched and stays an open question.
+- **`texture_strength` was applied twice**, so the delivered amplitude went as
+  its *square*: 0.4 asked detail matching to stand back by 40% and then filled
+  40% of what that freed, delivering 16%. It is spent once now, in the reserve.
+  Below parity the layer spends the whole measured headroom — the reservation
+  is the control, the frame-space measurement is the amount, and
+  `f² + g² + t² = r²` still puts the total exactly at parity. Above 1.0 the
+  diagnostic overshoot keeps multiplying, since past parity there is no
+  reservation left to act through.
+
+Measured on the same source, in one rig, before and after — the added deviation
+in 8-bit units, against a source freckle carrying 12.8:
+
+| strength | before | after |
+|---|---|---|
+| 0.3 | **0.00** | 0.56 |
+| 0.4 | 0.28 | 1.00 |
+| 0.5 | 0.58 | 1.25 |
+| 1.0 | 2.30 | 2.34 |
+
+The fix does its work exactly where the knob is meant to be used and converges
+where the old behaviour already worked.
+
+**A reservation that finds no room now says so**, once, naming both numbers.
+That state — detail matching held back, texture added nothing — leaves the face
+*softer* than with the layer switched off, and it was completely silent: the
+readings carry the zero, but until now only a stream reported readings at all,
+and a still render is precisely where this lands.
+
+**Then the two stages were made to measure the same thing.** With the two fixes
+above, a reserve of 0.2-0.3 still found no room, because the stages were reading
+the same face through three different instruments — pooled per-channel deviation
+against grayscale, the full compositing mask against the skin-weighted one, and
+the whole crop against a centred 160px window. Small differences that together
+left detail matching overshooting its own aim by ~2.5%: nothing at a large
+reserve, and the entire reservation at a small one. **The region was the
+dominant term**, not the mask or the colour convention. When reserving,
+`_match_detail` now measures exactly as `_texture_headroom` will:
+
+| reserve | aim wanted | fake before | fake after | headroom before | after |
+|---|---|---|---|---|---|
+| 0.2 | 5.21 | 5.35 | 5.09 | **0.00** | 1.56 |
+| 0.3 | 5.07 | 5.25 | 4.99 | 0.83 | 1.83 |
+| 0.4 | 4.87 | 5.06 | 4.88 | 1.66 | 2.11 |
+| 0.6 | 4.26 | 4.21 | 4.17 | 3.25 | 3.30 |
+
+**The dead zone is gone and the knob is linear from 0.2 up.** Costs ~1.0ms at
+aligned 128 and ~1.2ms at 256, paid only while the layer is on.
+
+**Chroma was measured and dropped.** Freckles are ~9% of their own ΔE in chroma
+(dL* −3.17 against |chroma| 0.30 at the freckles on IMG_3745, and −3.84/0.39 on a
+second source), so a colour-carrying texture channel would buy almost nothing.
+The whole-skin figure looks far better — chroma 0.58 of luminance — but that is
+measuring uncorrelated chroma *noise*, not freckle signal.
+
+**`texture_contrast` and `texture_relief` do work, and p99 was the wrong way to
+ask.** p99 of the delivered map is ~3.6× its own deviation at every setting,
+which reads as "inert" and is really just an order statistic over a field the
+pore octave dominates by count. Scored at the freckles themselves — mean |map|
+there against mean |map| on plain skin, same pixels every run:
+
+| band | relief | contrast | freckle : plain skin |
+|---|---|---|---|
+| 1.0 | any | any | 5.2 |
+| 2.0 | 0.65 | 1.0 | 10.0 |
+| 2.0 | **0.65** | **1.6** | **13.5** (default) |
+| 2.0 | 0.90 | 1.6 | 23.7 |
+| 2.0 | 0.90 | 2.4 | 28.6 |
+
+Note the first row: **at `texture_band` 1.0 both knobs are completely inert**,
+by construction — there is no mark octave for them to act on. If the BAND slider
+is at the bottom, `texture_relief` and `texture_contrast` do literally nothing.
+And the defaults are conservative: 0.9/2.4 puts twice the contrast into the
+marks, which is now a measured range rather than a guess.
+
+**Off by default, and still never judged on footage — but the knob now means
+what it says.** 0.5 is the place to start. A/B with `tools/realism.py --host ...
+texture_strength=0.5`, then `texture_band`, `texture_relief` and
+`texture_contrast` one at a time — they are separately switchable precisely so
+one cannot be blamed for another's artefact.
 
 **`texture_strength` reaches 2.0 over the API, and the desktop slider does
 not.** Above 1.0 deliberately exceeds measured parity. It is not a shipping
@@ -1571,10 +1677,10 @@ Two things it deliberately does **not** do, both recorded rather than forgotten:
 | `enhance_strength` | `0.7` | How much of the restored face to keep. Full strength reads as AI; partial keeps believable imperfection |
 | `restore_size` | `512` | Edge of the FFHQ crop fed to the restorer. A model with fixed spatial dims overrides it and says so once — see below |
 | `restore_min_face` | `0` | Skip restoration below this face size (px, shorter side). `0` never skips |
-| `texture_strength` | `0.0` | Skin detail lifted from the operator's own source photo and warped onto the face each frame. **The fraction of the measured gap to close** — the compositor measures the real face's high-frequency energy in the same pixels, less what the swap and grain already carry, so `1.0` is parity and overshoot is impossible. Reaches `2.0` over the API for diagnosis only; the desktop slider stops at 1.0. **Off by default, never judged on footage.** 0.3-0.5 expected |
+| `texture_strength` | `0.0` | Skin detail lifted from the operator's own source photo and warped onto the face each frame. **The fraction of the measured gap to close** — the compositor measures the real face's high-frequency energy in the same pixels, less what the swap and grain already carry, so `1.0` is parity and overshoot is impossible. Reaches `2.0` over the API for diagnosis only; the desktop slider stops at 1.0. **Off by default, never judged on footage.** Linear from 0.2 up; start at 0.5 |
 | `texture_band` | `2.0` | How far up in scale that layer reaches, as a multiple of `DETAIL_SIGMA`. `1.0` is pores and the rims of everything else — what shipped, and why marks vanished. `2.0` lands on `_SCATTER_SIGMA`, so texture owns surface and scatter owns shading |
-| `texture_relief` | `0.65` | The mark octave's share of the budget against the pore octave, in quadrature. The two are normalised separately, so this is a share of the budget rather than of whatever the photo held most of. `0.0` is the pores-only behaviour exactly |
-| `texture_contrast` | `1.6` | Amplitude shaping on the mark octave, at constant total energy. A sparse mark is invisible to a second moment, so an RMS budget flattens it into the dense noise around it; this moves the same energy back into it. Mark octave only — shaping the pore octave makes speckle |
+| `texture_relief` | `0.65` | The mark octave's share of the budget against the pore octave, in quadrature. The two are normalised separately, so this is a share of the budget rather than of whatever the photo held most of. `0.0` is the pores-only behaviour exactly, and so is **any value at all when `texture_band` is 1.0** — there is no mark octave to weight. Measured at the freckles, 0.65 gives 13.5x plain skin and 0.9 gives 23.7x |
+| `texture_contrast` | `1.6` | Amplitude shaping on the mark octave, at constant total energy. A sparse mark is invisible to a second moment, so an RMS budget flattens it into the dense noise around it; this moves the same energy back into it. Mark octave only — shaping the pore octave makes speckle. Inert at `texture_band` 1.0, for the same reason `texture_relief` is |
 | `mask_feather` | `0.04` | Frame-space seam transition, as a fraction of the face's extent in frame (floor 2px). Was effectively 1%, giving a ~1.4px transition on a 101px face — a hard edge, and the reported "pasted on" look |
 | `mask_erode` | `0.03` | Pulls the mask in, in aligned space, **before** it is feathered, so the transition sits on skin rather than straddling the expanded hull onto neck and hair |
 | `diffuse_strength` | `0.0` | Subsurface scatter — softens *shading* the way light under skin does, on LAB's L channel only, with eyes/nose/mouth cut out. Answers "the skin reads hard", which is a different complaint from "plastic" and a different band. **Off by default, never judged on footage.** 0.2-0.4 expected |
@@ -2289,7 +2395,7 @@ back to the other backend or off — rather than failing.
 - `pipeline/services/face_tracking.py`: `LandmarkStabilizer` EMA on kps/106 landmarks, resets on identity change
 - `pipeline/services/database.py`: `FaceDatabase` embedding cache, averaging, `review_sources`
 - `pipeline/services/guards.py`: Source and runtime input guards, threshold validation
-- `pipeline/services/readings.py`: `Readings` — per-frame realism scalars, reported as distributions when a stream stops
+- `pipeline/services/readings.py`: `Readings` — per-frame realism scalars, reported as distributions when a stream stops or a batch job finishes
 
 ### Processing Pipeline
 - `pipeline/processing/pipeline.py`: `ProcessingPipeline` orchestrator (batch & stream modes)
