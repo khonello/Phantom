@@ -35,6 +35,7 @@ from desktop.audio import (
     AudioPlayback,
     JitterBuffer,
     find_virtual_output,
+    resolve_input_device,
     resolve_sample_rate,
 )
 from desktop.pacing import FramePacer
@@ -455,13 +456,27 @@ class Bridge(QObject):
         # plus a drift. Picking the device twice would also risk picking two
         # different ones.
         self._audio_device = find_virtual_output()
-        self._sample_rate = resolve_sample_rate(self._audio_device)
+
+        # The input is resolved before the rate, not after, because the rate
+        # check compares the two ends — and comparing against a device we are
+        # not going to record from answers the wrong question. This is also
+        # where the usual mis-setup is caught: making the virtual cable's output
+        # the default recording device points capture at the same cable playback
+        # writes into, and the call receives silence from a stream that looks
+        # entirely healthy. See `resolve_input_device`.
+        input_device, input_note = resolve_input_device(self._audio_device)
+        if input_note:
+            print('[AUDIO] {}'.format(input_note), file=sys.stderr)
+
+        self._sample_rate = resolve_sample_rate(self._audio_device, input_device)
 
         # Voice transformer (CPU-based pitch/formant shifting)
         self._voice_transformer = VoiceTransformer(sample_rate=self._sample_rate)
 
         # Audio capture (local mic, never sent to GPU)
-        self._audio_capture = AudioCapture(sample_rate=self._sample_rate)
+        self._audio_capture = AudioCapture(
+            device=input_device, sample_rate=self._sample_rate,
+        )
         self._audio_capture.set_voice_transformer(self._voice_transformer)
 
         # Jitter buffer: holds processed frames until their playout time.

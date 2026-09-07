@@ -702,6 +702,26 @@ call still receives the real microphone undelayed — so the delay makes the
 desync worse rather than better. The app now says so at startup rather than
 appearing to work.
 
+**And the same fault reached from the other end was not checked at all until
+2026-09-07.** The cable is selected as the microphone *inside* the conferencing
+app; the natural mis-reading is to also make `CABLE Output` the **Windows
+default recording device**, at which point `AudioCapture` — which took the
+system default — read from the same cable `AudioPlayback` writes into. A loop
+with no microphone anywhere in it, and a call receiving silence while the
+stream, the connection and the virtual camera all look healthy. Found on the
+development machine, where the default input measured an RMS of **0.000015**
+against the real microphone's **0.0093**, and reported by no part of the app.
+
+`resolve_input_device` now detects it, captures from the lowest-latency real
+microphone instead, and says which and why. Resolved *before* the sample rate,
+because the rate check compares the two ends and comparing against a device
+that will not be recorded from answers the wrong question — on that machine the
+cable was 44.1kHz on MME while the output was 48kHz on WASAPI, so the loop came
+with a rate mismatch riding along behind it. The fallback is deliberate rather
+than a refusal: a VoiceMeeter user routing a real microphone through a virtual
+device would rather lose their routing than lose the call, and both cases are
+told exactly what happened.
+
 ### Running the pipeline on your own GPU
 **[docs/LOCAL_GPU_SETUP.md](docs/LOCAL_GPU_SETUP.md)** and
 `python tools/setup_local_gpu.py`. `requirements-pipeline-gpu.txt` is written

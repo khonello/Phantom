@@ -108,6 +108,33 @@ the conferencing app can select as a microphone.
    Pointing it at `CABLE Input` feeds the call's audio back into the pipe the
    desktop is already writing to, which is a loop.
 
+5. **Leave your real microphone as the Windows default recording device.**
+   Selecting the cable in step 3 is a setting *inside the conferencing app* and
+   nothing more. If `CABLE Output` also becomes the Windows default, the desktop
+   captures from the same cable it plays into — a loop with no microphone
+   anywhere in it — and the call receives silence while the stream, the
+   connection and the virtual camera all look perfectly healthy.
+
+   Check it at **Settings → System → Sound → Input**, or in the old
+   **Sound → Recording** panel: the device with the green tick should be your
+   microphone, not `CABLE Output`.
+
+   This is a common way to get it wrong, because "make the cable the
+   microphone" is the natural reading of step 3. The desktop now detects it,
+   captures from a real microphone instead, and says so:
+
+   ```
+   [AUDIO] The default recording device is "CABLE Output (VB-Audio Virtual
+   Cable)", which is the output end of the same virtual cable this app plays
+   into — capture and playback would have formed a loop with no microphone in
+   it, and the call would have received silence. Capturing from "Microphone
+   Array (Realtek Audio)" instead.
+   ```
+
+   Take that message as a prompt to fix the default rather than as a fix in
+   itself: it picks the lowest-latency real input it can find, which is not
+   necessarily the microphone you meant.
+
 Windows lists the same cable once per audio API, and the difference is large: on
 one machine the same device measured **90ms on MME, 120ms on DirectSound and
 2ms on WASAPI**. The app picks the lowest-latency instance automatically, so the

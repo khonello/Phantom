@@ -190,6 +190,141 @@ def find_virtual_output() -> Optional[int]:
     return None
 
 
+# Names that mean "this input is a virtual cable, not a microphone". The
+# counterpart of `_VIRTUAL_OUTPUT_HINTS`: where those name the thing we write
+# into, these name the thing that reads back out of it.
+#
+# Deliberately narrower than the output list. `virtual` and `pulse` are absent
+# because a false positive here is worse than a miss: refusing a real microphone
+# leaves the call with no audio at all, which is the failure this is trying to
+# prevent. On Linux the default input legitimately *is* called `pulse`.
+_VIRTUAL_INPUT_HINTS = (
+    'cable output',
+    'cable in',
+    'vb-audio',
+    'voicemeeter',
+    'blackhole',
+    'soundflower',
+)
+
+
+def is_virtual_input(name: str) -> bool:
+    """Whether a device name belongs to a virtual cable rather than a mic."""
+    lowered = str(name or '').lower()
+    return any(hint in lowered for hint in _VIRTUAL_INPUT_HINTS)
+
+
+def find_real_input() -> Optional[int]:
+    """
+    Index of a real microphone — an input device that is not a virtual cable.
+
+    Lowest reported latency wins among the survivors, for the same reason
+    `find_virtual_output` sorts that way: Windows exposes each device once per
+    host API and the spread between them is tens of milliseconds.
+
+    Returns:
+        sounddevice device index, or None when every input is virtual or there
+        are no inputs at all.
+    """
+    try:
+        import sounddevice as sd
+        devices = sd.query_devices()
+    except Exception:
+        return None
+
+    matches = []
+    for index, device in enumerate(devices):
+        try:
+            if int(device.get('max_input_channels', 0)) <= 0:
+                continue
+            name = str(device.get('name', ''))
+            if is_virtual_input(name):
+                continue
+            # Windows' aggregate endpoints are not devices, they are a
+            # redirection to whatever the default is — which is the thing under
+            # suspicion here.
+            if 'sound mapper' in name.lower() or 'primary sound' in name.lower():
+                continue
+            latency = float(device.get('default_low_input_latency', 0.0) or 0.0)
+            matches.append((latency, index))
+        except Exception:
+            continue
+
+    if not matches:
+        return None
+    matches.sort()
+    return matches[0][1]
+
+
+def resolve_input_device(
+    output_device: Optional[int],
+) -> Tuple[Optional[int], Optional[str]]:
+    """
+    Which device to capture the operator's voice from, and what to say about it.
+
+    **The failure this exists for is silent and total.** The delayed audio is
+    written into a virtual cable so the conferencing app can select that cable
+    as its microphone. The obvious way to set that up — and the way an installer
+    or the app itself often leaves it — is to also make the cable's output the
+    *system default recording device*. Capture then reads from the same cable
+    playback writes into: a closed loop with no microphone anywhere in it. The
+    operator sees a running stream, a connected call and a working virtual
+    camera, and the person on the other end hears nothing at all.
+
+    Measured on the development machine: the default input resolved to `CABLE
+    Output (VB-Audio Virtual Cable)` at an RMS of 0.000015 — silence — while the
+    real `Microphone Array` on the same machine gave 0.0093.
+
+    Nothing detected it. `AudioPlayback` already refuses to be quiet about a
+    *missing* cable for exactly this reason; this is the same fault reached from
+    the other end, and it deserves the same treatment rather than a default that
+    happens to be wrong.
+
+    Falling back rather than refusing, because the alternatives are not
+    symmetric. A VoiceMeeter user routing a real microphone through a virtual
+    device would rather lose their routing than lose the call; anyone who has
+    simply mis-set the default would rather it worked. Both are told exactly
+    what happened and what to change.
+
+    Args:
+        output_device: The virtual output playback resolved, or None
+
+    Returns:
+        (device index or None for the system default, message or None)
+    """
+    try:
+        import sounddevice as sd
+        default = sd.default.device[0]
+        name = str(sd.query_devices(default).get('name', ''))
+    except Exception:
+        return None, None
+
+    if not is_virtual_input(name):
+        return None, None
+
+    real = find_real_input()
+    if real is None:
+        return None, (
+            'The default recording device is "{}", which is a virtual cable '
+            'and not a microphone — and no real microphone was found to use '
+            'instead. Nothing will be captured, so the call will receive '
+            'silence. Set your microphone as the default recording device in '
+            'Windows Sound settings, and leave the cable selected only as the '
+            'microphone *inside* your conferencing app.'.format(name.strip())
+        )
+
+    return real, (
+        'The default recording device is "{}", which is the output end of the '
+        'same virtual cable this app plays into — capture and playback would '
+        'have formed a loop with no microphone in it, and the call would have '
+        'received silence. Capturing from "{}" instead. To make this the '
+        'intended setup, set your microphone as the default recording device '
+        'in Windows Sound settings and select the cable as the microphone '
+        '*only* inside your conferencing app.'.format(
+            name.strip(), describe_device(real))
+    )
+
+
 def device_sample_rate(index: Optional[int]) -> Optional[int]:
     """
     The rate a device says it wants, or None if it will not say.

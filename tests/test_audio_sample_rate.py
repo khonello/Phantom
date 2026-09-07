@@ -223,6 +223,97 @@ _, said = capture_stderr(playback.start)
 check('a refused playback does the same',
       '44100' in said and '48000' in said, said.strip())
 
+# ── The input device the cable's own output steals ─────────────────────
+# The failure this section exists for is silent and total. The delayed audio is
+# written into a virtual cable so the conferencing app can pick that cable as
+# its microphone; the natural way to set that up is to *also* make the cable's
+# output the system default recording device, at which point capture reads from
+# the same cable playback writes into. A loop with no microphone in it, a stream
+# that looks entirely healthy, and a call that receives silence. Measured on the
+# development machine: the default input was `CABLE Output (VB-Audio Virtual
+# Cable)` at an RMS of 0.000015 against the real microphone's 0.0093.
+print('\nThe input the cable steals')
+
+from desktop.audio import (                                        # noqa: E402
+    find_real_input, is_virtual_input, resolve_input_device,
+)
+
+MIC = {
+    'name': 'Microphone Array (Realtek Audio)',
+    'max_input_channels': 2, 'max_output_channels': 0,
+    'default_low_input_latency': 0.01, 'default_samplerate': 48000.0,
+}
+MIC_SLOW = dict(MIC, default_low_input_latency=0.09)
+CABLE_OUT = {
+    'name': 'CABLE Output (VB-Audio Virtual Cable)',
+    'max_input_channels': 2, 'max_output_channels': 0,
+    'default_low_input_latency': 0.01, 'default_samplerate': 44100.0,
+}
+MAPPER = {
+    'name': 'Microsoft Sound Mapper - Input',
+    'max_input_channels': 2, 'max_output_channels': 0,
+    'default_low_input_latency': 0.0, 'default_samplerate': 44100.0,
+}
+
+
+class DeviceStub(FakeSoundDevice):
+    """`FakeSoundDevice` plus the default device pair this asks about."""
+
+    def __init__(self, devices, default_input):
+        super().__init__(devices)
+        self.default = type('D', (), {'device': (default_input, 0)})()
+
+
+def with_devices(devices, default_input):
+    sys.modules['sounddevice'] = DeviceStub(devices, default_input)
+
+
+check('a cable output is recognised as not a microphone',
+      is_virtual_input('CABLE Output (VB-Audio Virtual Cable)'))
+check('and so are the other cables people install',
+      all(is_virtual_input(n) for n in
+          ('VoiceMeeter Output (VB-Audio)', 'BlackHole 2ch', 'Soundflower (2ch)')))
+check('a real microphone is not',
+      not is_virtual_input('Microphone Array (Realtek Audio)'))
+check("nor is anything merely called virtual, nor Linux's pulse",
+      not is_virtual_input('Virtual Desktop Audio')
+      and not is_virtual_input('pulse'),
+      'a false positive here refuses a real microphone, which is the very '
+      'failure this is trying to prevent')
+
+with_devices([CABLE_OUT, MIC], default_input=0)
+device, note = resolve_input_device(None)
+check('a default input that is the cable is not used',
+      device == 1, 'picked index {}'.format(device))
+check('and the swap is explained rather than done quietly',
+      note is not None and 'silence' in (note or ''), (note or '')[:60])
+check('the message names both devices',
+      'CABLE Output' in (note or '') and 'Microphone Array' in (note or ''),
+      'without both, this is "audio does not work" and the next step is '
+      'guessing at devices')
+
+with_devices([MIC, CABLE_OUT], default_input=0)
+device, note = resolve_input_device(None)
+check('a default input that is a real microphone is left alone',
+      device is None and note is None,
+      'None means the system default, which is what it already was')
+
+with_devices([CABLE_OUT], default_input=0)
+device, note = resolve_input_device(None)
+check('with no real microphone at all it says so and does not invent one',
+      device is None and note is not None and 'silence' in note)
+
+with_devices([MAPPER, CABLE_OUT, MIC_SLOW, MIC], default_input=1)
+check('the lowest-latency real input wins',
+      find_real_input() == 3,
+      'Windows exposes each device once per host API and the spread is tens '
+      'of milliseconds')
+check('and the aggregate endpoints are skipped',
+      find_real_input() != 0,
+      'Sound Mapper is a redirection to the default, which is the thing '
+      'under suspicion')
+
+
 print('=' * 70)
 print('{} passed, {} failed'.format(len(PASS), len(FAIL)))
 if FAIL:
