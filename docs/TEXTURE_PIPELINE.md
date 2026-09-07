@@ -739,10 +739,70 @@ point of the band.
 **On building a pass per skin condition.** The natural next thought is one
 algorithm per condition — freckles, spots, rash, wrinkles. Two of those are
 already served by the single scale-keyed pass and would gain nothing from a
-detector; one (rash, redness) needs a *chroma* layer rather than a classifier,
-because what it lacks is a colour channel and not a category; and one (wrinkles)
-is unserved for a reason a detector cannot address. The gap here is
-**dimensions — colour and time — not taxonomy.**
+detector; one (wrinkles) is unserved for a reason a detector cannot address; and
+one (rash, redness) looked like it needed a colour channel. That last one was
+then measured, and it does not — see below. The gap is **dimensions, not
+taxonomy**, and only one of the two dimensions turns out to be reachable.
+
+### 6.8 Why redness cannot be a layer on top of this one
+
+*Asked whether the colour features could be recovered with an RGB strategy
+rather than a chroma one, as a second layer over the existing map.*
+
+**RGB and chroma are the same information in different bases**, so that framing
+does not itself change anything: redness is colour, and carrying it means
+carrying colour however it is parameterised. Two measurements were made anyway,
+because the per-channel version is genuinely cheaper than a LAB pipeline and
+because the monochrome rule's stated reason — independent per-channel high
+frequency reads as speckle — is an argument about *noise*, not about coherent
+coloured features, whose channels are correlated rather than independent.
+
+**First measurement: how much coherent colour is there?** In the mark octave the
+three channels correlate at +0.92 to +0.96, leaving a 17–25% colour residual —
+of which only **7–15% of the octave** survives a blur at its own scale. The rest
+is chroma noise. A naive per-channel map would carry roughly as much speckle as
+signal, which is the monochrome rule holding after all; low-passing the residual
+separates them, and that is a workable design.
+
+**Second measurement: it does not matter, because these features are not in the
+band.** Blemishes of known colour were injected into a source and put through
+that design. A brown mole came back at 59%; a red spot at **8%**; a rash patch
+at **2%** — against a plain-skin colour noise floor of the same order as the
+recovered signal. The cause is frequency, not colour space:
+
+| feature | diameter | in the texture band | below it |
+|---|---|---|---|
+| pore | 2px | 17% | 2% |
+| freckle | 5px | 36% | 6% |
+| small spot | 9px | 37% | 19% |
+| mole | 12px | 26% | 33% |
+| **pimple** | 20px | **9%** | **58%** |
+| **rash patch** | 45px | **0.7%** | **87%** |
+| flushed cheek | 90px | 0.1% | 97% |
+
+*(at 256px canonical, band 1.5–6.0 sigma — features roughly 4–18px across)*
+
+A pimple is 58% below the band and a rash 87% below. **The texture layer is a
+high-pass by construction and that is not negotiable** — §3.1 is the whole
+reason it exists in that form, since anything below the band is destroyed by the
+warp into frame space or, worse, survives as a low-frequency colour shift.
+
+So redness would have to be a *low-frequency* colour layer, which is a different
+proposition entirely and a bad one. Low-frequency colour on the face is what
+`_match_color` and `_match_illumination` already own, and they exist to make the
+swap match **the target's** colour; a stage adding the source's would fight them
+directly, over the exact quantity the eye reads as skin tone. That is failure
+mode 2 — a colour step where the swap meets the head — approached deliberately.
+
+**And the design question sits on the same side.** A freckle is identity: it is
+on that face every day, so reprojecting it is reconstructing something true. A
+rash and a pimple are *transient*. Lifting one off a photograph and holding it on
+the operator's face for the length of a call is not restoring detail the swap
+lost; it is inventing a fact about them from whenever that photo was taken.
+
+**Closed, not deferred.** Freckles, moles, small spots, scars, pores and stubble
+are in band and carried. Pimples and rash are not, and no colour space, per-
+channel strategy or additional layer over this one changes that.
 
 ---
 
