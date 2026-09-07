@@ -679,6 +679,71 @@ constant and the panel gets its space back.
 `texture_contrast` inert as well — three of the four texture controls disabled
 by one slider at its minimum.
 
+### 6.7 What the layer carries, and what it cannot
+
+Asked whether the work done for freckles is *about* freckles, or whether other
+skin features come along with it. It is not about freckles at all — nothing in
+the layer knows what a freckle is. Measured two ways.
+
+**There is no feature selectivity.** The delivered map correlates **+0.97 to
++0.99** with the source photograph's own band inside the skin mask, at every band
+setting. It is a faithful high-pass of that photograph and carries whatever is in
+it. §6.3 says as much about the design intent — "keyed on the thing that actually
+separates them, which is scale. Not on a classifier" — and this is that intent
+holding in the output.
+
+**So the question is scale, not kind.** What share of the source's energy at each
+feature size survives into the map, at band 2.0 and the default shaping (1.00
+would be the same share the source has):
+
+| feature | px at 256 | share kept |
+|---|---|---|
+| pore, fine grain | 1–2 | 2.48 |
+| freckle, small spot | 2–4 | 2.58 |
+| mole, fine crease | 4–8 | 2.27 |
+| wrinkle, scar, fold | 8–16 | 1.17 |
+| shading, contour | 16–40 | 0.36 |
+
+Everything up to ~8px is carried at roughly two and a half times its source
+share — the per-octave normalisation doing what it was built for. Wrinkles,
+scars and folds come through at about their source proportion, and are what
+`texture_band` above 2.0 buys more of. Shading is suppressed, which is the whole
+point of the band.
+
+**Three real exclusions, and they are exclusions of kind rather than of scale:**
+
+- **Colour.** The map is built from `cv2.cvtColor(crop, COLOR_BGR2GRAY)`, so a
+  feature that is mostly chroma does not survive. Measured on two sources, a
+  freckle is ~91% luminance and comes through; **rash and redness are almost
+  entirely chroma and do not**; a pimple contributes only its dark rim, losing
+  the redness and the specular highlight that make it read as one. This is the
+  monochrome rule, and it is load-bearing — independent per-channel high
+  frequency reads as coloured speckle.
+- **Anything expression-dependent.** This is the important one and it is
+  structural, not a tuning limit. The map is fixed at extraction and warped per
+  frame by `canonical_from_frame`, a similarity transform from five keypoints
+  with no expression term. A freckle is static on the skin and reprojects
+  correctly. **A wrinkle is a deformation of the skin, not a mark on it** — a
+  crow's foot appears when the operator smiles and flattens when they stop, and
+  a fixed map paints the source photograph's version of it on regardless. Raising
+  `texture_band` to reach deeper folds makes that worse, not better, because the
+  deeper the fold the more it moves. No band setting and no per-condition
+  algorithm fixes this; it would need a map that deforms with expression, which
+  is a different subsystem.
+- **Three-dimensional relief.** Anything whose appearance depends on the light
+  direction — a raised mole, a scar ridge, a pimple — arrives as the shading it
+  had in the source photograph, under that photograph's light, added to a face
+  lit differently. Small features get away with it; large ones do not, which is
+  the same reason the band stops where it does.
+
+**On building a pass per skin condition.** The natural next thought is one
+algorithm per condition — freckles, spots, rash, wrinkles. Two of those are
+already served by the single scale-keyed pass and would gain nothing from a
+detector; one (rash, redness) needs a *chroma* layer rather than a classifier,
+because what it lacks is a colour channel and not a category; and one (wrinkles)
+is unserved for a reason a detector cannot address. The gap here is
+**dimensions — colour and time — not taxonomy.**
+
 ---
 
 ## 7. The diffuse / light-scatter pass

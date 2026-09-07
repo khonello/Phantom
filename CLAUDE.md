@@ -1558,6 +1558,20 @@ is at the bottom, `texture_relief` and `texture_contrast` do literally nothing.
 And the defaults are conservative: 0.9/2.4 puts twice the contrast into the
 marks, which is now a measured range rather than a guess.
 
+**It is not a freckle layer.** Nothing in it knows what a freckle is — the
+delivered map correlates +0.97 to +0.99 with the source photograph's own band,
+so it carries whatever is in that band. At band 2.0 it keeps pores, freckles,
+moles and fine creases at ~2.5x their source share, wrinkles and scars at ~1.2x,
+and suppresses shading to 0.36x. **The exclusions are of kind, not scale, and
+there are three**: colour (the map is grayscale, so rash and redness do not
+survive and a pimple contributes only its dark rim); anything expression-
+dependent (the map is fixed and warped by a similarity transform with no
+expression term, so a smiling source's crow's foot is painted on whether or not
+the operator is smiling — no band setting fixes this); and three-dimensional
+relief, which arrives carrying the source photograph's light. A pass per skin
+condition would not help: the gap is **dimensions — colour and time — not
+taxonomy.** See docs/TEXTURE_PIPELINE.md §6.7.
+
 **Off by default, and still never judged on footage — but the knob now means
 what it says.** 0.5 is the place to start. A/B with `tools/realism.py --host ...
 texture_strength=0.5`, then `texture_band`, `texture_relief` and
