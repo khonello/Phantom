@@ -1569,8 +1569,14 @@ dependent (the map is fixed and warped by a similarity transform with no
 expression term, so a smiling source's crow's foot is painted on whether or not
 the operator is smiling — no band setting fixes this); and three-dimensional
 relief, which arrives carrying the source photograph's light. A pass per skin
-condition would not help: the gap is **dimensions — colour and time — not
-taxonomy.** See docs/TEXTURE_PIPELINE.md §6.7.
+condition would not help, and the colour half of that was measured and
+**closed**: redness is excluded not because the map is grayscale but because it
+is *low-frequency*. A pimple is 58% below the texture band and a rash 87%
+below, so an RGB or per-channel layer on top of this one recovers 8% of a red
+spot and 2% of a rash. Carrying them would mean a low-frequency colour stage —
+the quantity `_match_color` and `_match_illumination` already own, and own in
+order to match the **target** — so it would fight them over the one thing the
+eye reads as skin tone. See docs/TEXTURE_PIPELINE.md §6.7 and §6.8.
 
 **Off by default, and still never judged on footage — but the knob now means
 what it says.** 0.5 is the place to start. A/B with `tools/realism.py --host ...
