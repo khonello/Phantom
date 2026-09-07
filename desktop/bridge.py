@@ -316,17 +316,24 @@ class Bridge(QObject):
         self._texture_last = 0.5
         self._diffuse_last = 0.3
 
-        # How far up in scale the texture layer reaches. On the panel and the
-        # other two shaping knobs are not, because this is the one whose right
-        # value cannot be reasoned out: it depends on how large the operator's
-        # face is in frame and how large the marks on it are, which is a
-        # different answer per person and per camera. At 1.0 the high-pass
-        # keeps pore noise and the rim of every larger mark, so a freckle, spot
-        # or scar arrives with its middle missing — the measured difference
-        # between that and 2.0 was the largest single term in the whole layer.
-        # `texture_relief` and `texture_contrast` refine what this exposes and
-        # stay on `set_realism`, since they only mean anything once the band is
-        # right.
+        # How far up in scale the texture layer reaches. On the panel, and the
+        # other two shaping knobs are not — though not for the reason first
+        # given here. "It depends on the operator's face and mark size, so it
+        # differs per person" was measured on two people with different face
+        # sizes and mark strength: same curve, same optimum. What it really
+        # trades is mark contrast against imported shading — 2.0 to 4.0 buys
+        # 14% more mark contrast in the output and takes the share of the map
+        # above `_SCATTER_SIGMA` from 27% to 38%, which is the source
+        # photograph's lighting arriving on the target's face. Only footage
+        # prices that, which is why it is here rather than a constant.
+        #
+        # 1.0 is not the low end of a range, it is wrong: the high-pass keeps
+        # pore noise and the rim of every larger mark, so a freckle, spot or
+        # scar arrives with its middle missing (3.5x plain skin against 9.2x at
+        # 2.0), and it makes `texture_relief` and `texture_contrast` inert
+        # because there is no mark octave left for them to weight. Those two
+        # refine what this exposes and stay on `set_realism`, since they only
+        # mean anything once the band is right.
         self._texture_band = 2.0
 
         self._awaiting_first_frame = False

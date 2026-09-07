@@ -628,6 +628,57 @@ unconditionally it would take a composite sitting at 1.002 of parity down to
   conservative: 0.9 / 2.4 puts roughly twice the contrast into the marks, which
   is now a measured range to judge on footage rather than a guess.
 
+### 6.6 What `texture_band` is actually trading
+
+The panel's stated reason for carrying a BAND slider is that its right value
+follows how large the operator's face and their skin's marks are, and so differs
+per person. **Swept on two people, that is not true.** IMG_3745 (275px face,
+strong freckles) and face-19 (350px face, subtle marks), scored at each person's
+own marks against their own plain skin:
+
+| band | IMG_3745 | face-19 |
+|---|---|---|
+| 1.0 | 3.5 | 3.3 |
+| 1.5 | 8.4 | 8.0 |
+| 2.0 | 9.2 | 8.7 |
+| 3.0 | 9.8 | 9.1 |
+| 4.0 | 9.7 | 8.9 |
+
+Same shape, same optimum. The per-person argument is retired.
+
+What it does trade only shows up on the composited output, and only against a
+swap that has *no* marks of its own — which is the real condition, and which a
+stand-in built by attenuating the target's own band quietly fails to reproduce.
+Against a markless swap, on IMG_3745 at `texture_strength` 0.5, target freckle
+contrast 21.6 and plain skin 3.4:
+
+| band | freckles | plain | map energy above `_SCATTER_SIGMA` |
+|---|---|---|---|
+| swap alone | 9.2 | 2.6 | — |
+| 1.0 | 10.1 | 2.5 | 10.6% |
+| 2.0 | 12.3 | 3.3 | 27.1% |
+| 3.0 | 13.4 | 3.5 | 33.6% |
+| 4.0 | 14.0 | 3.5 | 37.9% |
+
+Mark recovery is monotonic in the band, and so is the share of the map sitting
+above the subsurface diffusion length — which is *shading*, and shading in this
+map belongs to the source photograph's lighting rather than to the target's
+frame. From 2.0 to 4.0: **+14% mark contrast, +11 points of imported shading.**
+
+Note also that 2.0 is not the clean boundary §6.2 implies. A Gaussian band split
+has soft edges, so 27% of the map is already above the scatter line at the
+default. The line is a gradient, not a wall, and the default sits on it by
+construction rather than by measurement.
+
+That trade is a footage question and nothing else, which is the honest
+justification for the slider. If footage settles it, `texture_band` becomes a
+constant and the panel gets its space back.
+
+**`1.0` is not the low end of that range.** It is the shipped-and-wrong value
+§6.2 was written about, and it silently makes `texture_relief` and
+`texture_contrast` inert as well — three of the four texture controls disabled
+by one slider at its minimum.
+
 ---
 
 ## 7. The diffuse / light-scatter pass

@@ -2315,14 +2315,18 @@ Window {
 
                         // BAND is not a third layer, it is what the texture
                         // layer carries — so it gets a label rather than a
-                        // toggle. On the panel at all because it is the one
-                        // shaping knob whose right value cannot be reasoned
-                        // out: it follows how large the face is in frame and
-                        // how large the marks on it are. At 1.0 the high-pass
-                        // keeps pore noise and the rim of everything bigger,
-                        // so a freckle, spot or scar arrives with its middle
-                        // missing. `relief` and `contrast` refine what this
-                        // exposes and stay on set_realism.
+                        // toggle. On the panel because it trades mark contrast
+                        // against imported shading, and only footage prices
+                        // that: 2.0 to 4.0 buys 14% more mark contrast and
+                        // takes the map's share above the scatter line from
+                        // 27% to 38% — the source photo's lighting landing on
+                        // the target's face. (The per-person reason once given
+                        // here was measured and is wrong; two people gave the
+                        // same optimum.) At 1.0 the high-pass keeps pore noise
+                        // and the rim of everything bigger, so a freckle, spot
+                        // or scar arrives with its middle missing — and both
+                        // `relief` and `contrast` go inert, since there is no
+                        // mark octave left to weight.
                         Column {
                             spacing: 5
                             Rectangle {

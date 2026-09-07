@@ -95,12 +95,25 @@ before a paying customer. Read it before assuming a gap is unnoticed.
   **TUNING** strip in the viewport — `texture_strength`, `diffuse_strength` and
   `texture_band`, plus BYPASS. It is an instrument for deciding what the
   defaults should be, not a consumer control, and what earns a place on it is a
-  value that **cannot be settled by reasoning** — `texture_band` follows how
-  large the operator's face and their skin's marks are, which differs per person
-  and per camera. `texture_relief` and `texture_contrast` refine what the band
-  exposes and only mean anything once it is right, so they stay on
-  `set_realism`; so does `texture_strength` above 1.0, which is a diagnostic
-  overshoot rather than something to hand a customer a slider for
+  value that **cannot be settled by reasoning**. For `texture_band` the stated
+  reason — that it follows how large the operator's face and their skin's marks
+  are, and so differs per person — **was measured and is wrong**: swept on two
+  people with different face sizes and very different mark strength, the curve
+  has the same shape and the same optimum. Its real justification is a trade
+  nobody has priced. From band 2.0 to 4.0 the mark contrast delivered to the
+  output rises 14% while the share of the map sitting above `_SCATTER_SIGMA` —
+  shading, which belongs to the source photograph's lighting rather than to the
+  target's — rises from 27% to 38%. More of their marks, and more of the wrong
+  light with it. That is a footage question and nothing else, which is why it
+  keeps a slider; if footage settles it, this becomes a constant and the panel
+  gets the space back. **1.0 is simply wrong** and should not be treated as the
+  low end of a range: marks arrive with their middles cut out (freckle contrast
+  3.5x plain skin against 9.2x at 2.0), and it silently makes `texture_relief`
+  and `texture_contrast` inert, since there is no mark octave for them to weight.
+  Those two refine what the band exposes and only mean anything once it is
+  right, so they stay on `set_realism`; so does `texture_strength` above 1.0,
+  which is a diagnostic overshoot rather than something to hand a customer a
+  slider for
 - Batch video is wired but has only been exercised against a stubbed swapper —
   the FFmpeg plumbing, frame ordering, audio sync, cancellation and cleanup are
   verified; a real run with the models in the loop has not been done locally
