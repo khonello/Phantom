@@ -33,118 +33,84 @@ same compositor.
 **Identity is now measurable, and nothing has been measured yet.** That is the
 newest and largest queued item — see
 **[docs/IDENTITY_WORK.md](docs/IDENTITY_WORK.md)**. The reported complaint was
-that the output resembles the source "good, but not very good", and it was
-raised about the swap model; nothing in this repository could have said whether
-the swap model was the cause, because identity was the one realism quantity
-nothing measured. Six things were built for it and **every one of them is
-unjudged on footage**:
+that the output resembles the source "good, but not very good", raised about the
+swap model; nothing here could have said whether the swap model was the cause,
+because identity was the one realism quantity nothing measured. Six things were
+built for it and **every one is unjudged on footage**: `identity_probe=N`
+(ArcFace cosine at five points in the chain, naming the stage that cost most —
+restoration at `enhance_strength` 0.7 is the prime suspect);
+`tools/identity_probe.py` (sweep a lever against one still, no pod);
+`hififace_unofficial_256` (the only registered model that moves the face
+*contour*); `mask_shape_growth` (stops the target's landmark hull clipping that
+contour off); `identity_push`; `complexion_keep` (the one item the cosine cannot
+judge); and `source_blend` — sweep that one **only** with `--holdout`, or every
+strategy wins. Run them in the order docs/IDENTITY_WORK.md ends with: **measure
+the current default first**, then the free levers, then the models.
 
-- `identity_probe=N` reports ArcFace cosine at five points in the chain and says
-  which stage cost the most — the compositor has four stages that attack
-  likeness, and restoration at `enhance_strength` 0.7 is the prime suspect
-- `tools/identity_probe.py` sweeps a lever against one still, no pod needed
-- `hififace_unofficial_256` is registered — 3D-shape supervised, the only model
-  here that moves the face *contour*
-- `mask_shape_growth` stops the target's landmark hull clipping that contour off
-- `identity_push` extrapolates the source identity away from the target's
-- `complexion_keep` stops the colour match spending all of the source's skin
-  tone — chroma only, bounded, and the one item here the cosine cannot judge
-- `source_blend` makes the averaging strategy a swept field rather than a
-  decision. Sweep it **only** with `--holdout`, or every strategy wins
-
-Run them in the order docs/IDENTITY_WORK.md ends with: **measure the current
-default first**, then the free levers, then the models. Every one of those steps
-decides whether the next is worth taking.
-
-Two other things are queued, in this order because the first is free and the
-second is not.
+Two other things are queued, in this order because the first is free.
 
 **1. The pod run — half done, and the half that remains is the half that
-matters.** Run 2026-09-05 against the Denmark 4090.
-
-*Measured, and settled:* the uplink test (numbers in
-OPERATING_ENVIRONMENT.md §2 — every gear held that evening, and the same
-`optimal` had delivered 61% that morning); the `REALISM` block (the detail clamp
-binds on **0%** of 2267 frames, so the cheap lever does not exist and the texture
-work was necessary); the cost of both new layers on a real pod CPU (texture
-1.3ms, scatter 0.3ms marginal, inside a 25.9ms frame against a 66.7ms deadline);
-and `gpen_bfr_256` running composited at 7.7ms.
-
-*Still outstanding, and it is the whole point:* **nobody has looked at a face.**
-Every realism layer remains judged only by statistics. That needs §2.4 — a live
-stream from the operator's own camera, two to three minutes of real use per
-preset, with `--debug-frames`. Mind the `guard_min_frame_px` trap in §2.3b when
-running `fast`; it will otherwise produce nothing but guarded frames.
-
-Note what the statistics cannot settle, by construction: **texture at 0.3 and
-0.5 produce identical readings on every metric.** Texture is added in frame space
-inside `_paste`, after `_match_detail` has run in aligned space, so nothing
-downstream measures it. Only footage separates them.
+matters.** Run 2026-09-05 against the Denmark 4090. *Settled:* the uplink test
+(OPERATING_ENVIRONMENT.md §2), the `REALISM` block (the detail clamp binds on
+**0%** of 2267 frames, so the cheap lever does not exist and the texture work was
+necessary), both new layers' cost on a real pod CPU (texture 1.3ms, scatter 0.3ms
+marginal, inside a 25.9ms frame against 66.7ms), and `gpen_bfr_256` composited at
+7.7ms. *Outstanding, and it is the whole point:* **nobody has looked at a face.**
+That needs §2.4 — a live stream from the operator's own camera, two to three
+minutes per preset, with `--debug-frames`. Mind the `guard_min_frame_px` trap in
+§2.3b when running `fast`. Note what statistics cannot settle by construction:
+**texture at 0.3 and 0.5 read identically on every metric**, because texture is
+added in frame space inside `_paste`, after `_match_detail` has run in aligned
+space. Only footage separates them.
 
 **2. Nothing else.** [docs/PERFORMANCE_AUDIT.md](docs/PERFORMANCE_AUDIT.md) §3 is
-**done** — measured end to end at 0.74ms saved at `optimal` and 6.77ms at
-`production`, and that is *net* of a correctness fix in §3.7 which cost ~3.3ms,
-so the optimisations were worth about 11ms there.
-
-**§4 is measured and closed.** It comes to 0.47ms at `fast`, ~1.3ms at `optimal`
-and ~4.6ms at `production` — against frame deadlines of 66.7, 50.0 and 33.3ms,
-so **0.7% and 2.6% of budget** on the two live presets, and at `production` it is
-4.6ms against a 16ms overrun, which does not fix it either. Revive it only if
-`production` becomes a live target.
-
-One thing from that measurement is worth carrying: **`fast` is not cheaper than
-`optimal` in the compositor.** At a seated distance both clamp to the same
-aligned size — `_ALIGNED_MIN` is 128 and a 76px face and a 101px face are both
-under it — so smoothing, colour, detail and scatter do byte-identical work at
-either preset, and only the frame-space region differs (104px against 135px).
-What `fast` buys is uplink, a smaller detector input, and XSeg off. None of it is
-compositor work, which is also why the `fast` uplink test in §2.3b has a compute
-saving of only ~5-6ms to subtract.
-
-§5 is the torch port and the video codec, both already decided and both gated on
-the pod's own report rather than on more local measurement.
+**done** — 0.74ms saved at `optimal` and 6.77ms at `production`, *net* of a
+correctness fix in §3.7 costing ~3.3ms. **§4 is measured and closed**: 0.47ms at
+`fast`, ~1.3ms at `optimal`, ~4.6ms at `production` — 0.7% and 2.6% of budget on
+the live presets. Revive it only if `production` becomes a live target. One thing
+from that measurement is worth carrying: **`fast` is not cheaper than `optimal`
+in the compositor.** At a seated distance both clamp to the same aligned size
+(`_ALIGNED_MIN` is 128; a 76px and a 101px face are both under it), so smoothing,
+colour, detail and scatter do byte-identical work at either preset. What `fast`
+buys is uplink, a smaller detector input, and XSeg off — none of it compositor
+work, which is why the `fast` uplink test in §2.3b has only ~5-6ms of compute
+saving to subtract. §5 is the torch port and the video codec, both decided and
+both gated on the pod's own report.
 
 **Next actions live in [docs/PENDING_WORK.md](docs/PENDING_WORK.md)** — a runbook
 from starting the pod through to the outstanding implementation work.
-[docs/TODO.md](docs/TODO.md) remains the backlog, and
+[docs/TODO.md](docs/TODO.md) is the backlog, and
 **[docs/ACCEPTED_RISKS.md](docs/ACCEPTED_RISKS.md)** records what is knowingly
-wrong and why — including the unauthenticated WebSocket, which must close
-before a paying customer. Read it before assuming a gap is unnoticed.
+wrong and why — including the unauthenticated WebSocket, which must close before
+a paying customer. Read it before assuming a gap is unnoticed.
 
 - Working: realtime stream, aligned-space compositing, Vast.ai deployment,
   desktop LIVE mode, batch **image** and **video**, **photo mode** (up to four
-  uploaded targets), **template targets** (bundled scenes), desktop VIDEO and
-  IMAGE tabs
+  uploaded targets), **template targets**, desktop VIDEO and IMAGE tabs
 - No templates are bundled yet — the machinery runs against an empty library.
   The assets are a content decision, including licensing for this use
 - Not exposed: most realism knobs are API/CLI only. The exception is the
-  **TUNING** strip in the viewport — `texture_strength`, `diffuse_strength` and
-  `texture_band`, plus BYPASS. It is an instrument for deciding what the
-  defaults should be, not a consumer control, and what earns a place on it is a
-  value that **cannot be settled by reasoning**. For `texture_band` the stated
-  reason — that it follows how large the operator's face and their skin's marks
-  are, and so differs per person — **was measured and is wrong**: swept on two
-  people with different face sizes and very different mark strength, the curve
-  has the same shape and the same optimum. Its real justification is a trade
-  nobody has priced. From band 2.0 to 4.0 the mark contrast delivered to the
-  output rises 14% while the share of the map sitting above `_SCATTER_SIGMA` —
-  shading, which belongs to the source photograph's lighting rather than to the
-  target's — rises from 27% to 38%. More of their marks, and more of the wrong
-  light with it. That is a footage question and nothing else, which is why it
-  keeps a slider; if footage settles it, this becomes a constant and the panel
-  gets the space back. **1.0 is simply wrong** and should not be treated as the
-  low end of a range: marks arrive with their middles cut out (freckle contrast
-  3.5x plain skin against 9.2x at 2.0), and it silently makes `texture_relief`
-  and `texture_contrast` inert, since there is no mark octave for them to weight.
-  Those two refine what the band exposes and only mean anything once it is
-  right, so they stay on `set_realism`; so does `texture_strength` above 1.0,
-  which is a diagnostic overshoot rather than something to hand a customer a
-  slider for
+  **TUNING** strip in the viewport — `texture_strength`, `diffuse_strength`,
+  `texture_band`, plus BYPASS. It is an instrument for deciding defaults, not a
+  consumer control, and what earns a place is a value that **cannot be settled by
+  reasoning**. For `texture_band` the stated reason — that it follows the
+  operator's face size and mark strength — **was measured and is wrong**: swept
+  on two people with very different face sizes and mark strength, the curve has
+  the same shape and the same optimum. Its real justification is a trade nobody
+  has priced: from band 2.0 to 4.0 the mark contrast delivered rises 14% while
+  the share of the map above `_SCATTER_SIGMA` — shading, which belongs to the
+  source photograph's lighting rather than the target's — rises from 27% to 38%.
+  More of their marks, and more of the wrong light with it. A footage question,
+  which is why it keeps a slider. **1.0 is simply wrong** and is not the low end
+  of a range: marks arrive with their middles cut out (freckle contrast 3.5x
+  plain skin against 9.2x at 2.0), and it silently makes `texture_relief` and
+  `texture_contrast` inert. Those two stay on `set_realism`; so does
+  `texture_strength` above 1.0, a diagnostic overshoot rather than a slider
 - Batch video is wired but has only been exercised against a stubbed swapper —
-  the FFmpeg plumbing, frame ordering, audio sync, cancellation and cleanup are
+  FFmpeg plumbing, frame ordering, audio sync, cancellation and cleanup are
   verified; a real run with the models in the loop has not been done locally
 - Large-file transfer is still the gap for **video** targets. Photos sidestep it
-  (`upload_target`, ≤4, ≤6 MB each, base64 in one message per job), and are so
+  (`upload_target`, <=4, <=6 MB each, base64 in one message per job), and are so
   far the only target that reaches a remote pod at all — `set_target` validates
   against the *pipeline's* filesystem, so a desktop-chosen file only resolves
   when the pipeline runs locally. A 2 GB video still needs a real transfer path
@@ -180,13 +146,10 @@ preset.
 
 ### What the levers are actually worth (same session, same clip)
 
-Read the **frames processed per run**, not the p95 column. `LatencyBudget` was
-never reset between streams, so each report covered every frame since the
-process started (1018, 4399, 7740, 8781, 9746, 12775) and every p95 was
-diluted by its predecessors — a run with restoration *off* still reported a
-`restore` percentile, because those were the baseline's frames. Fixed now
-(`LatencyBudget.reset()`, called from `_run_stream_impl`), but every sweep
-taken before that fix has to be read this way.
+Read the **frames processed per run**, not the p95 column — `LatencyBudget` was
+never reset between streams, so every p95 in that session was diluted by its
+predecessors. Fixed since (`LatencyBudget.reset()`, from `_run_stream_impl`);
+sweeps taken before the fix have to be read this way.
 
 | config | frames in its 60s | ms/frame |
 |---|---|---|
@@ -197,16 +160,13 @@ taken before that fix has to be read this way.
 | hyperswap_1a_256 | 965 | 62.2 |
 | hyperswap + no restoration | 3029 | 19.8 |
 
-**Restoration off is 3.3x, and it HOLDS the deadline** — the first `[HOLDS]`
-verdict this project has produced. `restore_min_face` lands on the same number,
-which is the cross-check it was built for: the shippable, config-level lever
-reaches the same floor as switching the stage off wholesale.
-
-Two questions closed, both negative. **`aligned_size` is not the cost** — 128
-against 256 changes nothing. **hyperswap is slightly worse, not better**: 62.2
-against 58.9, and 19.8 against 17.7 with restoration off. The 256px swap costs
-2-3ms and buys back *nothing* in restoration time, so on speed grounds it is
-just a bigger swap. Its appearance remains unjudged.
+**Restoration off is 3.3x, and it HOLDS the deadline** — and `restore_min_face`
+lands on the same number, which is the cross-check it was built for: the
+shippable config-level lever reaches the same floor as switching the stage off.
+Two questions closed, both negative. **`aligned_size` is not the cost.**
+**hyperswap is slightly worse, not better** — the 256px swap costs 2-3ms and buys
+back nothing in restoration time. Its appearance remains unjudged. Full working
+in [docs/PERFORMANCE_AUDIT.md](docs/PERFORMANCE_AUDIT.md) §11.
 
 ### Does restoration actually help a 101px face?
 
@@ -219,130 +179,67 @@ restoration off against CodeFormer at 512:
 | sensor noise, face / frame | 1.500 | 1.500 | **+0.000** |
 | gradient at mask edge | 1.028 | 1.038 | +0.010 |
 
-**29.4ms buys +0.03 on the one metric it moves at all.** The face sits 0.42
-short of matching the frame's detail; restoration closes 7% of that gap and
-leaves noise and seam unchanged to three decimals. Both configurations produce
-the same verdict lines — "softer than the frame", "no seam detected", "motion
-blur consistent".
-
-That is what the geometry predicts. 86% of what CodeFormer produces is
-discarded at `compositor.py:515`, one warp after it is created, so the stage
-cannot move the metric much and does not.
-
-**What this does not cover, and should not be read as covering.** These are
-per-frame image statistics over 24 frames. They say nothing about **temporal**
-behaviour, and shimmer between frames is a large part of what reads as AI. They
-are also not a person looking at a face. Strong evidence, not proof.
-
-The noise row reads 1.50x in **both** configurations, so it is not caused by
-restoration. It is also not necessarily a defect: this clip was recorded in
-poor light, and the source face is fair-complexioned and well lit against a
-dark-complexioned, under-lit, visibly noisy target. That is the hardest case
-for colour matching and a plausible cause on its own. Re-measure on
-better-matched footage before treating grain matching as overshooting.
+**29.4ms buys +0.03 on the one metric it moves at all**, which is what the
+geometry predicts: 86% of what CodeFormer produces is discarded at
+`compositor.py:515`, one warp after it is created. These are per-frame image
+statistics over 24 frames — they say nothing about **temporal** behaviour, and
+shimmer is a large part of what reads as AI, nor are they a person looking at a
+face. The 1.50x noise row appears in **both** configurations, so it is not caused
+by restoration; that clip was also poorly lit, with a fair, well-lit source
+against a dark, under-lit, noisy target, which is the hardest case for colour
+matching. Re-measure on better-matched footage before treating grain matching as
+overshooting. Full working in docs/PERFORMANCE_AUDIT.md §11.
 
 ### Restoration models, benchmarked in isolation (RTX 4090)
 
-Raw inference only — 100 runs, random input, no compositing:
-
-| model | crop | inference | file |
-|---|---|---|---|
-| codeformer | 512 | 29.4ms | 377 MB |
-| gpen_bfr_512 | 512 | 37.5ms | 284 MB |
-| **gpen_bfr_256** | **256** | **5.4ms** | **76 MB** |
-
-Note which way `gpen_bfr_512` falls: **slower** than CodeFormer at the same
-resolution. The saving is entirely **resolution**, not architecture. GPEN is
-not a lighter model; 256 is simply a quarter of the pixels.
+Raw inference only, 100 runs, no compositing: codeformer 512 **29.4ms**,
+gpen_bfr_512 512 **37.5ms**, gpen_bfr_256 256 **5.4ms**. Note which way
+`gpen_bfr_512` falls — **slower** than CodeFormer at the same resolution. The
+saving is entirely **resolution**, not architecture.
 
 **`gpen_bfr_256` has now run in the pipeline** (2026-09-05, RTX 4090, 2267
-frames): `restore` p50 **7.7ms**, inside a 25.9ms frame against a 66.7ms
-deadline. The 5.4ms isolated figure was honest — compositing adds ~2.3ms of warp
-around it — and the ~27ms whole-frame estimate was pessimistic by nearly half.
-It still **has not been judged on footage**, which is the part that decides
-whether it belongs. Both GPEN files are on the volume at `/workspace/models/`.
-
-Why 256 is the interesting number rather than "off": restoring at 512 and
-warping down to a 128-192 aligned space is *supersampling*, and some of that
-cost buys antialiasing and stability rather than nothing. At 256 into a 192
-aligned space the supersampling margin survives, along with all the
-low-frequency work — tone, structure, artifact cleanup — that the downsample
-does not destroy. What is given up is the 512-to-256 octave, which is the one
-the final resize deletes anyway. It also has **no fidelity weight**: GPEN takes
-one input, so `enhancer_weight` would stop meaning anything and only
-`enhance_strength` would remain.
+frames): `restore` p50 **7.7ms** inside a 25.9ms frame. It still **has not been
+judged on footage**, which is what decides whether it belongs. Both GPEN files
+are on the volume at `/workspace/models/`. Why 256 rather than off: restoring at
+512 into a 128-192 aligned space is *supersampling*, and at 256 that margin
+survives along with all the low-frequency work the downsample does not destroy.
+See "Face restoration" below for the registry and what changes without a
+fidelity weight.
 
 ### The bottleneck has moved to the transport
 
 With restoration at 256 the frame is ~27ms against a 50ms deadline, and the
 reported symptom changed shape with it: **the stutter went away and the lag did
-not**. That is the diagnosis. Stutter is throughput — frames arriving faster
-than they can be processed. Lag is latency — and halving the compute did not
-move it, so compute was not what was holding it.
+not**. Stutter is throughput; lag is latency, and halving the compute did not
+move it. **None of it was visible** — `RTTTracker` had computed true
+glass-to-glass latency all along and nothing displayed it.
 
-The chain, end to end, with what each part costs:
-
-    webcam capture
-      -> JPEG encode (desktop)
-      -> UPLINK          ~30 KB/frame, ~4.8 Mbps at 640x360 q70 @20fps
-      -> inbound queue   was 10 deep = 500ms of pure latency
-      -> process         ~27ms                    <- no longer the problem
-      -> JPEG encode (pod)
-      -> DOWNLINK
-      -> jitter buffer   started at 400ms, adapted slowly
-      -> decode -> display
-
-**None of this was visible.** `RTTTracker` computed true glass-to-glass latency
-from a capture timestamp that rides with every frame, and had done all along —
-nothing displayed it, logged it to the UI, or reported it. "It feels sluggish"
-could not become "RTT is 210ms, the buffer adds 60, the pipeline uses 27".
-
-Fixed, in order of how much they were costing:
+Fixed, in order of what they cost:
 
 - **The readout exists.** `Bridge.latencyText` publishes RTT p50/p95, buffer
-  depth and uplink Mbps every two seconds, shown top-right in the viewport
-  beside the other badges — never drawn on the frame, for the usual reason.
-  Read it against the pipeline's own per-stage report: **the difference between
-  the two is network and encode**, and on a remote pod that is most of it.
+  depth and uplink Mbps every two seconds, top-right in the viewport — never
+  drawn on the frame. Read it against the pipeline's own per-stage report: **the
+  difference between the two is network and encode.**
 - **The inbound queue dropped the wrong frame.** On a full queue the handler
-  refused the *arriving* frame and kept the backlog, so under pressure the
-  pipeline chewed through stale frames while discarding the only current one —
-  the face lagged by the whole queue depth and stayed there. It now evicts the
-  oldest. Depth went 10 -> 2: anything waiting there is a frame the operator
-  has already moved past.
-- **The playout buffer started at 400ms** and converged slowly with one
-  symmetric alpha, so even a nearby pod felt heavily delayed for the first
-  seconds — exactly when an impression forms. Now 120ms initial, a 50ms floor
-  (one frame interval at 20fps rather than 80ms), and **asymmetric** smoothing:
-  rise fast because a late buffer glitches visibly, fall slow because an early
-  one underruns. One alpha has to be slow in a direction; 0.2 was slow in both.
+  refused the *arriving* frame and kept the backlog, so the face lagged by the
+  whole queue depth and stayed there. It now evicts the oldest, and depth went
+  10 -> 2.
+- **The playout buffer started at 400ms** and converged slowly. Now 120ms
+  initial, a 50ms floor, and asymmetric smoothing — see
+  [docs/PLAYOUT_AND_SYNC.md](docs/PLAYOUT_AND_SYNC.md).
 
-**What is still only a hypothesis: the uplink.** The desktop sends a JPEG per
-captured frame, ~4.8 Mbps at the `optimal` preset, and receives about the same
-back. Home connections are usually asymmetric with far less upstream. A
-saturated uplink queues frames in the OS send buffer, which reads as **latency
-while throughput still looks healthy** — the exact reported symptom. The
-readout now carries the number; the cheap test is to switch to `fast`
-(480x270 q60, ~1.4 Mbps) and see whether latency falls by far more than the
-~10ms of compute that saves. If it does, the answer is encoding, not the GPU.
+**Still only a hypothesis: the uplink.** ~4.8 Mbps up at `optimal`, on home
+connections that are usually asymmetric. A saturated uplink queues frames in the
+OS send buffer, which reads as **latency while throughput still looks healthy**
+— the exact reported symptom. The cheap test is to drop to `fast` and see whether
+latency falls by far more than the ~10ms of compute that saves.
 
-**The term that dominated everything: distance — and it is what the move to
-Vast was for.** The pod was `EU-RO-1`, Romania, against an operator in West
-Africa: a physical floor of roughly 80-120ms round trip at best and typically
-worse.
-
-The obvious fix was a nearer RunPod datacenter, and it does not exist.
-Per-datacenter stock, queried directly: **EU-FR-1 carries no eligible GPU at
-all**, EU-NL-1 has a single L40S, and RunPod has fifty datacenters and **none
-in the UK**. EU-RO-1 was not inertia — it was the only European datacenter
-holding 4090s.
-
-Vast has verified 4090s in the UK at $0.31/hr, cheaper than the Romanian card
-they replace, on 885 MB/s uplinks. See [docs/VAST_MIGRATION.md](docs/VAST_MIGRATION.md).
-
-**What is still unmeasured is the RTT itself.** Everything above is a proxy for
-it. The readout exists; point it at a UK instance and read it before believing
-any of this.
+**The term that dominated everything: distance — and it is what the move to Vast
+was for.** EU-RO-1 against an operator in West Africa is a physical floor of
+80-120ms round trip at best. A nearer RunPod datacenter does not exist: EU-FR-1
+carries no eligible GPU, EU-NL-1 a single L40S, and RunPod has no UK datacenter
+at all. Vast has verified 4090s in the UK at $0.31/hr on 885 MB/s uplinks —
+[docs/VAST_MIGRATION.md](docs/VAST_MIGRATION.md).
 
 **The standing conclusion: stop optimising the pipeline for latency.** There is
 ~23ms of headroom under the deadline and the felt delay is dominated by terms
@@ -354,127 +251,34 @@ showing compute as the largest term, which it currently is not.
 Both streams are presented **D after capture**, whatever the network did in
 between. D is measured from the link over the first full RTT window (~3s),
 committed once, and then held (`_maybe_calibrate`; `PHANTOM_PLAYOUT_DELAY_MS`
-pins a value instead, and `0` there restores the adaptive behaviour).
+pins a value, and `0` there restores adaptive behaviour). Adaptive playout is
+right for video alone and becomes wrong the moment audio is played against the
+same number, because every adjustment is a discontinuity. **Jitter is far more
+damaging than delay.**
 
-Adaptive playout is right for video alone — it chases the network and the
-viewer sees nothing. It becomes wrong the moment audio is played against the
-same number, because every adjustment is a discontinuity: move the read point
-forward and samples are skipped, back and silence is inserted. A measured
-session had the target swinging 380 -> 500 -> 420 -> 490ms every two seconds,
-which is what an operator hears as speech breaking up. **Jitter is far more
-damaging than delay** — people adapt to a constant delay and never to one that
-moves.
+The rules that are easy to get wrong, in `JitterBuffer.next_for_slot`:
 
-Calibration keeps that property and drops the guessed number. D was a constant
-550ms, from one session against EU-RO-1: RTT p50 ~350ms, p95 ~450ms, 700ms
-outliers. **D cannot be smaller than what video costs** — a frame cannot be
-shown before it arrives, so audio necessarily waits as long as video does. What
-it must not be is *larger*, and a constant is larger everywhere the link is
-better than the one it was measured on. On a 200ms link, 550ms held audio a
-third of a second past the picture. Calibration takes `p95 + spread + 80ms`,
-quantised to 25ms and floored at 100ms — the floor is not `RTTTracker.FLOOR_NS`
-because D also absorbs the 33ms display tick and the vcam queue, neither of
-which is RTT.
+1. **The slot fires on time, always** — audio is locked to the same clock.
+2. **A frame that missed its slot is discarded, not shown late.**
+3. **An empty slot repeats the last shown frame** — always the last *swapped*
+   frame, never the raw camera, never black.
 
-**Both streams read one accessor, and this is not decoration.** `pop_eligible`
-read `self._rtt.target_delay_ns` — the adaptive estimate — while
-`AudioPlayback` read `self.target_delay_ns`, the fixed value. Video was
-therefore released on arrival while audio waited D, and on a call the sound
-trailed the lips by the difference. Escalation made it worse rather than
-better: it raised the number **only audio read**, pushing the sound further
-back while doing nothing about the repeats it was raised to steady.
+**Both streams read one accessor**, and that is not decoration: video once read
+the adaptive estimate while audio read the fixed value, so the sound trailed the
+lips by the difference, and escalation made it worse rather than better.
+`[SYNC] av video=+Xms audio=+Yms skew=±Zms` now reports what each stream
+**actually presented**; a negative skew is the sound behind the lips.
 
-Nothing disagreed, because nothing compared them. `sync_stats` published the
-adaptive estimate as `target_delay_ms`, so the `[SYNC] delay=` line and the
-viewport badge had never shown the delay either stream was actually held to.
-There is now a second line — `[SYNC] av video=+Xms audio=+Yms skew=±Zms` — from
-`JitterBuffer.video_age_ns` and `AudioPlayback.stats()['audio_age_ms']`, both
-measured on the material each stream **actually presented**. A negative skew is
-audio presenting older material than the picture: the sound behind the lips.
-Video is allowed to be up to one frame interval older, because frames are
-discrete; past that it is a fault, and the badge says so.
+**A repeat is not the evidence to step D on** — the display ticks at 30/s while
+`optimal` streams at 20fps, so a third of slots have no new frame due on a
+perfect link, forever. The signal is **starvation**: a slot with nothing eligible
+*and nothing waiting*. >20% of slots starving over ~10s, while frames are
+actually arriving, steps D up by 100ms, once, and says so. That is the only place
+playout adapts, and it adapts on evidence rather than per frame.
 
-**Audio's cursor follows the epoch, never the delay.** It is deliberately
-continuous — re-deriving position per block against a moving target is what
-made speech break up — so `JitterBuffer.delay_epoch` increments when D is
-*decided* (calibration committing, escalation stepping, `clear()` on a new
-link) and audio repositions exactly then. One discontinuity at second three
-buys a delay that is right for the rest of the session.
-
-Three one-directional errors in the audio timebase were fixed with it, all of
-which pushed the sound later:
-
-- **The drift baseline started before the device did.** `_drift_start_ns` was
-  taken in `start()`, so the tens-to-hundreds of milliseconds a Windows device
-  takes to open counted as samples that failed to arrive, and `drift_ns` sat
-  permanently negative by that amount — which was then subtracted from the
-  playback position for the whole session. It is taken at the first delivered
-  block now, and is no longer fed into the position at all: the cursor is
-  continuous, so a drift term only moves the seek point, and a rate mismatch
-  cannot be repaired by seeking somewhere the samples are not. It is measured
-  and reported.
-- **A chunk's timestamp was its delivery, used as its first sample.** `_seek`
-  computes its offset as `playback_point - chunk_ts`, so the stamp must be when
-  the first sample was recorded — a block duration plus the input latency
-  earlier than the callback runs.
-- **The output device's own buffer was unaccounted.** A block written now is
-  audible once the device has played what it holds, so the real delay was D
-  plus the device — 2ms on WASAPI and 90ms on MME for the same cable.
-
-**Only video crosses the network.** Audio is captured into a local ring buffer
-and is available in ~23ms; video does a round trip to the pod and takes ~350ms.
-So audio spends most of the budget waiting, jitter is entirely video's, and D
-is set by the video distribution alone. That changes if voice processing ever
-moves server-side — there is a `set_voice_transformer` hook suggesting someone
-considered it — at which point a fixed buffer matters more, not less.
-
-`JitterBuffer.next_for_slot` holds the schedule, and the second rule is the one
-that is easy to get wrong:
-
-1. **The slot fires on time, always.** Stalling for a late frame slips the
-   schedule, and audio is locked to the same clock, so a stall is either a gap
-   in speech or a drift out of sync.
-2. **A frame that missed its slot is discarded, not shown late.** Playing the
-   straggler shifts everything one slot later and the pattern never recovers.
-3. **An empty slot repeats the last shown frame.** 33-50ms of an already
-   mostly-still face is invisible, which is exactly why video is the cheap
-   place to absorb jitter. Always the last *swapped* frame — never the raw
-   camera, never black, which is the same invariant `_run_vcam` holds.
-
-Repeats are counted and shown in the badge as `N held`. One is invisible; a
-sustained rate is a frozen face while audio continues, which reads as a broken
-swap rather than a slow link.
-
-**But a repeat is not the evidence to step D on, and using it was a runaway.**
-The display ticks at 30/s while `optimal` streams at 20fps, so a third of all
-slots have no new frame due — on a perfect link, forever — and half of them at
-`fast`. The escalation condition was therefore permanently true. That was
-invisible for as long as `_fixed_delay_ns` was a number only audio read;
-pointing video at it sent D to the 2s ceiling in a couple of minutes and froze
-the picture.
-
-The signal is **starvation**: a slot with nothing eligible *and nothing
-waiting*, meaning frames are arriving already past their deadline, which is the
-one thing more headroom fixes. A slot with frames waiting is D being generous,
-and raising it is precisely backwards. So **>20% of slots starving over ~10s,
-while frames are actually arriving, steps the delay up by 100ms, once, and says
-so**. That is the only place playout adapts, and it adapts on evidence rather
-than per frame.
-
-Two capacity facts belong with it. D holds `(D - rtt) * fps` frames in flight,
-so `MAX_FRAMES` has to exceed the escalation ceiling times the frame rate — 60
-was exactly 2s at 30fps and therefore no headroom at all; it is 120. And when
-the buffer is full anyway, `pop_eligible` releases the frame at the front
-rather than letting the next push evict it unseen, because that eviction
-repeats and the picture never moves again. Early by a fraction of D beats
-frozen, and `forced` counts it so the cause is not read as a network fault.
-
-**Calibration does not believe the warm-up.** The first stream after a pipeline
-start pays model load — tens of seconds — and those frames come back carrying
-round trips of exactly that size. `_CALIBRATE_SKIP` discards them, and the
-window that follows has to look settled (p95 within 2x p50, and under a second)
-before it is committed. Five unsettled windows and it keeps the conservative
-provisional and says so, leaving the correction to escalation.
+Full record — the four one-directional audio timebase errors, the calibration
+warm-up rule, `MAX_FRAMES` capacity, `delay_epoch`, and why only video crosses
+the network — in [docs/PLAYOUT_AND_SYNC.md](docs/PLAYOUT_AND_SYNC.md).
 
 ### Session gotchas worth not rediscovering
 
@@ -482,152 +286,64 @@ provisional and says so, leaving the correction to escalation.
   seconds, inside its own window. A 40s capture produced zero frames for this
   reason and looked like a broken config. The sweep hides this with a discarded
   warm-up pass; anything else driving the stream needs its own.
-- **Nothing can be copied off the pod.** `orchestrator.py push` is local->pod
-  only, port 9000 is the only opening, and the SSH proxy carries no SFTP — so a
-  45 KB montage of the comparison frames could not be brought home. An
-  `orchestrator.py pull` over the same WebSocket path `push` already uses is
-  what makes visual review routine instead of impossible.
-- **`orchestrator.py run` used `PATH=... <cmd>`**, which binds only to the
-  first word of a line, so the second half of any `&&` chain ran under
+- **Nothing can be copied off the pod** under the old proxy. `orchestrator.py
+  push` was local->pod only, port 9000 the only opening, and the SSH proxy
+  carried no SFTP — so a 45 KB montage of comparison frames could not be brought
+  home. Vast's `ssh_direct` is what makes `pull` possible, and visual review
+  routine rather than impossible.
+- **`orchestrator.py run` used `PATH=... <cmd>`**, which binds only to the first
+  word of a line, so the second half of any `&&` chain ran under
   `/usr/bin/python`. Now `export PATH=... && <cmd>`.
 
-**Settled by this:**
+**Settled, and still true:** every model is confirmed on
+`CUDAExecutionProvider`, with no silent CPU fallback. **`cuda_graphs` and
+`cuda_streams` measured flat** (144.4 / 146.1ms — noise); a 110ms model is not
+waiting on kernel launch overhead, so both can be dropped. **Numba is closed** —
+the whole compositor is ~20ms, and making it free still left 126ms. And **`fp16`
+and `trt` never actually ran**: no converted weights existed, and the conversion
+still fails its own check (see "ONNX sessions" below), so do not read either
+row of any sweep as evidence.
 
-- Every model is confirmed on `CUDAExecutionProvider`. No silent CPU fallback.
-- **`cuda_graphs` and `cuda_streams` measured flat** (144.4 / 146.1ms — noise).
-  A 110ms model is not waiting on kernel launch overhead. Both can be dropped.
-- **Numba is closed.** The whole compositor is ~20ms; making it free still
-  leaves 126ms. Argued against on reasoning before, now on a number.
-- `fp16` and `trt` **never ran** — no converted weights existed, and `trt_gpus`
-  correctly declined an engine build on an L4.
-
-**hyperswap has never been run.** Every measurement used the default
-`inswapper_128`; the weights are on the pod but unused. It matters for speed,
-not just looks: hyperswap is 256px native against inswapper's 128, and its
-profile asks for *less* restoration (`enhance_strength` 0.5 vs 0.7) because the
-swap needs less. A bigger swap that buys a cheaper restore may be a net win, or
-may just be a bigger swap — the sweep now covers both.
-
-**The first run of the next session should be `no_restore`.** It bounds
-everything: whatever remains with restoration off is what no amount of work on
-restoration can remove. `tools/sweep_levers.py` now leads with it, plus
-`aligned_128`, `hyperswap` and `hyperswap+no_restore`.
-
-**Continue from [docs/PENDING_WORK.md](docs/PENDING_WORK.md) §2b.0**, in order:
-
-1. **Convert fp16 on the pod** — the only untested lever aimed at the 110ms:
-   `orchestrator.py run "python tools/convert_fp16.py /workspace/models/codeformer.onnx"`
-   (needs `pip install onnx onnxconverter-common` there first). Then re-sweep.
-2. **Judge it on footage**, not latency alone — restoration is what decides
-   whether output reads as a call or as AI.
-3. **Measure again on a 4090.** Estimated ~72ms total, so a real 2x but still
-   short of 50ms alone; **4090 + fp16** is the combination that plausibly
-   holds. Needs `terminate` then `start` — `resume` cannot move a pinned pod.
-4. **Reconsider restoration decimation.** Declined earlier as too risky to what
-   the operator sees; that was decided before knowing restoration is
-   three-quarters of the frame.
-5. Only then the XSeg overlap and pipelining — both are bounded by the ~20ms
-   that is *not* restoration.
-
-Estimates above are labelled as such. This session's lesson was that the
-reasoning about *where* time goes held, and the predictions of *how much* each
-lever would buy did not survive contact with a measurement.
-
-**Frame rate, estimated from the measured L4 numbers.** GPU stages scale with
-the card; the ~20ms of CPU compositing and encode does not, which is what sets
-the floor:
-
-| | restore | detect | CPU | total | fps |
-|---|---|---|---|---|---|
-| L4 (measured) | 110ms | 16ms | ~20ms | 146ms | **~7** |
-| RTX 4090 (est.) | ~44ms | ~6ms | ~20ms | ~70ms | **~14** |
-| RTX 4090 + fp16 (est.) | ~24ms | ~6ms | ~20ms | ~50ms | **~20** |
-
-So a 4090 roughly doubles the frame rate and still misses 20fps on its own.
-**4090 + fp16 is the first combination that plausibly holds the `optimal`
-preset**, and it lands right on the deadline rather than comfortably inside it.
+The plan that session wrote for itself, and the L4-based frame-rate estimates it
+rested on, are archived in docs/PERFORMANCE_AUDIT.md §12 — superseded by the
+4090 measurements above, and kept only for the lesson that the reasoning about
+*where* time goes held while every prediction of *how much* did not.
 
 ### Why 110ms: restoration ignores how big the face is
 
 **The dominant cost is spent on interpolated data.** In the measured session the
-face was **101x129 px** in a 640x360 frame. The chain it went through:
+face was **101x129 px** in a 640x360 frame:
 
     face in frame          101 x 129   <- the only real information
     swap native            128 x 128   <- inswapper_128 output, the ceiling
     aligned space          256 x 256   <- follows face size, has a floor
     FFHQ restore crop      512 x 512   <- ALWAYS 512, regardless
 
-`CROP_SIZE = 512` is hard-coded through `_ffhq_geometry` and `_build_ffhq_crop`
-(`compositor.py:496`, `:524`), because CodeFormer is trained on FFHQ 512 crops.
-So a 101px face is upsampled about 20x in pixel count, the heaviest model in
-the pipeline runs on the result, and the output is squeezed back into a 101px
-hole. Conv cost scales with pixel count, so this is roughly **4x the compute of
-restoring at 256, and 16x of 128** — spent reconstructing detail that was never
-in the source.
+`CROP_SIZE = 512` is hard-coded through `_ffhq_geometry` and `_build_ffhq_crop`,
+so a 101px face is upsampled ~20x in pixel count, the heaviest model runs on the
+result, and the output is squeezed back into a 101px hole. `_aligned_size`
+already holds the correct principle — the working resolution "is not upsampled to
+a detail level their webcam never captured" — and governs a stage costing a few
+milliseconds while the 110ms stage ignores it entirely.
 
-**The codebase already holds the correct principle and does not apply it here.**
-`_aligned_size` (`compositor.py:373`) says the working resolution "follows how
-many frame pixels the face actually covers ... and, more importantly, is not
-upsampled to a detail level their webcam never captured." That reasoning is
-right, and it governs a stage costing a few milliseconds while the 110ms stage
-ignores it entirely.
-
-**This is the largest single lever available, and larger than fp16, TensorRT and
-a 4090 combined.** Options, cheapest first:
-
-1. **Skip restoration below a face-size threshold.** Config-level, no new
-   model. The question it rests on is a footage question, not a latency one:
-   does 512-space restoration visibly improve a 101px face whose swap was
-   generated at 128? Test with `--debug-frames` before assuming either answer.
-2. **Restore every Nth frame**, letting `temporal_alpha`'s aligned-pixel EMA
-   carry the gap. Previously declined as too risky to what the operator sees;
-   that was decided before knowing restoration is 75% of the frame.
-3. **A restoration model that accepts a smaller input**, or a re-export of
-   CodeFormer at 256. Changes what the output looks like, so it is an A/B, not
-   a swap.
-
-**Option 3 is closed, and option 1 is the live one.** `codeformer.onnx`
-declares:
-
-    INPUT  input   [1, 3, 512, 512]   tensor(float)
-    INPUT  weight  []                 tensor(double)
-    OUTPUT output  [1, 3, 512, 512]
-
-Static and square. So `restore_size` cannot make this model restore at 256 —
-`Enhancer.crop_size` warns once and holds at 512, which is the declining path
-working as designed rather than a bug. **Restoring smaller needs a re-export,
-not a config change.** `restore_min_face` is therefore the only config-level
-lever against the 39.5ms, and it needs no new model because skipping is free.
+**Option 3 — a re-export at 256 — is closed for CodeFormer**, which declares
+static `[1, 3, 512, 512]`. So `restore_size` cannot make *that* model restore
+smaller; `Enhancer.crop_size` warns once and holds at 512, which is the declining
+path working as designed. **`restore_min_face` is the only config-level lever**
+against the 39.5ms, and needs no new model because skipping is free.
+`gpen_bfr_256` answers the same question by being a different model.
 
 The general lesson is cheaper than the sweep that would have found it: **read a
-model's declared input shape before sweeping a shape lever.** Five seconds of
-`InferenceSession(...).get_inputs()` replaced a paid measurement run.
+model's declared input shape before sweeping a shape lever.** Two properties keep
+that lever honest — `restore_size` is a request the model answers
+(`_spatial_size` reads the declared shape at load, and warns once rather than
+throwing per frame), and `_FFHQ_ERODE` / `_FFHQ_FEATHER` reproduce the old erode
+and sigma exactly at 512, so a 256 crop gets the same *seam* rather than twice as
+hard an edge and a resolution A/B is not also a feathering A/B.
 
-`restore_size` and `restore_min_face` are config fields, on `set_realism`, the
-CLI, the env and the sweep. Two properties matter:
-
-- **`restore_size` is a request, and the model answers it.**
-  `_spatial_size` reads the ONNX input's declared shape at load;
-  `Enhancer.crop_size` honours a fixed export over the config and warns **once**
-  rather than throwing per frame on the live path. So option 3's real question —
-  *is facefusion's `codeformer.onnx` exported with dynamic spatial dims?* — is
-  answered by one line of the pod's startup log, and a `restore_256` run whose
-  `restore` equals the baseline exactly is what "no, it is fixed" looks like in
-  the sweep. It is not a lever that quietly does nothing.
-- **The seam is a fraction of the crop, not a pixel count.** `_FFHQ_ERODE` and
-  `_FFHQ_FEATHER` reproduce the old 5px erode and 6.0 sigma exactly at 512, so
-  nothing changes at the default, and a 256 crop gets the same *seam* rather
-  than twice as hard an edge. Otherwise a resolution A/B would also be a
-  feathering A/B and neither would be readable.
-
-`_ffhq_geometry` at 256 is exactly half the matrix it is at 512 — the framing is
-identical, only the sampling rate changes — so this is a resolution comparison
-and nothing else. Both default to current behaviour: 512, never skip.
-
-Note what is *not* the problem, so it does not get optimised by mistake:
-transfers are trivial (a 512x512x3 fp32 tensor is 3MB, ~0.1ms over PCIe 4.0,
-even six round trips are under 2ms), and the Python layer does not appear in
-the measurement at all.
+Not the problem, so it does not get optimised by mistake: transfers are trivial
+(a 512x512x3 fp32 tensor is 3MB, ~0.1ms over PCIe 4.0) and the Python layer does
+not appear in the measurement. Full working in docs/PERFORMANCE_AUDIT.md §11.
 
 ### GPU compositing, revisited with numbers
 
@@ -1548,246 +1264,152 @@ magnitude on a real face.
 
 ### The reservation was made and never filled (2026-09-07)
 
-The layer was then run on a real still and the freckles that are obvious in the
-source did not appear in the output. Traced on that source — `source/Two`,
-IMG_3745, a 275px freckled face — against the shipped code, and the answer was
-not the donor, not the band, not the picker and not chroma:
-
-    real (target's band)      5.50
-    grain (sensor noise)      2.32     42% of the amplitude
-    reserve 0.3   ->  real^2 - fake^2 = 3.59   -  grain^2 = 5.39   ->  0.00
-    reserve 0.4   ->                    4.52   -            5.39   ->  0.00
-    reserve 0.5   ->                    6.76   -            5.39   ->  1.17
-
-**Headroom came out at exactly zero across the whole documented working range.**
-Two defects behind it, both now fixed:
+The layer was run on a real still — `source/Two`, IMG_3745, a 275px freckled
+face — and the obvious freckles did not appear. Not the donor, not the band, not
+the picker, not chroma: **headroom came out at exactly zero across the whole
+documented working range.** Two defects, both fixed:
 
 - **The grain budget was spent twice.** The target's band is skin *and* sensor
   noise, and `_add_grain` supplies the noise separately in frame space. Aiming
-  detail matching at the *total* therefore amplified the swap's own
-  structureless band until it covered the noise, and then grain added the noise
-  again on top — after which `_texture_headroom` correctly reported nothing
-  left. `_match_detail` now discounts the noise once when reserving, measured on
-  the grayscale band so it is the same convention `_estimate_noise` and
-  `_texture_headroom` use. Without a reserve the stage is bit-identical, so the
-  pre-existing over-parity (matched to skin+noise, then given grain) is
-  untouched and stays an open question.
-- **`texture_strength` was applied twice**, so the delivered amplitude went as
-  its *square*: 0.4 asked detail matching to stand back by 40% and then filled
-  40% of what that freed, delivering 16%. It is spent once now, in the reserve.
-  Below parity the layer spends the whole measured headroom — the reservation
-  is the control, the frame-space measurement is the amount, and
-  `f² + g² + t² = r²` still puts the total exactly at parity. Above 1.0 the
-  diagnostic overshoot keeps multiplying, since past parity there is no
-  reservation left to act through.
+  detail matching at the *total* amplified the swap's own structureless band
+  until it covered the noise, then grain added the noise again on top.
+  `_match_detail` now discounts the noise once when reserving, on the grayscale
+  band so it matches `_estimate_noise` and `_texture_headroom`. Without a reserve
+  the stage is bit-identical, so the pre-existing over-parity is untouched and
+  stays an open question.
+- **`texture_strength` was applied twice**, so delivered amplitude went as its
+  *square*: 0.4 asked detail matching to stand back 40%, then filled 40% of what
+  that freed, delivering 16%. It is spent once now, in the reserve.
+  `f² + g² + t² = r²` still puts the total exactly at parity.
 
-Measured on the same source, in one rig, before and after — the added deviation
-in 8-bit units, against a source freckle carrying 12.8:
+**Then the two stages were made to measure the same thing.** A reserve of 0.2-0.3
+still found no room, because the stages read the same face through three
+different instruments — pooled per-channel deviation against grayscale, the full
+compositing mask against the skin-weighted one, and the whole crop against a
+centred 160px window. Together they left detail matching overshooting its aim by
+~2.5%: nothing at a large reserve, the entire reservation at a small one. **The
+region was the dominant term**, not the mask or the colour convention. When
+reserving, `_match_detail` now measures exactly as `_texture_headroom` will.
+**The dead zone is gone and the knob is linear from 0.2 up**, at ~1.0ms (aligned
+128) to ~1.2ms (256), paid only while the layer is on. **A reservation that finds
+no room now says so**, once, naming both numbers — that state leaves the face
+*softer* than with the layer switched off, and it was completely silent.
 
-| strength | before | after |
-|---|---|---|
-| 0.3 | **0.00** | 0.56 |
-| 0.4 | 0.28 | 1.00 |
-| 0.5 | 0.58 | 1.25 |
-| 1.0 | 2.30 | 2.34 |
+**Chroma was measured and dropped.** Freckles are ~9% of their own ΔE in chroma,
+so a colour-carrying texture channel would buy almost nothing. The whole-skin
+figure looks far better (chroma 0.58 of luminance) but that is uncorrelated
+chroma *noise*, not freckle signal.
 
-The fix does its work exactly where the knob is meant to be used and converges
-where the old behaviour already worked.
+**`texture_contrast` and `texture_relief` do work**, and p99 was the wrong way to
+ask — scored at the freckles (mean |map| there against plain skin): band 1.0
+gives 5.2 at *any* setting of either knob; band 2.0 gives 10.0 at relief 0.65 /
+contrast 1.0, **13.5 at the 0.65/1.6 default**, 23.7 at 0.90/1.6 and 28.6 at
+0.90/2.4. **At `texture_band` 1.0 both knobs are completely inert**, by
+construction — there is no mark octave to act on. The defaults are conservative.
 
-**A reservation that finds no room now says so**, once, naming both numbers.
-That state — detail matching held back, texture added nothing — leaves the face
-*softer* than with the layer switched off, and it was completely silent: the
-readings carry the zero, but until now only a stream reported readings at all,
-and a still render is precisely where this lands.
+**It is not a freckle layer.** Nothing in it knows what a freckle is; the
+delivered map correlates +0.97 to +0.99 with the source photograph's own band. At
+band 2.0 it keeps pores, freckles, moles and fine creases at ~2.5x their source
+share, wrinkles and scars at ~1.2x, and suppresses shading to 0.36x. **The
+exclusions are of kind, not scale, and there are three**: colour (grayscale map,
+so a pimple contributes only its dark rim); anything expression-dependent (a
+smiling source's crow's foot is painted on regardless — no band setting fixes
+this); and three-dimensional relief, which arrives carrying the source's light.
+The colour half was measured and **closed** — redness is excluded because it is
+*low-frequency*, so an RGB layer recovers 8% of a red spot and 2% of a rash, and
+carrying it would mean a low-frequency colour stage fighting `_match_color` over
+the one thing the eye reads as skin tone. docs/TEXTURE_PIPELINE.md §6.7 and §6.8.
 
-**Then the two stages were made to measure the same thing.** With the two fixes
-above, a reserve of 0.2-0.3 still found no room, because the stages were reading
-the same face through three different instruments — pooled per-channel deviation
-against grayscale, the full compositing mask against the skin-weighted one, and
-the whole crop against a centred 160px window. Small differences that together
-left detail matching overshooting its own aim by ~2.5%: nothing at a large
-reserve, and the entire reservation at a small one. **The region was the
-dominant term**, not the mask or the colour convention. When reserving,
-`_match_detail` now measures exactly as `_texture_headroom` will:
-
-| reserve | aim wanted | fake before | fake after | headroom before | after |
-|---|---|---|---|---|---|
-| 0.2 | 5.21 | 5.35 | 5.09 | **0.00** | 1.56 |
-| 0.3 | 5.07 | 5.25 | 4.99 | 0.83 | 1.83 |
-| 0.4 | 4.87 | 5.06 | 4.88 | 1.66 | 2.11 |
-| 0.6 | 4.26 | 4.21 | 4.17 | 3.25 | 3.30 |
-
-**The dead zone is gone and the knob is linear from 0.2 up.** Costs ~1.0ms at
-aligned 128 and ~1.2ms at 256, paid only while the layer is on.
-
-**Chroma was measured and dropped.** Freckles are ~9% of their own ΔE in chroma
-(dL* −3.17 against |chroma| 0.30 at the freckles on IMG_3745, and −3.84/0.39 on a
-second source), so a colour-carrying texture channel would buy almost nothing.
-The whole-skin figure looks far better — chroma 0.58 of luminance — but that is
-measuring uncorrelated chroma *noise*, not freckle signal.
-
-**`texture_contrast` and `texture_relief` do work, and p99 was the wrong way to
-ask.** p99 of the delivered map is ~3.6× its own deviation at every setting,
-which reads as "inert" and is really just an order statistic over a field the
-pore octave dominates by count. Scored at the freckles themselves — mean |map|
-there against mean |map| on plain skin, same pixels every run:
-
-| band | relief | contrast | freckle : plain skin |
-|---|---|---|---|
-| 1.0 | any | any | 5.2 |
-| 2.0 | 0.65 | 1.0 | 10.0 |
-| 2.0 | **0.65** | **1.6** | **13.5** (default) |
-| 2.0 | 0.90 | 1.6 | 23.7 |
-| 2.0 | 0.90 | 2.4 | 28.6 |
-
-Note the first row: **at `texture_band` 1.0 both knobs are completely inert**,
-by construction — there is no mark octave for them to act on. If the BAND slider
-is at the bottom, `texture_relief` and `texture_contrast` do literally nothing.
-And the defaults are conservative: 0.9/2.4 puts twice the contrast into the
-marks, which is now a measured range rather than a guess.
-
-**It is not a freckle layer.** Nothing in it knows what a freckle is — the
-delivered map correlates +0.97 to +0.99 with the source photograph's own band,
-so it carries whatever is in that band. At band 2.0 it keeps pores, freckles,
-moles and fine creases at ~2.5x their source share, wrinkles and scars at ~1.2x,
-and suppresses shading to 0.36x. **The exclusions are of kind, not scale, and
-there are three**: colour (the map is grayscale, so rash and redness do not
-survive and a pimple contributes only its dark rim); anything expression-
-dependent (the map is fixed and warped by a similarity transform with no
-expression term, so a smiling source's crow's foot is painted on whether or not
-the operator is smiling — no band setting fixes this); and three-dimensional
-relief, which arrives carrying the source photograph's light. A pass per skin
-condition would not help, and the colour half of that was measured and
-**closed**: redness is excluded not because the map is grayscale but because it
-is *low-frequency*. A pimple is 58% below the texture band and a rash 87%
-below, so an RGB or per-channel layer on top of this one recovers 8% of a red
-spot and 2% of a rash. Carrying them would mean a low-frequency colour stage —
-the quantity `_match_color` and `_match_illumination` already own, and own in
-order to match the **target** — so it would fight them over the one thing the
-eye reads as skin tone. See docs/TEXTURE_PIPELINE.md §6.7 and §6.8.
-
-**Off by default, and still never judged on footage — but the knob now means
-what it says.** 0.5 is the place to start. A/B with `tools/realism.py --host ...
-texture_strength=0.5`, then `texture_band`, `texture_relief` and
-`texture_contrast` one at a time — they are separately switchable precisely so
-one cannot be blamed for another's artefact.
-
-**`texture_strength` reaches 2.0 over the API, and the desktop slider does
-not.** Above 1.0 deliberately exceeds measured parity. It is not a shipping
-value; it exists because separating "the map is weak" from "the budget is small"
-otherwise needs a code change mid-session. Run it once at 2.0: if the marks
-appear, the map is fine and the budget was the problem; if they stay soft, look
-at the `Texture source:` line, which now reports the chosen photograph's own
-pore and mark deviations alongside its face size.
+**Off by default, and still never judged on footage — but the knob now means what
+it says.** 0.5 is the place to start; A/B `texture_band`, `texture_relief` and
+`texture_contrast` one at a time, since they are separately switchable precisely
+so one cannot be blamed for another's artefact. **`texture_strength` reaches 2.0
+over the API and the desktop slider stops at 1.0** — above 1.0 deliberately
+exceeds measured parity and exists to separate "the map is weak" from "the budget
+is small". If marks stay soft at 2.0, read the `Texture source:` line, which
+reports the chosen photograph's own pore and mark deviations alongside its face
+size.
 
 **Subsurface scatter is built and off** (`diffuse_strength`). Real skin is
-translucent: light enters, scatters through a millimetre or two and leaves
-somewhere slightly else, softening the *shading* while the texture on top stays
-sharp. A generated face has none of that and reads **hard** — a different
-complaint from plastic, in a different band, which `texture_strength` does not
-answer. It runs in aligned space immediately before `_match_color` so the colour
-stages can still reconcile it, on the L channel only, with feature exclusions
+translucent, softening *shading* while the texture on top stays sharp; a
+generated face reads **hard**, which is a different complaint from plastic in a
+different band. It runs in aligned space immediately before `_match_color` so the
+colour stages can reconcile it, on the L channel only, with feature exclusions
 built from `face.kps` (not the 106 landmarks, whose layout varies by pack) and
 feathered, since an unfeathered exclusion is a disc of "sharp" in softened skin.
-
-Two things about it that look wrong and are not. The blur does attenuate part of
-the texture band on its way past — but `_match_detail` runs *after* it and scales
-that band back against the real crop, so what scatter removes from texture is
-restored and what it removes from shading stays out. And the LAB round trip was
-kept rather than replaced by the cheaper monochrome-delta trick `_add_grain`
-uses: measured at 256, that variant is 2.29ms against 2.41ms — 5% — and drifts
-chroma three times as far.
+Two things that look wrong and are not: the blur attenuates part of the texture
+band on its way past, but `_match_detail` runs *after* it and scales that band
+back against the real crop; and the LAB round trip was kept over the cheaper
+monochrome-delta trick because that variant saves 5% and drifts chroma three
+times as far.
 
 **Re-examining the CPU work found ~15ms a frame of waste, which was a better
-answer than moving anything to the GPU.** One LAB conversion now serves both
-shading stages instead of one each (a round trip is 1.9ms at 256, more than
-scatter's own work); the scatter feature weight is built at a quarter resolution
-since it is a smooth mask whose blur was running at sixteen times the pixels it
-needed; grain reuses a cached noise tile at a random offset rather than calling
-`np.random.normal` at region size every frame; and `_estimate_noise` bounds its
-sample *before* the colour conversion and Laplacian rather than striding the
-result afterwards. `_add_grain` also moved to `cv2` ops from numpy broadcasting,
-which `_paste` had already spelled out for the same reason. Net: scatter's
-marginal cost 3.18ms -> 0.07ms at 256, grain at a 500px region ~15ms -> 2.83ms.
-
-**The costs quoted for both new layers are laptop-CPU measurements, and the pod
-will print its own.** A GPU does not touch either of them — the models are ONNX
-on the card, the compositor is OpenCV on the CPU — so renting a faster card does
-not speed them up; but a pod's CPU is not this one, and the whole compositor
-bucket has already been recorded at ~20ms on an L4 against ~10.3ms on a 4090.
-Locally: scatter costs 0.07ms marginal at aligned 256 with colour matching on
-(3.18ms in isolation, before the conversion was shared); texture 1.01ms on a
-101px face and 7.16ms on a 460px one. Both are their
-own line in the latency report, so **one stream on the pod replaces all of
-that**. Combined they are ~7ms with a large face, which `optimal`'s 50ms
-absorbs comfortably; treat `production`'s 33ms as a question for the report rather than a
-prediction. Judge realism at `optimal` either way.
+answer than moving anything to the GPU.** One LAB conversion serves both shading
+stages; the scatter feature weight is built at a quarter resolution; grain reuses
+a cached noise tile at a random offset; `_estimate_noise` bounds its sample
+*before* the colour conversion and Laplacian. Net: scatter 3.18ms -> 0.07ms
+marginal at 256, grain at a 500px region ~15ms -> 2.83ms. **These are laptop-CPU
+numbers and the pod prints its own** — a GPU touches neither layer. Texture is
+~1.0ms on a 101px face and ~7.2ms on a 460px one; extraction is 28.2ms once per
+source, off the live path. Headroom statistics are taken over a bounded 160px
+window because measuring every pixel of a 500px face cost **16.1ms**, more than
+the rest of the frame, and was paid even when the answer was "add nothing". Judge
+realism at `optimal`.
 
 **The seam came first.** A live run reported the swap as "very noticeable, like
 the face pasted on target" — failure mode 2, seen rather than measured, and the
 thing the eye finds before it finds texture. Three causes were arithmetic rather
-than hypothesis, and two are fixed:
+than hypothesis; two are fixed:
 
 - **The transition was ~1.4% of the face's width.** Both feathers were fractions
-  of *their own space* and both spaces are bigger than the face: 5% of a 256
-  aligned crop lands as 0.91px on a 101px face, and the frame-space blur was 1%
-  of the region. Neither constant was wrong alone; nothing was looking at the
-  product. `mask_feather` now measures against the face's own extent — the only
-  length the eye compares against — and the ROI pad grows with it, since a blur
-  wider than its padding reflects off the border and never reaches zero.
-  Measured on a 100px face: **5px → 10px** at the new default.
+  of *their own space*, and both spaces are bigger than the face: 5% of a 256
+  aligned crop is 0.91px on a 101px face. Neither constant was wrong alone;
+  nothing was looking at the product. `mask_feather` now measures against the
+  face's own extent, and the ROI pad grows with it, since a blur wider than its
+  padding reflects off the border and never reaches zero. On a 100px face:
+  **5px -> 10px**.
 - **The 50%-alpha line sat outside the face.** `_HULL_EXPAND` grows the hull 10%
   radially *before* the blur, putting the midpoint of the transition on neck at
-  the chin and hair at the temples — exactly where the material either side
-  differs most. `mask_erode` pulls it back onto skin first. Deliberately not
-  "extend the mask": growing *coverage* puts swapped skin where hair should be,
-  which is the worse tell.
-- **A convex hull has no concave points** and so cannot follow a jawline at any
-  expansion. Not yet addressed — phase A3, held back deliberately so it is not
-  confounded with the two changes above.
+  the chin and hair at the temples. `mask_erode` pulls it back onto skin first.
+  Deliberately not "extend the mask": growing *coverage* puts swapped skin where
+  hair should be, which is the worse tell.
+- **A convex hull has no concave points** and cannot follow a jawline at any
+  expansion. Not yet addressed — phase A3, held back so it is not confounded
+  with the two changes above.
 
 The colour deadband went with them: `_COLOR_FLOOR` was 4.0, so a sub-4-unit LAB
 mean difference got **zero** global correction and a 10-unit one only half. The
-anti-snapping property that floor was protecting is delivered by the *ramp*, so
-it only has to clear estimator noise — now 1.5, with the range 12.0 → 8.0.
+anti-snapping property it was protecting is delivered by the *ramp*, so it only
+has to clear estimator noise — now 1.5, with the range 12.0 -> 8.0.
 
-**`compare_frames.py` said there was no seam.** It reported gradient 1.028 and
-"no seam detected" on the footage in question, because it measures gradient
-*magnitude* — a texture statistic that a 3-unit step over two pixels barely
-moves — and divides by the ring *outside* the mask, which contains hair. It now
-reports **`seam_excess`**: the LAB step across the boundary in the output, less
-the step the untouched input already had at the same rings, so it measures what
-the composite *added*. Medians, and blurred first, so grain and hair do not
-register as a seam. `seam_ratio` is retained and demoted.
+**`compare_frames.py` said there was no seam**, because it measures gradient
+*magnitude* — which a 3-unit step over two pixels barely moves — and divides by
+the ring *outside* the mask, which contains hair. It now reports
+**`seam_excess`**: the LAB step across the boundary in the output, less the step
+the untouched input already had at the same rings, so it measures what the
+composite *added*. Medians, and blurred first, so grain and hair do not register
+as a seam. `seam_ratio` is retained and demoted.
 
-Measured cost of the texture layer on CPU: **0.90ms** per frame on a 101px face,
-**7.49ms** on a 460px one — it scales with face size, so at the `production`
-preset with an operator close to the camera it is not free. Extraction is 28.2ms
-once per source, off the live path. The headroom statistics are taken over a
-bounded 160px window rather than the whole region: measuring every pixel of a
-500px face cost **16.1ms**, more than the rest of the frame, and was paid even
-when the answer was "no headroom, add nothing".
-
-Two things it deliberately does **not** do, both recorded rather than forgotten:
+Two things the texture layer deliberately does **not** do:
 
 - **It does not correct pose — it withdraws instead.** Canonical space is a
-  similarity transform, so composing source->canonical->target has identical
-  error to source->target in one step. What canonical space buys is that
-  extraction runs *once* — the caching, not the accuracy. An angled source
-  yields a foreshortened map, so `_pose_confidence` scales the layer down from
-  full at 12° of disagreement with the source photograph to nothing at 45°.
-  Magnitude only: the directional term (it is the cheek turning *away* whose
-  pores stretch) needs `face.pose`'s sign convention pinned against footage
+  similarity transform, so source->canonical->target has identical error to
+  source->target in one step; what it buys is that extraction runs *once*. An
+  angled source yields a foreshortened map, so `_pose_confidence` scales the
+  layer from full at 12° of disagreement to nothing at 45°. Magnitude only — the
+  directional term needs `face.pose`'s sign convention pinned against footage
   first, and applied backwards it would attenuate the good half of the face. A
-  pack without `pose` gets **full** confidence, never zero — a capability gap
-  must not become a silent behaviour change.
+  pack without `pose` gets **full** confidence, never zero: a capability gap must
+  not become a silent behaviour change.
 - **It does not remove texture swimming**, but pose confidence is the one lever
   against it that is not "turn the strength down". The map's content is fixed, so
-  there is no content flicker; but fixed content warped by a per-frame affine
-  slides across the face as the head turns, and that is caused by *correct*
-  landmark motion rather than by noise, so `LandmarkStabilizer` does not address
-  it. Swimming is worst where the pose has moved furthest from the source, which
-  is exactly where the confidence term takes the detail away.
+  there is no content flicker; fixed content warped by a per-frame affine slides
+  across the face as the head turns, caused by *correct* landmark motion rather
+  than by noise, so `LandmarkStabilizer` does not address it. Swimming is worst
+  where pose has moved furthest from the source — exactly where the confidence
+  term takes the detail away.
+
+Full session record, with every table: docs/TEXTURE_PIPELINE.md §15.
 
 ### Realism knobs (`FaceSwapConfig`)
 | Field | Default | Effect |

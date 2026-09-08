@@ -1446,3 +1446,251 @@ decision. Everything here is closed unless the evidence behind it changes.
 - **Poisson / gradient-domain seam blending.** The textbook answer, already
   rejected in this codebase: it pulses frame to frame, trading failure mode 2
   for failure mode 3.
+
+
+## 15. The 2026-09-07 session, as recorded in CLAUDE.md
+
+Moved here from CLAUDE.md when that file hit its size limit. It overlaps
+§6.5, §6.7 and §6.8 above and is kept verbatim rather than merged, because
+it is the session's own account and the two were written independently.
+
+The layer was then run on a real still and the freckles that are obvious in the
+source did not appear in the output. Traced on that source — `source/Two`,
+IMG_3745, a 275px freckled face — against the shipped code, and the answer was
+not the donor, not the band, not the picker and not chroma:
+
+    real (target's band)      5.50
+    grain (sensor noise)      2.32     42% of the amplitude
+    reserve 0.3   ->  real^2 - fake^2 = 3.59   -  grain^2 = 5.39   ->  0.00
+    reserve 0.4   ->                    4.52   -            5.39   ->  0.00
+    reserve 0.5   ->                    6.76   -            5.39   ->  1.17
+
+**Headroom came out at exactly zero across the whole documented working range.**
+Two defects behind it, both now fixed:
+
+- **The grain budget was spent twice.** The target's band is skin *and* sensor
+  noise, and `_add_grain` supplies the noise separately in frame space. Aiming
+  detail matching at the *total* therefore amplified the swap's own
+  structureless band until it covered the noise, and then grain added the noise
+  again on top — after which `_texture_headroom` correctly reported nothing
+  left. `_match_detail` now discounts the noise once when reserving, measured on
+  the grayscale band so it is the same convention `_estimate_noise` and
+  `_texture_headroom` use. Without a reserve the stage is bit-identical, so the
+  pre-existing over-parity (matched to skin+noise, then given grain) is
+  untouched and stays an open question.
+- **`texture_strength` was applied twice**, so the delivered amplitude went as
+  its *square*: 0.4 asked detail matching to stand back by 40% and then filled
+  40% of what that freed, delivering 16%. It is spent once now, in the reserve.
+  Below parity the layer spends the whole measured headroom — the reservation
+  is the control, the frame-space measurement is the amount, and
+  `f² + g² + t² = r²` still puts the total exactly at parity. Above 1.0 the
+  diagnostic overshoot keeps multiplying, since past parity there is no
+  reservation left to act through.
+
+Measured on the same source, in one rig, before and after — the added deviation
+in 8-bit units, against a source freckle carrying 12.8:
+
+| strength | before | after |
+|---|---|---|
+| 0.3 | **0.00** | 0.56 |
+| 0.4 | 0.28 | 1.00 |
+| 0.5 | 0.58 | 1.25 |
+| 1.0 | 2.30 | 2.34 |
+
+The fix does its work exactly where the knob is meant to be used and converges
+where the old behaviour already worked.
+
+**A reservation that finds no room now says so**, once, naming both numbers.
+That state — detail matching held back, texture added nothing — leaves the face
+*softer* than with the layer switched off, and it was completely silent: the
+readings carry the zero, but until now only a stream reported readings at all,
+and a still render is precisely where this lands.
+
+**Then the two stages were made to measure the same thing.** With the two fixes
+above, a reserve of 0.2-0.3 still found no room, because the stages were reading
+the same face through three different instruments — pooled per-channel deviation
+against grayscale, the full compositing mask against the skin-weighted one, and
+the whole crop against a centred 160px window. Small differences that together
+left detail matching overshooting its own aim by ~2.5%: nothing at a large
+reserve, and the entire reservation at a small one. **The region was the
+dominant term**, not the mask or the colour convention. When reserving,
+`_match_detail` now measures exactly as `_texture_headroom` will:
+
+| reserve | aim wanted | fake before | fake after | headroom before | after |
+|---|---|---|---|---|---|
+| 0.2 | 5.21 | 5.35 | 5.09 | **0.00** | 1.56 |
+| 0.3 | 5.07 | 5.25 | 4.99 | 0.83 | 1.83 |
+| 0.4 | 4.87 | 5.06 | 4.88 | 1.66 | 2.11 |
+| 0.6 | 4.26 | 4.21 | 4.17 | 3.25 | 3.30 |
+
+**The dead zone is gone and the knob is linear from 0.2 up.** Costs ~1.0ms at
+aligned 128 and ~1.2ms at 256, paid only while the layer is on.
+
+**Chroma was measured and dropped.** Freckles are ~9% of their own ΔE in chroma
+(dL* −3.17 against |chroma| 0.30 at the freckles on IMG_3745, and −3.84/0.39 on a
+second source), so a colour-carrying texture channel would buy almost nothing.
+The whole-skin figure looks far better — chroma 0.58 of luminance — but that is
+measuring uncorrelated chroma *noise*, not freckle signal.
+
+**`texture_contrast` and `texture_relief` do work, and p99 was the wrong way to
+ask.** p99 of the delivered map is ~3.6× its own deviation at every setting,
+which reads as "inert" and is really just an order statistic over a field the
+pore octave dominates by count. Scored at the freckles themselves — mean |map|
+there against mean |map| on plain skin, same pixels every run:
+
+| band | relief | contrast | freckle : plain skin |
+|---|---|---|---|
+| 1.0 | any | any | 5.2 |
+| 2.0 | 0.65 | 1.0 | 10.0 |
+| 2.0 | **0.65** | **1.6** | **13.5** (default) |
+| 2.0 | 0.90 | 1.6 | 23.7 |
+| 2.0 | 0.90 | 2.4 | 28.6 |
+
+Note the first row: **at `texture_band` 1.0 both knobs are completely inert**,
+by construction — there is no mark octave for them to act on. If the BAND slider
+is at the bottom, `texture_relief` and `texture_contrast` do literally nothing.
+And the defaults are conservative: 0.9/2.4 puts twice the contrast into the
+marks, which is now a measured range rather than a guess.
+
+**It is not a freckle layer.** Nothing in it knows what a freckle is — the
+delivered map correlates +0.97 to +0.99 with the source photograph's own band,
+so it carries whatever is in that band. At band 2.0 it keeps pores, freckles,
+moles and fine creases at ~2.5x their source share, wrinkles and scars at ~1.2x,
+and suppresses shading to 0.36x. **The exclusions are of kind, not scale, and
+there are three**: colour (the map is grayscale, so rash and redness do not
+survive and a pimple contributes only its dark rim); anything expression-
+dependent (the map is fixed and warped by a similarity transform with no
+expression term, so a smiling source's crow's foot is painted on whether or not
+the operator is smiling — no band setting fixes this); and three-dimensional
+relief, which arrives carrying the source photograph's light. A pass per skin
+condition would not help, and the colour half of that was measured and
+**closed**: redness is excluded not because the map is grayscale but because it
+is *low-frequency*. A pimple is 58% below the texture band and a rash 87%
+below, so an RGB or per-channel layer on top of this one recovers 8% of a red
+spot and 2% of a rash. Carrying them would mean a low-frequency colour stage —
+the quantity `_match_color` and `_match_illumination` already own, and own in
+order to match the **target** — so it would fight them over the one thing the
+eye reads as skin tone. See docs/TEXTURE_PIPELINE.md §6.7 and §6.8.
+
+**Off by default, and still never judged on footage — but the knob now means
+what it says.** 0.5 is the place to start. A/B with `tools/realism.py --host ...
+texture_strength=0.5`, then `texture_band`, `texture_relief` and
+`texture_contrast` one at a time — they are separately switchable precisely so
+one cannot be blamed for another's artefact.
+
+**`texture_strength` reaches 2.0 over the API, and the desktop slider does
+not.** Above 1.0 deliberately exceeds measured parity. It is not a shipping
+value; it exists because separating "the map is weak" from "the budget is small"
+otherwise needs a code change mid-session. Run it once at 2.0: if the marks
+appear, the map is fine and the budget was the problem; if they stay soft, look
+at the `Texture source:` line, which now reports the chosen photograph's own
+pore and mark deviations alongside its face size.
+
+**Subsurface scatter is built and off** (`diffuse_strength`). Real skin is
+translucent: light enters, scatters through a millimetre or two and leaves
+somewhere slightly else, softening the *shading* while the texture on top stays
+sharp. A generated face has none of that and reads **hard** — a different
+complaint from plastic, in a different band, which `texture_strength` does not
+answer. It runs in aligned space immediately before `_match_color` so the colour
+stages can still reconcile it, on the L channel only, with feature exclusions
+built from `face.kps` (not the 106 landmarks, whose layout varies by pack) and
+feathered, since an unfeathered exclusion is a disc of "sharp" in softened skin.
+
+Two things about it that look wrong and are not. The blur does attenuate part of
+the texture band on its way past — but `_match_detail` runs *after* it and scales
+that band back against the real crop, so what scatter removes from texture is
+restored and what it removes from shading stays out. And the LAB round trip was
+kept rather than replaced by the cheaper monochrome-delta trick `_add_grain`
+uses: measured at 256, that variant is 2.29ms against 2.41ms — 5% — and drifts
+chroma three times as far.
+
+**Re-examining the CPU work found ~15ms a frame of waste, which was a better
+answer than moving anything to the GPU.** One LAB conversion now serves both
+shading stages instead of one each (a round trip is 1.9ms at 256, more than
+scatter's own work); the scatter feature weight is built at a quarter resolution
+since it is a smooth mask whose blur was running at sixteen times the pixels it
+needed; grain reuses a cached noise tile at a random offset rather than calling
+`np.random.normal` at region size every frame; and `_estimate_noise` bounds its
+sample *before* the colour conversion and Laplacian rather than striding the
+result afterwards. `_add_grain` also moved to `cv2` ops from numpy broadcasting,
+which `_paste` had already spelled out for the same reason. Net: scatter's
+marginal cost 3.18ms -> 0.07ms at 256, grain at a 500px region ~15ms -> 2.83ms.
+
+**The costs quoted for both new layers are laptop-CPU measurements, and the pod
+will print its own.** A GPU does not touch either of them — the models are ONNX
+on the card, the compositor is OpenCV on the CPU — so renting a faster card does
+not speed them up; but a pod's CPU is not this one, and the whole compositor
+bucket has already been recorded at ~20ms on an L4 against ~10.3ms on a 4090.
+Locally: scatter costs 0.07ms marginal at aligned 256 with colour matching on
+(3.18ms in isolation, before the conversion was shared); texture 1.01ms on a
+101px face and 7.16ms on a 460px one. Both are their
+own line in the latency report, so **one stream on the pod replaces all of
+that**. Combined they are ~7ms with a large face, which `optimal`'s 50ms
+absorbs comfortably; treat `production`'s 33ms as a question for the report rather than a
+prediction. Judge realism at `optimal` either way.
+
+**The seam came first.** A live run reported the swap as "very noticeable, like
+the face pasted on target" — failure mode 2, seen rather than measured, and the
+thing the eye finds before it finds texture. Three causes were arithmetic rather
+than hypothesis, and two are fixed:
+
+- **The transition was ~1.4% of the face's width.** Both feathers were fractions
+  of *their own space* and both spaces are bigger than the face: 5% of a 256
+  aligned crop lands as 0.91px on a 101px face, and the frame-space blur was 1%
+  of the region. Neither constant was wrong alone; nothing was looking at the
+  product. `mask_feather` now measures against the face's own extent — the only
+  length the eye compares against — and the ROI pad grows with it, since a blur
+  wider than its padding reflects off the border and never reaches zero.
+  Measured on a 100px face: **5px → 10px** at the new default.
+- **The 50%-alpha line sat outside the face.** `_HULL_EXPAND` grows the hull 10%
+  radially *before* the blur, putting the midpoint of the transition on neck at
+  the chin and hair at the temples — exactly where the material either side
+  differs most. `mask_erode` pulls it back onto skin first. Deliberately not
+  "extend the mask": growing *coverage* puts swapped skin where hair should be,
+  which is the worse tell.
+- **A convex hull has no concave points** and so cannot follow a jawline at any
+  expansion. Not yet addressed — phase A3, held back deliberately so it is not
+  confounded with the two changes above.
+
+The colour deadband went with them: `_COLOR_FLOOR` was 4.0, so a sub-4-unit LAB
+mean difference got **zero** global correction and a 10-unit one only half. The
+anti-snapping property that floor was protecting is delivered by the *ramp*, so
+it only has to clear estimator noise — now 1.5, with the range 12.0 → 8.0.
+
+**`compare_frames.py` said there was no seam.** It reported gradient 1.028 and
+"no seam detected" on the footage in question, because it measures gradient
+*magnitude* — a texture statistic that a 3-unit step over two pixels barely
+moves — and divides by the ring *outside* the mask, which contains hair. It now
+reports **`seam_excess`**: the LAB step across the boundary in the output, less
+the step the untouched input already had at the same rings, so it measures what
+the composite *added*. Medians, and blurred first, so grain and hair do not
+register as a seam. `seam_ratio` is retained and demoted.
+
+Measured cost of the texture layer on CPU: **0.90ms** per frame on a 101px face,
+**7.49ms** on a 460px one — it scales with face size, so at the `production`
+preset with an operator close to the camera it is not free. Extraction is 28.2ms
+once per source, off the live path. The headroom statistics are taken over a
+bounded 160px window rather than the whole region: measuring every pixel of a
+500px face cost **16.1ms**, more than the rest of the frame, and was paid even
+when the answer was "no headroom, add nothing".
+
+Two things it deliberately does **not** do, both recorded rather than forgotten:
+
+- **It does not correct pose — it withdraws instead.** Canonical space is a
+  similarity transform, so composing source->canonical->target has identical
+  error to source->target in one step. What canonical space buys is that
+  extraction runs *once* — the caching, not the accuracy. An angled source
+  yields a foreshortened map, so `_pose_confidence` scales the layer down from
+  full at 12° of disagreement with the source photograph to nothing at 45°.
+  Magnitude only: the directional term (it is the cheek turning *away* whose
+  pores stretch) needs `face.pose`'s sign convention pinned against footage
+  first, and applied backwards it would attenuate the good half of the face. A
+  pack without `pose` gets **full** confidence, never zero — a capability gap
+  must not become a silent behaviour change.
+- **It does not remove texture swimming**, but pose confidence is the one lever
+  against it that is not "turn the strength down". The map's content is fixed, so
+  there is no content flicker; but fixed content warped by a per-frame affine
+  slides across the face as the head turns, and that is caused by *correct*
+  landmark motion rather than by noise, so `LandmarkStabilizer` does not address
+  it. Swimming is worst where the pose has moved furthest from the source, which
+  is exactly where the confidence term takes the detail away.

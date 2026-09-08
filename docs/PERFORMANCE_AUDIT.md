@@ -410,3 +410,344 @@ the individual `cv2` calls at the sizes the profile says they run at. That order
 matters: profile first to find the stage, then probe the stage to find the
 operation. Guessing which `cv2` call is expensive is how the noise generator
 survived for as long as it did.
+
+
+## 11. The measurement history, moved out of CLAUDE.md
+
+These sections lived in CLAUDE.md until it hit its size limit. They are the
+working-out behind the headline numbers that file still carries: what each
+speed lever was actually worth, whether restoration earns its cost on a
+webcam-sized face, the transport diagnosis, and why restoration cost 110ms.
+
+### What the levers are actually worth (same session, same clip)
+
+Read the **frames processed per run**, not the p95 column. `LatencyBudget` was
+never reset between streams, so each report covered every frame since the
+process started (1018, 4399, 7740, 8781, 9746, 12775) and every p95 was
+diluted by its predecessors — a run with restoration *off* still reported a
+`restore` percentile, because those were the baseline's frames. Fixed now
+(`LatencyBudget.reset()`, called from `_run_stream_impl`), but every sweep
+taken before that fix has to be read this way.
+
+| config | frames in its 60s | ms/frame |
+|---|---|---|
+| baseline | 1018 | 58.9 |
+| **no restoration** | 3381 | **17.7** |
+| **`restore_min_face=200`** | 3341 | **18.0** |
+| `aligned_size=128` | 1041 | 57.6 |
+| hyperswap_1a_256 | 965 | 62.2 |
+| hyperswap + no restoration | 3029 | 19.8 |
+
+**Restoration off is 3.3x, and it HOLDS the deadline** — the first `[HOLDS]`
+verdict this project has produced. `restore_min_face` lands on the same number,
+which is the cross-check it was built for: the shippable, config-level lever
+reaches the same floor as switching the stage off wholesale.
+
+Two questions closed, both negative. **`aligned_size` is not the cost** — 128
+against 256 changes nothing. **hyperswap is slightly worse, not better**: 62.2
+against 58.9, and 19.8 against 17.7 with restoration off. The 256px swap costs
+2-3ms and buys back *nothing* in restoration time, so on speed grounds it is
+just a bigger swap. Its appearance remains unjudged.
+
+### Does restoration actually help a 101px face?
+
+Measured on the recorded webcam clip, 24 frame pairs at identical indices,
+restoration off against CodeFormer at 512:
+
+| `tools/compare_frames.py` (ideal = 1.00) | off | CodeFormer 512 | change |
+|---|---|---|---|
+| high-frequency detail, face / frame | 0.584 | 0.614 | **+0.030** |
+| sensor noise, face / frame | 1.500 | 1.500 | **+0.000** |
+| gradient at mask edge | 1.028 | 1.038 | +0.010 |
+
+**29.4ms buys +0.03 on the one metric it moves at all.** The face sits 0.42
+short of matching the frame's detail; restoration closes 7% of that gap and
+leaves noise and seam unchanged to three decimals. Both configurations produce
+the same verdict lines — "softer than the frame", "no seam detected", "motion
+blur consistent".
+
+That is what the geometry predicts. 86% of what CodeFormer produces is
+discarded at `compositor.py:515`, one warp after it is created, so the stage
+cannot move the metric much and does not.
+
+**What this does not cover, and should not be read as covering.** These are
+per-frame image statistics over 24 frames. They say nothing about **temporal**
+behaviour, and shimmer between frames is a large part of what reads as AI. They
+are also not a person looking at a face. Strong evidence, not proof.
+
+The noise row reads 1.50x in **both** configurations, so it is not caused by
+restoration. It is also not necessarily a defect: this clip was recorded in
+poor light, and the source face is fair-complexioned and well lit against a
+dark-complexioned, under-lit, visibly noisy target. That is the hardest case
+for colour matching and a plausible cause on its own. Re-measure on
+better-matched footage before treating grain matching as overshooting.
+
+### Restoration models, benchmarked in isolation (RTX 4090)
+
+Raw inference only — 100 runs, random input, no compositing:
+
+| model | crop | inference | file |
+|---|---|---|---|
+| codeformer | 512 | 29.4ms | 377 MB |
+| gpen_bfr_512 | 512 | 37.5ms | 284 MB |
+| **gpen_bfr_256** | **256** | **5.4ms** | **76 MB** |
+
+Note which way `gpen_bfr_512` falls: **slower** than CodeFormer at the same
+resolution. The saving is entirely **resolution**, not architecture. GPEN is
+not a lighter model; 256 is simply a quarter of the pixels.
+
+**`gpen_bfr_256` has now run in the pipeline** (2026-09-05, RTX 4090, 2267
+frames): `restore` p50 **7.7ms**, inside a 25.9ms frame against a 66.7ms
+deadline. The 5.4ms isolated figure was honest — compositing adds ~2.3ms of warp
+around it — and the ~27ms whole-frame estimate was pessimistic by nearly half.
+It still **has not been judged on footage**, which is the part that decides
+whether it belongs. Both GPEN files are on the volume at `/workspace/models/`.
+
+Why 256 is the interesting number rather than "off": restoring at 512 and
+warping down to a 128-192 aligned space is *supersampling*, and some of that
+cost buys antialiasing and stability rather than nothing. At 256 into a 192
+aligned space the supersampling margin survives, along with all the
+low-frequency work — tone, structure, artifact cleanup — that the downsample
+does not destroy. What is given up is the 512-to-256 octave, which is the one
+the final resize deletes anyway. It also has **no fidelity weight**: GPEN takes
+one input, so `enhancer_weight` would stop meaning anything and only
+`enhance_strength` would remain.
+
+### The bottleneck has moved to the transport
+
+With restoration at 256 the frame is ~27ms against a 50ms deadline, and the
+reported symptom changed shape with it: **the stutter went away and the lag did
+not**. That is the diagnosis. Stutter is throughput — frames arriving faster
+than they can be processed. Lag is latency — and halving the compute did not
+move it, so compute was not what was holding it.
+
+The chain, end to end, with what each part costs:
+
+    webcam capture
+      -> JPEG encode (desktop)
+      -> UPLINK          ~30 KB/frame, ~4.8 Mbps at 640x360 q70 @20fps
+      -> inbound queue   was 10 deep = 500ms of pure latency
+      -> process         ~27ms                    <- no longer the problem
+      -> JPEG encode (pod)
+      -> DOWNLINK
+      -> jitter buffer   started at 400ms, adapted slowly
+      -> decode -> display
+
+**None of this was visible.** `RTTTracker` computed true glass-to-glass latency
+from a capture timestamp that rides with every frame, and had done all along —
+nothing displayed it, logged it to the UI, or reported it. "It feels sluggish"
+could not become "RTT is 210ms, the buffer adds 60, the pipeline uses 27".
+
+Fixed, in order of how much they were costing:
+
+- **The readout exists.** `Bridge.latencyText` publishes RTT p50/p95, buffer
+  depth and uplink Mbps every two seconds, shown top-right in the viewport
+  beside the other badges — never drawn on the frame, for the usual reason.
+  Read it against the pipeline's own per-stage report: **the difference between
+  the two is network and encode**, and on a remote pod that is most of it.
+- **The inbound queue dropped the wrong frame.** On a full queue the handler
+  refused the *arriving* frame and kept the backlog, so under pressure the
+  pipeline chewed through stale frames while discarding the only current one —
+  the face lagged by the whole queue depth and stayed there. It now evicts the
+  oldest. Depth went 10 -> 2: anything waiting there is a frame the operator
+  has already moved past.
+- **The playout buffer started at 400ms** and converged slowly with one
+  symmetric alpha, so even a nearby pod felt heavily delayed for the first
+  seconds — exactly when an impression forms. Now 120ms initial, a 50ms floor
+  (one frame interval at 20fps rather than 80ms), and **asymmetric** smoothing:
+  rise fast because a late buffer glitches visibly, fall slow because an early
+  one underruns. One alpha has to be slow in a direction; 0.2 was slow in both.
+
+**What is still only a hypothesis: the uplink.** The desktop sends a JPEG per
+captured frame, ~4.8 Mbps at the `optimal` preset, and receives about the same
+back. Home connections are usually asymmetric with far less upstream. A
+saturated uplink queues frames in the OS send buffer, which reads as **latency
+while throughput still looks healthy** — the exact reported symptom. The
+readout now carries the number; the cheap test is to switch to `fast`
+(480x270 q60, ~1.4 Mbps) and see whether latency falls by far more than the
+~10ms of compute that saves. If it does, the answer is encoding, not the GPU.
+
+**The term that dominated everything: distance — and it is what the move to
+Vast was for.** The pod was `EU-RO-1`, Romania, against an operator in West
+Africa: a physical floor of roughly 80-120ms round trip at best and typically
+worse.
+
+The obvious fix was a nearer RunPod datacenter, and it does not exist.
+Per-datacenter stock, queried directly: **EU-FR-1 carries no eligible GPU at
+all**, EU-NL-1 has a single L40S, and RunPod has fifty datacenters and **none
+in the UK**. EU-RO-1 was not inertia — it was the only European datacenter
+holding 4090s.
+
+Vast has verified 4090s in the UK at $0.31/hr, cheaper than the Romanian card
+they replace, on 885 MB/s uplinks. See [docs/VAST_MIGRATION.md](docs/VAST_MIGRATION.md).
+
+**What is still unmeasured is the RTT itself.** Everything above is a proxy for
+it. The readout exists; point it at a UK instance and read it before believing
+any of this.
+
+**The standing conclusion: stop optimising the pipeline for latency.** There is
+~23ms of headroom under the deadline and the felt delay is dominated by terms
+the GPU does not touch. Further compute work should be justified by the readout
+showing compute as the largest term, which it currently is not.
+
+### Why 110ms: restoration ignores how big the face is
+
+**The dominant cost is spent on interpolated data.** In the measured session the
+face was **101x129 px** in a 640x360 frame. The chain it went through:
+
+    face in frame          101 x 129   <- the only real information
+    swap native            128 x 128   <- inswapper_128 output, the ceiling
+    aligned space          256 x 256   <- follows face size, has a floor
+    FFHQ restore crop      512 x 512   <- ALWAYS 512, regardless
+
+`CROP_SIZE = 512` is hard-coded through `_ffhq_geometry` and `_build_ffhq_crop`
+(`compositor.py:496`, `:524`), because CodeFormer is trained on FFHQ 512 crops.
+So a 101px face is upsampled about 20x in pixel count, the heaviest model in
+the pipeline runs on the result, and the output is squeezed back into a 101px
+hole. Conv cost scales with pixel count, so this is roughly **4x the compute of
+restoring at 256, and 16x of 128** — spent reconstructing detail that was never
+in the source.
+
+**The codebase already holds the correct principle and does not apply it here.**
+`_aligned_size` (`compositor.py:373`) says the working resolution "follows how
+many frame pixels the face actually covers ... and, more importantly, is not
+upsampled to a detail level their webcam never captured." That reasoning is
+right, and it governs a stage costing a few milliseconds while the 110ms stage
+ignores it entirely.
+
+**This is the largest single lever available, and larger than fp16, TensorRT and
+a 4090 combined.** Options, cheapest first:
+
+1. **Skip restoration below a face-size threshold.** Config-level, no new
+   model. The question it rests on is a footage question, not a latency one:
+   does 512-space restoration visibly improve a 101px face whose swap was
+   generated at 128? Test with `--debug-frames` before assuming either answer.
+2. **Restore every Nth frame**, letting `temporal_alpha`'s aligned-pixel EMA
+   carry the gap. Previously declined as too risky to what the operator sees;
+   that was decided before knowing restoration is 75% of the frame.
+3. **A restoration model that accepts a smaller input**, or a re-export of
+   CodeFormer at 256. Changes what the output looks like, so it is an A/B, not
+   a swap.
+
+**Option 3 is closed, and option 1 is the live one.** `codeformer.onnx`
+declares:
+
+    INPUT  input   [1, 3, 512, 512]   tensor(float)
+    INPUT  weight  []                 tensor(double)
+    OUTPUT output  [1, 3, 512, 512]
+
+Static and square. So `restore_size` cannot make this model restore at 256 —
+`Enhancer.crop_size` warns once and holds at 512, which is the declining path
+working as designed rather than a bug. **Restoring smaller needs a re-export,
+not a config change.** `restore_min_face` is therefore the only config-level
+lever against the 39.5ms, and it needs no new model because skipping is free.
+
+The general lesson is cheaper than the sweep that would have found it: **read a
+model's declared input shape before sweeping a shape lever.** Five seconds of
+`InferenceSession(...).get_inputs()` replaced a paid measurement run.
+
+`restore_size` and `restore_min_face` are config fields, on `set_realism`, the
+CLI, the env and the sweep. Two properties matter:
+
+- **`restore_size` is a request, and the model answers it.**
+  `_spatial_size` reads the ONNX input's declared shape at load;
+  `Enhancer.crop_size` honours a fixed export over the config and warns **once**
+  rather than throwing per frame on the live path. So option 3's real question —
+  *is facefusion's `codeformer.onnx` exported with dynamic spatial dims?* — is
+  answered by one line of the pod's startup log, and a `restore_256` run whose
+  `restore` equals the baseline exactly is what "no, it is fixed" looks like in
+  the sweep. It is not a lever that quietly does nothing.
+- **The seam is a fraction of the crop, not a pixel count.** `_FFHQ_ERODE` and
+  `_FFHQ_FEATHER` reproduce the old 5px erode and 6.0 sigma exactly at 512, so
+  nothing changes at the default, and a 256 crop gets the same *seam* rather
+  than twice as hard an edge. Otherwise a resolution A/B would also be a
+  feathering A/B and neither would be readable.
+
+`_ffhq_geometry` at 256 is exactly half the matrix it is at 512 — the framing is
+identical, only the sampling rate changes — so this is a resolution comparison
+and nothing else. Both default to current behaviour: 512, never skip.
+
+Note what is *not* the problem, so it does not get optimised by mistake:
+transfers are trivial (a 512x512x3 fp32 tensor is 3MB, ~0.1ms over PCIe 4.0,
+even six round trips are under 2ms), and the Python layer does not appear in
+the measurement at all.
+
+
+## 12. The L4 session's own plan, superseded
+
+Kept because the *lesson* survived the numbers: the reasoning about
+where time goes held, and every prediction of how much a lever would
+buy did not. hyperswap has since been run (62.2ms, slightly worse than
+inswapper), `no_restore` has been run, and the 4090 figures in §11
+replace the estimates below.
+
+### As written after the L4 session
+
+- **The first stream after a pipeline start pays model warm-up**, tens of
+  seconds, inside its own window. A 40s capture produced zero frames for this
+  reason and looked like a broken config. The sweep hides this with a discarded
+  warm-up pass; anything else driving the stream needs its own.
+- **Nothing can be copied off the pod.** `orchestrator.py push` is local->pod
+  only, port 9000 is the only opening, and the SSH proxy carries no SFTP — so a
+  45 KB montage of the comparison frames could not be brought home. An
+  `orchestrator.py pull` over the same WebSocket path `push` already uses is
+  what makes visual review routine instead of impossible.
+- **`orchestrator.py run` used `PATH=... <cmd>`**, which binds only to the
+  first word of a line, so the second half of any `&&` chain ran under
+  `/usr/bin/python`. Now `export PATH=... && <cmd>`.
+
+**Settled by this:**
+
+- Every model is confirmed on `CUDAExecutionProvider`. No silent CPU fallback.
+- **`cuda_graphs` and `cuda_streams` measured flat** (144.4 / 146.1ms — noise).
+  A 110ms model is not waiting on kernel launch overhead. Both can be dropped.
+- **Numba is closed.** The whole compositor is ~20ms; making it free still
+  leaves 126ms. Argued against on reasoning before, now on a number.
+- `fp16` and `trt` **never ran** — no converted weights existed, and `trt_gpus`
+  correctly declined an engine build on an L4.
+
+**hyperswap has never been run.** Every measurement used the default
+`inswapper_128`; the weights are on the pod but unused. It matters for speed,
+not just looks: hyperswap is 256px native against inswapper's 128, and its
+profile asks for *less* restoration (`enhance_strength` 0.5 vs 0.7) because the
+swap needs less. A bigger swap that buys a cheaper restore may be a net win, or
+may just be a bigger swap — the sweep now covers both.
+
+**The first run of the next session should be `no_restore`.** It bounds
+everything: whatever remains with restoration off is what no amount of work on
+restoration can remove. `tools/sweep_levers.py` now leads with it, plus
+`aligned_128`, `hyperswap` and `hyperswap+no_restore`.
+
+**Continue from [docs/PENDING_WORK.md](docs/PENDING_WORK.md) §2b.0**, in order:
+
+1. **Convert fp16 on the pod** — the only untested lever aimed at the 110ms:
+   `orchestrator.py run "python tools/convert_fp16.py /workspace/models/codeformer.onnx"`
+   (needs `pip install onnx onnxconverter-common` there first). Then re-sweep.
+2. **Judge it on footage**, not latency alone — restoration is what decides
+   whether output reads as a call or as AI.
+3. **Measure again on a 4090.** Estimated ~72ms total, so a real 2x but still
+   short of 50ms alone; **4090 + fp16** is the combination that plausibly
+   holds. Needs `terminate` then `start` — `resume` cannot move a pinned pod.
+4. **Reconsider restoration decimation.** Declined earlier as too risky to what
+   the operator sees; that was decided before knowing restoration is
+   three-quarters of the frame.
+5. Only then the XSeg overlap and pipelining — both are bounded by the ~20ms
+   that is *not* restoration.
+
+Estimates above are labelled as such. This session's lesson was that the
+reasoning about *where* time goes held, and the predictions of *how much* each
+lever would buy did not survive contact with a measurement.
+
+**Frame rate, estimated from the measured L4 numbers.** GPU stages scale with
+the card; the ~20ms of CPU compositing and encode does not, which is what sets
+the floor:
+
+| | restore | detect | CPU | total | fps |
+|---|---|---|---|---|---|
+| L4 (measured) | 110ms | 16ms | ~20ms | 146ms | **~7** |
+| RTX 4090 (est.) | ~44ms | ~6ms | ~20ms | ~70ms | **~14** |
+| RTX 4090 + fp16 (est.) | ~24ms | ~6ms | ~20ms | ~50ms | **~20** |
+
+So a 4090 roughly doubles the frame rate and still misses 20fps on its own.
+**4090 + fp16 is the first combination that plausibly holds the `optimal`
+preset**, and it lands right on the deadline rather than comfortably inside it.
