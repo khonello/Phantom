@@ -183,6 +183,36 @@ class FaceSwapConfig:
     restore_min_face: int = 0
     color_strength: float = 1.0     # scales the LAB colour transfer
 
+    # How much of the source's own skin tone to keep, as a fraction of the
+    # measured a/b difference and bounded by `_COMPLEXION_RESIDUAL`. 0.0 is the
+    # full correction that has always shipped.
+    #
+    # Colour matching moves the swapped face onto the *target's* complexion,
+    # and complexion is an identity cue — this is most of what "it doesn't
+    # quite look like me" is in colour terms. Luminance is still corrected in
+    # full, because a brightness step at the jaw is the most visible seam
+    # there is; only chroma is held back, and only by a bounded amount that
+    # gives way entirely as the two complexions diverge. See
+    # `FaceCompositor._complexion_scale`.
+    complexion_keep: float = 0.0
+
+    # How several source photographs are combined into the one identity vector
+    # a swapper is conditioned on. See `FaceDatabase._average_faces`.
+    #
+    #   mean      flat average, which is what shipped before this existed
+    #   weighted  det_score * cos^2(yaw)  <- default
+    #   norm      ||embedding|| * cos^2(yaw), the network's own quality signal
+    #   best      the single highest-scoring photograph, no averaging
+    #   median    geometric median, resistant to an outlier the guards missed
+    #
+    # A field rather than a decision because the question underneath it is open:
+    # averaging is validated for *recognition*, where a robust class centre is
+    # exactly right, and this pipeline wants the vector that makes a generator
+    # produce the most recognisable face — which is not obviously the same
+    # point. Judge it with `tools/identity_probe.py --holdout`, which is the
+    # only non-circular way to score it.
+    source_blend: str = 'weighted'
+
     # Seam. Both are the direct levers on failure mode 2 and both were reported
     # wrong on footage -- "like the face pasted on target" -- so they are knobs
     # rather than constants: this is exactly the kind of question only an A/B on
@@ -546,6 +576,8 @@ class FaceSwapConfig:
             'temporal_alpha': self.temporal_alpha,
             'color_correction': self.color_correction,
             'color_strength': self.color_strength,
+            'complexion_keep': self.complexion_keep,
+            'source_blend': self.source_blend,
             'mask_feather': self.mask_feather,
             'mask_erode': self.mask_erode,
             'mask_shape_growth': self.mask_shape_growth,

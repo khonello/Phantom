@@ -68,7 +68,8 @@ _LEVERS = (
     ('id_swap', 'id_restore', 'restoration',
      'enhance_strength / enhancer_model / restore_min_face'),
     ('id_restore', 'id_final', 'colour, detail, texture',
-     'color_strength — the target\'s complexion is an identity cue'),
+     'complexion_keep first, then color_strength — the colour match moves the '
+     'face onto the target\'s skin tone, and tone is an identity cue'),
     ('id_final', 'id_out', 'mask and paste',
      'mask_erode / mask_feather / mask_shape_growth'),
 )
@@ -144,39 +145,75 @@ class Rig:
         self.compositor = FaceCompositor(config, Enhancer(config), self.masker)
         self.compositor.identity = IdentityProbe(self.detector)
         self.probe = IdentityProbe(self.detector)
+        self._announced = False
 
-    def load_source(self, paths: List[str]) -> Any:
+    def load_source(self, paths: List[str], holdout: bool = False) -> Any:
         """
         Build the source identity exactly as the pipeline does.
 
         Through `review_sources` and `get_source_face` rather than a bare
-        detection, so the guards, the outlier check and the pose-weighted
-        average are all in the loop — a sweep that skipped them would be
-        measuring a different identity from the one a real job uses.
+        detection, so the guards, the outlier check and the blending strategy
+        are all in the loop — a sweep that skipped them would be measuring a
+        different identity from the one a real job uses.
+
+        **`holdout` is what makes `source_blend` measurable at all.** The
+        readings score the output against `compositor.source_identity`, and if
+        that is the identity the strategy under test just built, the strategy
+        is grading its own homework: every one of them wins, because every one
+        of them is closest to itself. Holding one photograph out and scoring
+        against *that* gives an independent yardstick — the same leave-one-out
+        structure `_review_identity` already uses to spot an intruder.
 
         Args:
             paths: Source image paths
+            holdout: Build the identity from all but the last photograph, and
+                score against the one left out. Needs at least two
 
         Returns:
-            The averaged source face
+            The source face the swapper will be conditioned on
 
         Raises:
             SystemExit: If no usable source survives the guards
         """
+        # A sweep over `source_blend` calls this once per configuration, and
+        # the refusals and the holdout line are properties of the *photographs*
+        # rather than of the configuration — so they are said once.
+        announce = not self._announced
+        self._announced = True
+
         review = self.database.review_sources(paths)
         for path, reason in review.rejected:
-            print('  refused {}: {} — {}'.format(
-                os.path.basename(path), reason, review.messages.get(path, '')))
+            if announce:
+                print('  refused {}: {} — {}'.format(
+                    os.path.basename(path), reason,
+                    review.messages.get(path, '')))
 
         if not review.usable:
             raise SystemExit('no usable source image')
 
-        face = self.database.get_source_face(review.accepted)
+        accepted = list(review.accepted)
+        reference = None
+
+        if holdout:
+            if len(accepted) < 2:
+                raise SystemExit(
+                    '--holdout needs at least two accepted source images')
+            held = accepted.pop()
+            reference = self.database.get_source_face([held])
+            if reference is None:
+                raise SystemExit('the held-out image produced no embedding')
+            if announce:
+                print('  holding out {} as the yardstick; building the '
+                      'identity from the other {}\n'.format(
+                          os.path.basename(held), len(accepted)))
+
+        face = self.database.get_source_face(accepted)
         if face is None:
             raise SystemExit('source images produced no embedding')
 
         self.compositor.source_identity = getattr(
-            face, 'normed_embedding', None)
+            reference if reference is not None else face,
+            'normed_embedding', None)
         return face
 
     def run(self, source: Any, frame: np.ndarray) -> Tuple[
@@ -278,6 +315,11 @@ def main() -> int:
     parser.add_argument('--save-frames', metavar='DIR',
                         help='write each configuration\'s output for looking '
                              'at, which is the half of this a number cannot do')
+    parser.add_argument('--holdout', action='store_true',
+                        help='build the identity from all but the last source '
+                             'image and score against the one left out. '
+                             'Required for judging --sweep source_blend, which '
+                             'otherwise grades its own homework')
     parser.add_argument('--json', metavar='PATH', help='write the readings')
     parser.add_argument('--execution-provider', default=None,
                         help='override the execution provider (e.g. cpu)')
@@ -300,7 +342,7 @@ def main() -> int:
     print('Target: {}\n'.format(os.path.basename(args.target)))
 
     rig = Rig(config)
-    source = rig.load_source(list(args.source))
+    source = rig.load_source(list(args.source), holdout=args.holdout)
 
     sweeps = _parse_sweep(args.sweep)
     if sweeps:
@@ -333,6 +375,12 @@ def main() -> int:
             config.apply_model_profile(settings['swapper_model'])
             for field, value in settings.items():
                 config.set(field, value)
+
+        # The identity is built when photographs are accepted, not per frame,
+        # so a sweep over how they are combined has to rebuild it. Cheap: the
+        # detections are cached by path, and only the averaging is redone.
+        if 'source_blend' in settings:
+            source = rig.load_source(list(args.source), holdout=args.holdout)
 
         output, readings = rig.run(source, frame)
         _print_row(label, readings, width)

@@ -277,6 +277,29 @@ class Readings:
                     'stage reaches parity on its own and leaves the texture '
                     'layer a rounding error to spend.'.format(reserve['p50']))
 
+        kept = data.get('complexion_kept')
+        if kept is not None:
+            if kept['p95'] <= 1e-6:
+                notes.append(
+                    '  -> complexion_keep had nothing to spend: the swap and '
+                    'the target were already the same skin tone on every '
+                    'frame. The knob is not weak, the two faces simply match.')
+            elif kept.get('share_at_limit', 0.0) > 0.5:
+                notes.append(
+                    '  -> complexion_keep is capped on {:.0f}% of frames at '
+                    '{:.1f} LAB units. The two complexions are far enough '
+                    'apart that the bound, not the knob, is deciding — raising '
+                    'it will not keep more skin tone, it will only start '
+                    'showing a colour step at the jaw.'.format(
+                        kept['share_at_limit'] * 100.0, kept['limit']))
+            else:
+                notes.append(
+                    '  -> complexion_keep left {:.1f} LAB units of the '
+                    'source\'s own skin tone on the face (p50), against a '
+                    '{:.1f} cap. Judge it on footage: ArcFace barely sees skin '
+                    'tone, so id_out will not move much either way.'.format(
+                        kept['p50'], kept['limit']))
+
         notes.extend(Readings._identity_verdicts(data))
 
         headroom = data.get('texture_headroom')

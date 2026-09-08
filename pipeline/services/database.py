@@ -46,6 +46,56 @@ _SHARPNESS_HALF = 400.0
 # canonical crop is downsampling real detail rather than gaining any.
 _SIZE_FULL = 400.0
 
+# How several photographs become one identity vector. See `_blend_weights`, and
+# `config.source_blend` for why this is a field rather than a decision.
+SOURCE_BLENDS = ('mean', 'weighted', 'norm', 'best', 'median')
+
+
+def _geometric_median(
+    vectors: Any,
+    weights: Any,
+    iterations: int = 24,
+    tolerance: float = 1e-7,
+) -> Any:
+    """
+    Weiszfeld's algorithm: the point minimising total distance to the inputs.
+
+    Unlike the mean, which minimises *squared* distance, this is barely moved
+    by one distant point — the property a robust centroid is wanted for. The
+    degenerate case is real and handled: when the iterate lands exactly on an
+    input the distance is zero and the update divides by it, so the loop stops
+    there instead.
+
+    Args:
+        vectors: (n, d) array of embeddings
+        weights: (n,) non-negative weights
+        iterations: Cap on refinement passes
+        tolerance: Movement below which the answer has converged
+
+    Returns:
+        The (d,) median. Not normalised — the caller does that
+    """
+    current = np.average(vectors, axis=0, weights=weights)
+
+    for _ in range(iterations):
+        offsets = vectors - current
+        distances = np.linalg.norm(offsets, axis=1)
+        if float(distances.min()) < tolerance:
+            break
+
+        scale = weights / distances
+        total = float(scale.sum())
+        if total < tolerance:
+            break
+
+        following = (vectors * scale[:, None]).sum(axis=0) / total
+        if float(np.linalg.norm(following - current)) < tolerance:
+            current = following
+            break
+        current = following
+
+    return current
+
 
 def _texture_score(frame: Frame, detection: Detection) -> float:
     """
@@ -567,7 +617,7 @@ class FaceDatabase:
         return None
 
     @staticmethod
-    def _identity_weight(face: Face) -> float:
+    def _identity_weight(face: Face, quality: str = 'det_score') -> float:
         """
         How much this photograph should count toward the averaged identity.
 
@@ -593,12 +643,25 @@ class FaceDatabase:
 
         Args:
             face: A source face
+            quality: Which quality term to use — `det_score` (the detector's
+                confidence) or `norm` (the embedding's own magnitude)
 
         Returns:
             A non-negative weight
         """
-        score = getattr(face, 'det_score', None)
-        weight = 1.0 if score is None else max(0.0, float(score))
+        if quality == 'norm':
+            # The un-normalised embedding's magnitude, which is the network's
+            # own confidence rather than two hand-picked correlates of it.
+            # MagFace is built on this relationship and it holds well enough on
+            # ordinary ArcFace checkpoints to be worth measuring — but "well
+            # enough" is the claim under test, which is why this is a strategy
+            # rather than a replacement for the default.
+            raw = getattr(face, 'embedding', None)
+            weight = 1.0 if raw is None else float(
+                np.linalg.norm(np.asarray(raw, dtype=np.float64)))
+        else:
+            score = getattr(face, 'det_score', None)
+            weight = 1.0 if score is None else max(0.0, float(score))
 
         yaw: Optional[float] = FaceDatabase._pose_yaw(face)
         if yaw is None and getattr(face, 'kps', None) is not None:
@@ -643,20 +706,31 @@ class FaceDatabase:
         if not usable:
             return None
 
-        weights = np.array(
-            [self._identity_weight(f) for f in usable], dtype=np.float64)
-        peak = float(weights.max()) if weights.size else 0.0
-        if peak <= 0.0:
-            weights = np.ones(len(usable), dtype=np.float64)
-        else:
-            weights = np.maximum(weights, peak * self._WEIGHT_FLOOR)
-        weights /= float(weights.sum())
+        blend = str(getattr(self.config, 'source_blend', 'weighted')
+                    if self.config is not None else 'weighted')
+        if blend not in SOURCE_BLENDS:
+            blend = 'weighted'
 
-        normed = np.average(
-            np.array([np.asarray(f.normed_embedding, dtype=np.float64).ravel()
-                      for f in usable]),
-            axis=0, weights=weights,
-        )
+        vectors = np.array(
+            [np.asarray(f.normed_embedding, dtype=np.float64).ravel()
+             for f in usable])
+
+        weights = self._blend_weights(usable, blend)
+
+        if blend == 'median':
+            # The geometric median, which minimises the sum of *distances*
+            # rather than of squared distances. Included so "a robust centroid
+            # is not worth it at this N" is a measurable claim rather than an
+            # opinion: its whole value is a 50% breakdown point, and with three
+            # or four photographs two would have to be bad before it diverges
+            # from the weighted mean — at which point `_review_identity`'s
+            # leave-one-out check has already refused them. Expect it to make
+            # almost no difference here, and to matter if a source ever becomes
+            # a video.
+            normed = _geometric_median(vectors, weights)
+        else:
+            normed = np.average(vectors, axis=0, weights=weights)
+
         norm = float(np.linalg.norm(normed))
         if norm > 0:
             normed = normed / norm
@@ -674,6 +748,54 @@ class FaceDatabase:
             normed_embedding=normed.astype(np.float32),
             embedding=raw,
         )
+
+    def _blend_weights(self, faces: List[Face], blend: str) -> Any:
+        """
+        Per-photograph weights for one blending strategy, summing to 1.
+
+        Args:
+            faces: The usable source faces, in order
+            blend: A key of `SOURCE_BLENDS`
+
+        Returns:
+            float64 weights, normalised
+        """
+        count = len(faces)
+
+        if blend == 'mean':
+            # The flat average this replaced. Kept so the change is reversible
+            # from a config field rather than from git, which is what makes it
+            # comparable on one clip.
+            return np.full(count, 1.0 / count, dtype=np.float64)
+
+        quality = 'norm' if blend == 'norm' else 'det_score'
+        weights = np.array(
+            [self._identity_weight(f, quality) for f in faces],
+            dtype=np.float64)
+
+        peak = float(weights.max()) if weights.size else 0.0
+        if peak <= 0.0:
+            return np.full(count, 1.0 / count, dtype=np.float64)
+
+        if blend == 'best':
+            # One photograph, chosen the way `select_texture_source` chooses
+            # the texture donor — and for a related reason. Averaging is a
+            # low-pass filter on identity: a feature present in two photographs
+            # of five is down-weighted by five halves, so the average is the
+            # most *typical* version of the person. Whether that costs more
+            # than the noise it removes is the question this option exists to
+            # answer.
+            weights = np.zeros(count, dtype=np.float64)
+            weights[int(np.argmax([
+                self._identity_weight(f, quality) for f in faces]))] = 1.0
+            return weights
+
+        # A floor rather than a free hand: the point of accepting several
+        # photographs is that identity is a distributed representation, and
+        # without this one sharp frontal shot reduces the rest to rounding
+        # error — multi-photo averaging switched off by accident.
+        weights = np.maximum(weights, peak * self._WEIGHT_FLOOR)
+        return weights / float(weights.sum())
 
     def save_embedding(self, face: Face, path: str) -> None:
         """

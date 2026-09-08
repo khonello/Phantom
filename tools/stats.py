@@ -124,6 +124,9 @@ def _render(data: Dict[str, Any]) -> List[str]:
     else:
         out.append(_line('mask_shape_growth', growth))
 
+    out.append(_line('complexion_keep', ident.get('complexion_keep')))
+    out.append(_line('source_blend', ident.get('source_blend')))
+
     interval = ident.get('probe_interval') or 0
     out.append(_line('identity_probe', 'off' if not interval
                      else 'every {} frames'.format(interval)))

@@ -31,6 +31,7 @@ from pipeline.logging import emit_status
 from pipeline.api.schema import PRESETS
 from pipeline.services import swapper_models
 from pipeline.services import enhancer_models
+from pipeline.services import database
 
 warnings.filterwarnings('ignore', category=FutureWarning, module='insightface')
 warnings.filterwarnings('ignore', category=UserWarning, module='torchvision')
@@ -164,6 +165,16 @@ def parse_args() -> None:
                         help='extrapolate the source identity away from the target before '
                              'conditioning the swapper (0.0-0.6, 0 feeds the source exactly)',
                         dest='identity_push', type=float, default=_env_float('IDENTITY_PUSH'))
+    program.add_argument('--complexion-keep',
+                        help='keep this fraction of the source\'s own skin tone through '
+                             'colour matching (0.0-1.0, 0 corrects fully); chroma only, '
+                             'and bounded so it gives way as the two complexions diverge',
+                        dest='complexion_keep', type=float,
+                        default=_env_float('COMPLEXION_KEEP'))
+    program.add_argument('--source-blend',
+                        help='how several source photographs become one identity vector',
+                        dest='source_blend', choices=list(database.SOURCE_BLENDS),
+                        default=os.environ.get('SOURCE_BLEND') or None)
     program.add_argument('--identity-probe',
                         help='measure source-to-output identity every Nth frame (0 disables); '
                              'reports as id_* in the REALISM block',
@@ -267,6 +278,8 @@ def parse_args() -> None:
         ('mask_shape_growth', args.mask_shape_growth),
         ('identity_push', args.identity_push),
         ('identity_probe', args.identity_probe),
+        ('complexion_keep', args.complexion_keep),
+        ('source_blend', args.source_blend),
         ('texture_strength', args.texture_strength),
         ('texture_band', args.texture_band),
         ('texture_relief', args.texture_relief),

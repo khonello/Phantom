@@ -38,6 +38,7 @@ from pipeline.services import guards
 from pipeline.services import swapper_models
 from pipeline.services import enhancer_models
 from pipeline.services import face_swapping
+from pipeline.services import database
 from pipeline.services import onnx_session
 from pipeline.services.database import SourceReview
 from pipeline.services.templates import TemplateLibrary
@@ -600,6 +601,8 @@ def handle_get_stats(
             'push': config.identity_push,
             'shape_growth': config.mask_shape_growth,
             'probe_interval': config.identity_probe,
+            'complexion_keep': config.complexion_keep,
+            'source_blend': config.source_blend,
             # A shape-aware model whose contour is being clipped back off is
             # the configuration this whole section exists to make visible.
             'shape_growth_useful': swapper_models.resolve(
@@ -955,6 +958,18 @@ _REALISM_FIELDS: Dict[str, Any] = {
     'restore_min_face': lambda v: max(0, int(v)),
     'temporal_alpha': lambda v: min(1.0, max(0.0, float(v))),
     'color_strength': lambda v: min(1.0, max(0.0, float(v))),
+    # How much of the source's own complexion survives the colour match. Its
+    # real bound is `_COMPLEXION_RESIDUAL`, measured per frame against how far
+    # apart the two skin tones actually are, so this end only has to be a
+    # fraction. Skin tone is an identity cue the colour match spends, and this
+    # is the only knob that buys any of it back.
+    'complexion_keep': lambda v: min(1.0, max(0.0, float(v))),
+    # Takes effect on the next source load, not on the running one: the
+    # identity is built when photographs are accepted. Sweeping it means
+    # re-sending the source, which `tools/identity_probe.py` does per
+    # configuration.
+    'source_blend': (
+        lambda v: str(v) if str(v) in database.SOURCE_BLENDS else None),
     # The two seam levers. Clamped well short of absurd: a feather a quarter of
     # the face wide is not a seam fix, it is a dissolve.
     'mask_feather': lambda v: min(0.25, max(0.0, float(v))),

@@ -1048,6 +1048,13 @@ class ProcessingPipeline:
         if confidence is not None:
             self._readings.record('texture_confidence', confidence)
 
+        kept = self._compositor.last_complexion_kept
+        if kept is not None:
+            self._readings.record(
+                'complexion_kept', kept,
+                limit=self._compositor._COMPLEXION_RESIDUAL,
+            )
+
         # Recorded under their own names rather than one 'identity' reading,
         # because the whole value is in the differences between them: which
         # stage the likeness is lost at is a different question from how much

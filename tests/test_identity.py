@@ -56,7 +56,8 @@ import numpy as np
 from pipeline.config import FaceSwapConfig
 from pipeline.processing import geometry
 from pipeline.services import identity, swapper_models
-from pipeline.services.database import FaceDatabase
+from pipeline.processing.compositor import FaceCompositor
+from pipeline.services.database import SOURCE_BLENDS, FaceDatabase
 from pipeline.services.face_swapping import FaceSwapper, PUSH_MAX
 from pipeline.services.masking import FaceMasker
 
@@ -438,6 +439,148 @@ check('every registered model still declares a template that resolves',
 check('the models that take a bare ArcFace vector declare no converter',
       not swapper_models.resolve('inswapper_128').converter_filename
       and not swapper_models.resolve('hyperswap_1a_256').converter_filename)
+
+
+# ── 6. Keeping some of the source's complexion ────────────────────────────
+print('\nThe colour match may leave some of the source\'s own skin tone')
+
+
+def compositor_for(keep: float) -> FaceCompositor:
+    """A compositor with just `complexion_keep` set."""
+    cfg = FaceSwapConfig()
+    cfg.set('complexion_keep', keep)
+    return FaceCompositor(cfg, MagicMock(available=False), MagicMock())
+
+
+def complexion(keep: float, gap: float) -> float:
+    """The a/b correction multiplier at this keep and this tone difference."""
+    # meanStdDev returns (3, 1) columns; only a/b are read.
+    fake_mean = np.array([[128.0], [128.0], [128.0]])
+    real_mean = np.array([[128.0], [128.0 + gap], [128.0]])
+    return compositor_for(keep)._complexion_scale(fake_mean, real_mean)
+
+
+check('at keep=0 the chroma correction is exactly 1.0, the shipped behaviour',
+      complexion(0.0, 10.0) == 1.0)
+
+off = compositor_for(0.0)
+off._complexion_scale(np.array([[128.0], [128.0], [128.0]]),
+                      np.array([[128.0], [138.0], [128.0]]))
+check('and nothing is recorded, so the reading stays absent rather than zero',
+      off.last_complexion_kept is None)
+
+on = compositor_for(0.4)
+on._complexion_scale(np.array([[128.0], [128.0], [128.0]]),
+                     np.array([[128.0], [132.0], [128.0]]))
+check('what it withheld is published for the readings',
+      on.last_complexion_kept is not None
+      and abs(on.last_complexion_kept - 1.6) < 1e-6,
+      str(on.last_complexion_kept))
+
+# Below the cap the knob is the fraction it says it is.
+scale = complexion(0.4, 4.0)
+check('below the cap, keep=0.4 withholds 40% of the difference',
+      abs(scale - 0.6) < 1e-6, '{:.4f}'.format(scale))
+
+# Above it, the bound takes over and the knob stops mattering.
+wide = complexion(0.4, 40.0)
+withheld = 40.0 * (1.0 - wide)
+check('a large tone gap is capped rather than scaled',
+      abs(withheld - FaceCompositor._COMPLEXION_RESIDUAL) < 1e-3,
+      '{:.2f} LAB units withheld'.format(withheld))
+
+check('the withheld amount never exceeds the cap, at any keep or gap',
+      all(gap * (1.0 - complexion(k, gap))
+          <= FaceCompositor._COMPLEXION_RESIDUAL + 1e-6
+          for k in (0.2, 0.5, 1.0) for gap in (1.0, 5.0, 20.0, 60.0)))
+
+# The failure this guards against: correction giving way as the two faces
+# diverge, rather than leaving a bigger and bigger step.
+scales = [complexion(0.5, gap) for gap in (2.0, 6.0, 12.0, 30.0, 60.0)]
+check('correction returns toward full as the complexions diverge',
+      all(a <= b + 1e-9 for a, b in zip(scales, scales[1:])),
+      str([round(s, 3) for s in scales]))
+
+check('matching tones spend nothing and say so',
+      complexion(0.5, 0.0) == 1.0)
+
+
+# ── 7. Source blending strategies ─────────────────────────────────────────
+print('\nsource_blend chooses how photographs become one identity')
+
+check('every advertised strategy is a real one',
+      set(SOURCE_BLENDS) == {'mean', 'weighted', 'norm', 'best', 'median'})
+
+
+def blended(strategy: str, faces: list):
+    cfg = FaceSwapConfig()
+    cfg.set('source_blend', strategy)
+    return FaceDatabase(MagicMock(), cfg)._average_faces(faces)
+
+
+tilted = [photo(FRONTAL, yaw=0.0), photo(ANGLED, yaw=60.0),
+          photo(ANGLED, yaw=60.0)]
+
+flat_blend = blended('mean', tilted)
+weighted_blend = blended('weighted', tilted)
+check('mean and weighted disagree when the photographs differ in pose',
+      abs(float(np.dot(flat_blend.normed_embedding, FRONTAL))
+          - float(np.dot(weighted_blend.normed_embedding, FRONTAL))) > 1e-3)
+
+check('mean reproduces the flat average exactly',
+      abs(float(np.dot(flat_blend.normed_embedding, FRONTAL))
+          - float(np.dot(
+              blended('mean', tilted).normed_embedding, FRONTAL))) < 1e-12)
+
+best = blended('best', tilted)
+check('best picks one photograph rather than blending',
+      abs(float(np.dot(best.normed_embedding, FRONTAL)) - 1.0) < 1e-6,
+      '{:.4f}'.format(float(np.dot(best.normed_embedding, FRONTAL))))
+
+# `norm` reads the embedding's own magnitude. Give one photo a much larger raw
+# vector and it should dominate, which is the whole claim.
+loud = types.SimpleNamespace(
+    normed_embedding=FRONTAL, embedding=FRONTAL * 40.0, kps=None)
+quiet = types.SimpleNamespace(
+    normed_embedding=ANGLED, embedding=ANGLED * 8.0, kps=None)
+by_norm = blended('norm', [loud, quiet])
+by_score = blended('weighted', [loud, quiet])
+check('norm weights by embedding magnitude, det_score does not',
+      float(np.dot(by_norm.normed_embedding, FRONTAL))
+      > float(np.dot(by_score.normed_embedding, FRONTAL)),
+      'norm {:.3f} vs weighted {:.3f}'.format(
+          float(np.dot(by_norm.normed_embedding, FRONTAL)),
+          float(np.dot(by_score.normed_embedding, FRONTAL))))
+
+# The median's whole purpose: one distant point must move it less than it
+# moves the mean.
+OTHER = unit([0.0, 0.0, 1.0, 0.0])
+cluster = [photo(FRONTAL), photo(FRONTAL), photo(FRONTAL), photo(OTHER)]
+mean_pull = float(np.dot(blended('mean', cluster).normed_embedding, OTHER))
+median_pull = float(np.dot(blended('median', cluster).normed_embedding, OTHER))
+check('the geometric median resists an outlier the mean follows',
+      median_pull < mean_pull,
+      'median {:.3f} < mean {:.3f}'.format(median_pull, mean_pull))
+
+check('the median still lands on the cluster it came from',
+      float(np.dot(blended('median', cluster).normed_embedding, FRONTAL)) > 0.9)
+
+check('an unknown strategy falls back rather than raising',
+      blended('nonsense', tilted) is not None)
+
+check('every strategy returns a unit vector',
+      all(abs(float(np.linalg.norm(
+          blended(s, tilted).normed_embedding)) - 1.0) < 1e-5
+          for s in ('mean', 'weighted', 'norm', 'best', 'median')))
+
+check('every strategy keeps the raw embedding a converter model needs',
+      all(blended(s, tilted).embedding is not None
+          for s in ('mean', 'weighted', 'norm', 'best', 'median')))
+
+check('a single photograph is unchanged by every strategy',
+      all(abs(float(np.dot(
+          blended(s, [photo(FRONTAL)]).normed_embedding, FRONTAL)) - 1.0) < 1e-6
+          for s in ('mean', 'weighted', 'norm', 'best', 'median')))
 
 
 print('\n' + '=' * 70)

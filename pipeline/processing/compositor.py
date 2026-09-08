@@ -125,6 +125,18 @@ class FaceCompositor:
     # Damping on the L channel's standard deviation. Matching L *mean* fixes
     # brightness and matters; forcing L *std* flattens facial contrast.
     _LUMA_STD_DAMP = 0.5
+    # Ceiling on the a/b difference `complexion_keep` may leave uncorrected, in
+    # LAB units of chroma distance. This is the bound that makes the feature
+    # safe rather than the knob: withholding a fixed *fraction* would leave a
+    # step proportional to how different the two people are, which is largest
+    # exactly where it is least affordable.
+    #
+    # 3.0 is a starting point chosen on the design target, not measured. For
+    # scale: `_COLOR_FLOOR` is 1.5 and treats anything under it as estimator
+    # noise, and a just-noticeable chroma difference across a *hard* edge is
+    # around 2.3 — this boundary is feathered and 4:2:0-subsampled, so it
+    # tolerates more. Sweep it against footage before trusting it.
+    _COMPLEXION_RESIDUAL = 3.0
 
     # Illumination matching. A global mean/std shift is correct only when the
     # light is flat; a video call almost never is — there is a window or a lamp
@@ -356,6 +368,13 @@ class FaceCompositor:
         # identical to one whose strength is set too low.
         self.last_texture_confidence: Optional[float] = None
 
+        # How many LAB units of chroma difference the colour match was allowed
+        # to leave on the face, or None when the stage did not run. Published
+        # for the reason `last_texture_headroom` is: a keep that is routinely
+        # zero means the two complexions already agreed and the knob had nothing
+        # to spend, which looks identical to a knob set too low.
+        self.last_complexion_kept: Optional[float] = None
+
         # Per-stage milliseconds for the frame just composited, read by the
         # pipeline's latency budget. Same pattern as `masker.last_coverage`:
         # the stage that measures a thing owns the number, and whoever needs it
@@ -492,6 +511,7 @@ class FaceCompositor:
         self.last_detail_reserve = None
         self.last_texture_headroom = None
         self.last_texture_confidence = None
+        self.last_complexion_kept = None
 
     def reset(self) -> None:
         """Drop temporal state (face lost, source changed, pipeline restart)."""
@@ -1191,6 +1211,8 @@ class FaceCompositor:
             (delta - self._COLOR_FLOOR) / self._COLOR_RANGE, 0.0, 1.0,
         ))
 
+        chroma_scale = self._complexion_scale(fake_mean, real_mean)
+
         result = fake_lab
 
         if global_strength > 0.0:
@@ -1217,15 +1239,89 @@ class FaceCompositor:
                 if channel == 0:
                     ratio = 1.0 + (ratio - 1.0) * self._LUMA_STD_DAMP
 
-                gain[channel] = 1.0 - global_strength + global_strength * ratio
-                offset[channel] = global_strength * (r_mean - f_mean * ratio)
+                # L is corrected in full and a/b may be held back. `chroma_scale`
+                # is exactly 1.0 unless `complexion_keep` is set, and `x * 1.0`
+                # is bit-exact, so the default path is unchanged.
+                strength = (global_strength if channel == 0
+                            else global_strength * chroma_scale)
+
+                gain[channel] = 1.0 - strength + strength * ratio
+                offset[channel] = strength * (r_mean - f_mean * ratio)
 
             result *= gain
             result += offset
 
         return self._match_illumination(
             result, real_lab.astype(np.float32), mask, color_strength,
+            chroma_scale,
         )
+
+    def _complexion_scale(self, fake_mean: Frame, real_mean: Frame) -> float:
+        """
+        How much of the a/b correction to apply, so some source skin tone stays.
+
+        Complexion is an identity cue and `_match_color` spends it: the global
+        mean transfer moves the swapped face onto the *target's* skin tone,
+        which is most of what "it doesn't quite look like me" is in colour
+        terms. It is not a bug — a face whose tone does not match the neck it
+        sits on is failure mode 2 — but the correction is applied to luminance
+        and chroma alike, and those are not equally costly to relax.
+
+        Luminance is corrected in full and always will be: a brightness step at
+        the jaw is the most visible seam there is. Chroma is where the pigment
+        lives, and it is the cheaper channel to leave slightly uncorrected here
+        for a reason specific to this pipeline — every frame is JPEG-encoded at
+        OpenCV's default 4:2:0, so chroma is already subsampled 2x in both axes
+        before it reaches the call, and a chroma step at the seam is blurred by
+        the transport in a way a luminance step is not.
+
+        **Bounded by the difference, not by the knob**, which is the same shape
+        as `_texture_headroom`. What is withheld is capped at
+        `_COMPLEXION_RESIDUAL` LAB units of a/b distance, so:
+
+            tones already close   -> keep the whole fraction, costs nothing
+            tones far apart       -> the cap binds and this gives way
+
+        The second case is the one that matters. CLAUDE.md records the hard
+        footage: a fair, well-lit source against a dark, under-lit target.
+        Keeping the source's complexion *there* is a light face on a dark neck,
+        which is not "matching the source" — it is a broken composite. So this
+        withdraws exactly as the gap grows.
+
+        Note it withholds correction rather than importing the source
+        photograph's colour. The swap already carries some of the source's
+        complexion; steering toward the donor image's measured tone would carry
+        that photograph's white balance with it, which is a different and worse
+        thing to be right about.
+
+        Args:
+            fake_mean: Per-channel LAB mean of the swap, inside the mask
+            real_mean: Per-channel LAB mean of the target, inside the mask
+
+        Returns:
+            Multiplier for the a/b correction, in [0, 1]. Exactly 1.0 — full
+            correction, today's behaviour — when the feature is off
+        """
+        self.last_complexion_kept = None
+
+        keep = float(np.clip(
+            getattr(self.config, 'complexion_keep', 0.0) or 0.0, 0.0, 1.0))
+        if keep <= 0.0:
+            return 1.0
+
+        gap = float(np.hypot(
+            float(real_mean[1][0]) - float(fake_mean[1][0]),
+            float(real_mean[2][0]) - float(fake_mean[2][0]),
+        ))
+        if gap < 1e-3:
+            # Nothing to keep: the tones already agree, so withholding
+            # correction and applying it are the same operation.
+            self.last_complexion_kept = 0.0
+            return 1.0
+
+        withheld = min(gap * keep, self._COMPLEXION_RESIDUAL)
+        self.last_complexion_kept = withheld
+        return float(np.clip(1.0 - withheld / gap, 0.0, 1.0))
 
     def _match_illumination(
         self,
@@ -1233,6 +1329,7 @@ class FaceCompositor:
         real_lab: Frame,
         mask: Mask,
         strength: float,
+        chroma_scale: float = 1.0,
     ) -> Frame:
         """
         Match the low-frequency lighting gradient the global transfer misses.
@@ -1252,6 +1349,13 @@ class FaceCompositor:
             real_lab: Target crop, LAB float32
             mask: Soft compositing mask in [0, 1]
             strength: Same ramped strength the global transfer used
+            chroma_scale: The same a/b factor `_complexion_scale` handed the
+                global pass. **This is not optional bookkeeping.** A held-back
+                chroma mean is a low-frequency difference, which is exactly what
+                this stage is built to find and correct — so without it, ~70% of
+                whatever the global pass withheld would be silently put back
+                here and `complexion_keep` would look like a knob that does
+                almost nothing
 
         Returns:
             fake_lab with the illumination residual added.
@@ -1298,6 +1402,14 @@ class FaceCompositor:
         # low-frequency, and doing it at full size would cost more than the rest
         # of this method put together.
         scaled *= (strength * self._ILLUM_SCALE * weight_small)[:, :, None]
+
+        # Per channel, and applied as a second multiply rather than folded into
+        # the line above so the default is bit-exact: `chroma_scale` is 1.0
+        # unless `complexion_keep` is set, and `x * 1.0` is exact for every
+        # finite float.
+        if chroma_scale != 1.0:
+            scaled *= np.array(
+                [1.0, chroma_scale, chroma_scale], dtype=np.float32)
 
         correction = cv2.resize(
             scaled, (size, size), interpolation=cv2.INTER_LINEAR,

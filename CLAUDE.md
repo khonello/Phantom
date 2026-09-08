@@ -47,7 +47,10 @@ unjudged on footage**:
   here that moves the face *contour*
 - `mask_shape_growth` stops the target's landmark hull clipping that contour off
 - `identity_push` extrapolates the source identity away from the target's
-- source averaging is pose-weighted, and now carries the raw embedding
+- `complexion_keep` stops the colour match spending all of the source's skin
+  tone — chroma only, bounded, and the one item here the cosine cannot judge
+- `source_blend` makes the averaging strategy a swept field rather than a
+  decision. Sweep it **only** with `--holdout`, or every strategy wins
 
 Run them in the order docs/IDENTITY_WORK.md ends with: **measure the current
 default first**, then the free levers, then the models. Every one of those steps
@@ -1804,6 +1807,8 @@ Two things it deliberately does **not** do, both recorded rather than forgotten:
 | `mask_shape_growth` | `0.0` | How far the mask may follow the **generated** face's outline rather than the target's, as a fraction of the face's extent. The mask is a hull of the *target's* landmarks, so the output silhouette is always the target's — free for `inswapper`, which does not move the contour, and destructive for a shape-aware model, which does. Bounded, lower-face only, and self-neutralising. See "Identity" below |
 | `identity_push` | `0.0` | Extrapolates the source identity away from the target's in ArcFace space before the swapper is conditioned on it (`src*(1+k) - tgt*k`, renormalised). Every model lands *between* the two faces; this moves the point it aims at. 0.2-0.3 to start, hard-clamped at 0.6 |
 | `identity_probe` | `0` | Measure source-to-output ArcFace similarity every Nth frame. Reports `id_swap`/`id_restore`/`id_final`/`id_out`/`id_target` in the REALISM block. Off on a call, `5` for a measurement session |
+| `complexion_keep` | `0.0` | Keep this fraction of the source's own skin tone through colour matching. **Chroma only** — luminance is still corrected in full, because a brightness step at the jaw is the most visible seam there is — and bounded at `_COMPLEXION_RESIDUAL` LAB units, so it gives way entirely as the two complexions diverge. The cosine is blind to this one; judge it by eye and by `seam_excess`. Start at 0.4 |
+| `source_blend` | `weighted` | How several source photographs become one identity vector: `mean` / `weighted` / `norm` / `best` / `median`. Averaging is a low-pass filter on identity — the average is the most *typical* version of the person — and it is validated for *recognition*, which is not this pipeline's objective. Sweep it **only** with `identity_probe.py --holdout`: scored against the identity it builds, every strategy wins by construction |
 | `diffuse_strength` | `0.0` | Subsurface scatter — softens *shading* the way light under skin does, on LAB's L channel only, with eyes/nose/mouth cut out. Answers "the skin reads hard", which is a different complaint from "plastic" and a different band. **Off by default, never judged on footage.** 0.2-0.4 expected |
 | `aligned_size` | `256` | **Ceiling** on compositing resolution (clamped 128–512). The size actually used follows the face's own size in frame, in steps, with hysteresis — a distant face is not upsampled to detail its webcam never captured, and costs proportionally less |
 | `temporal_alpha` | `0.6` | EMA on aligned pixels, kills shimmer (`1.0` disables) |

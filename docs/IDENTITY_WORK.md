@@ -31,7 +31,9 @@ So the work is ordered instrument-first. Anything else is guessing with a
 | 4 | Shape-following mask | **built** |
 | 5 | Identity push (embedding extrapolation) | **built** |
 | 6 | Pose-weighted source averaging | **built** |
-| 7 | Tests, lint, docs | **done** — `tests/test_identity.py`, 42 checks |
+| 7 | Complexion keeping — chroma held back in the colour match | **built** |
+| 8 | `source_blend` — the identity-averaging strategy as a swept field | **built** |
+| 9 | Tests, lint, docs | **done** — `tests/test_identity.py`, 61 checks |
 
 **Every one of them is unjudged on footage.** That is the whole of what is left,
 and it is deliberately what is left: none of this decides anything until someone
@@ -259,6 +261,93 @@ needs. Dropping it was invisible for as long as every registered model took the
 normalised vector, and would have surfaced as hififace producing a weaker
 identity from four photographs than from one.
 
+## 7. Keeping some of the source's complexion
+
+Skin tone is an identity cue, and `_match_color` spends all of it: the global
+mean transfer moves the swapped face onto the **target's** complexion. That is
+not a bug — a face whose tone does not match the neck it sits on is failure
+mode 2 — but the correction is applied to luminance and chroma alike, and those
+are not equally costly to relax.
+
+`complexion_keep` holds back some of the **chroma** correction only. Four things
+make it safe:
+
+- **Luminance is still corrected in full.** A brightness step at the jaw is the
+  most visible seam there is. Only a/b are touched.
+- **Chroma is the cheap channel here for a pipeline-specific reason.** Every
+  frame is JPEG-encoded at OpenCV's default 4:2:0, so chroma is already
+  subsampled 2x in both axes before it reaches the call. A chroma step at the
+  seam is blurred by the transport in a way a luminance step is not.
+- **Bounded by the difference, not by the knob.** What is withheld is capped at
+  `_COMPLEXION_RESIDUAL` (3.0 LAB units of a/b distance), so close tones keep
+  the whole fraction and far-apart tones give way entirely. CLAUDE.md records
+  the hard case — a fair, well-lit source against a dark, under-lit target — and
+  keeping the source's complexion *there* is a light face on a dark neck, which
+  is a broken composite rather than a better likeness. This withdraws exactly as
+  the gap grows.
+- **`_match_illumination` gets the same factor, and this is the one that would
+  have gone wrong silently.** A held-back chroma mean is a low-frequency
+  difference, which is precisely what that stage exists to find and correct — so
+  without threading the factor through, ~70% of whatever the global pass
+  withheld would have been put straight back, and the knob would have looked
+  like it barely worked.
+
+It withholds correction rather than importing the source photograph's colour.
+The swap already carries some of the source's complexion; steering toward the
+donor image's *measured* tone would carry that photograph's white balance with
+it, which is a different and worse thing to be right about. That version stays
+available — `SourceTexture` already caches an FFHQ crop of the donor — if this
+one earns it.
+
+**This is the one item here the cosine cannot judge.** ArcFace is largely a
+shape-and-texture model and is fairly insensitive to skin tone, so `id_out` will
+barely move while a person may see the difference immediately. `complexion_kept`
+in the readings says whether the layer had anything to spend;
+`compare_frames.py`'s `seam_excess` says what it cost. The benefit is footage
+only. Start at 0.4.
+
+## 8. `source_blend`
+
+The averaging strategy as a swept field rather than a decision, because the
+question underneath it is genuinely open. **Averaging is a low-pass filter on
+identity**: a feature present in two photographs of five is down-weighted by
+five halves, so the average is the most *typical* version of the person — the
+same failure mode as blind restoration, arriving one stage earlier.
+
+That matters because averaging is validated for **recognition**, where a robust
+estimate of the class centre is exactly what you want. This pipeline wants the
+vector that makes a generator produce the most *recognisable* face, and those
+two optima are not obviously the same point.
+
+| | |
+|---|---|
+| `mean` | flat average — what shipped before any of this |
+| `weighted` | `det_score × cos²(yaw)` — **default** |
+| `norm` | `‖embedding‖ × cos²(yaw)`, the network's own quality signal |
+| `best` | the single highest-scoring photograph, no averaging |
+| `median` | geometric median (Weiszfeld), resistant to an outlier |
+
+`norm` is the one I would expect to win over `weighted`: the un-normalised
+embedding's magnitude is the network's own confidence rather than two hand-picked
+correlates of it, which is the relationship MagFace is built on. Verify it
+correlates on `w600k_r50` before trusting it.
+
+`median` is included so that "a robust centroid is not worth it at this N" is a
+*measurable* claim rather than an opinion. Its whole value is a 50% breakdown
+point; with three or four photographs, two would have to be bad before it
+diverges from the weighted mean — and at that point `_review_identity`'s
+leave-one-out check has already refused them. Expect it to change nothing here,
+and to matter if a source ever becomes a video.
+
+**The methodological trap, which matters more than the strategies.** You cannot
+score these against the identity they build — the strategy under test would
+define its own yardstick and every one of them would win, because every one is
+closest to itself. `tools/identity_probe.py --holdout` builds from all but the
+last photograph and scores against the one left out, which is the same
+leave-one-out structure the outlier guard already uses. **A sweep of
+`source_blend` without `--holdout` is meaningless**, and it is easy to run by
+accident because it produces confident-looking numbers.
+
 ---
 
 ## How to spend the next session
@@ -271,9 +360,13 @@ on a stream, or `tools/identity_probe.py` on a still. Read `id_swap` against
 it is known, "the swap model is the problem" is a hypothesis.
 
 **2. Sweep what is free.** `enhance_strength` at 0.7 / 0.35 / 0, then
-`identity_push` at 0 / 0.2 / 0.3. Both are instant, both apply to the model
-already loaded, and if restoration is the largest loss the fix arrives the same
-afternoon.
+`identity_push` at 0 / 0.2 / 0.3, then `complexion_keep` at 0 / 0.4 / 0.8. All
+instant, all against the model already loaded, and if restoration is the largest
+loss the fix arrives the same afternoon.
+
+Judge `complexion_keep` by eye and by `seam_excess`, **not** by `id_out` — see
+§7 for why the cosine is blind to this one. And sweep `source_blend` only with
+`--holdout`; see §8 for why it is meaningless without.
 
 **3. Then the models.** `hyperswap_1a_256` has been registered and never judged
 on appearance. `hififace_unofficial_256` needs `mask_shape_growth` set to
