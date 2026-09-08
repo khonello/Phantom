@@ -23,6 +23,18 @@ Python_3_12_0venv
 *.npy
 .env.backup-*
 
+# ...except the two fixture sets, which are deliberately tracked: `source/` is
+# the faces to wear and `target/` the pictures to put them in, and the
+# measurements in CLAUDE.md name specific files in them — the freckle figures
+# are taken on source/two/IMG_3745, so without it those numbers cannot be
+# reproduced from a clone.
+#
+# Negated rather than remembered. `*.jpeg` above meant every one of these
+# needed `git add -f`, which is invisible until someone adds a fixture, does
+# not force it, and quietly commits a test set with a file missing.
+!/source/**
+!/target/**
+
 # Firebase functions create their own venv on deploy
 venv/
 firebase/functions/venv/
