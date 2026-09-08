@@ -154,6 +154,20 @@ def parse_args() -> None:
     program.add_argument('--texture-contrast',
                         help='amplitude shaping on the mark octave (1.0-3.0); 1.0 is none',
                         dest='texture_contrast', type=float, default=_env_float('TEXTURE_CONTRAST'))
+    program.add_argument('--mask-shape-growth',
+                        help='how far the mask may follow the generated face outline rather '
+                             'than the target\'s, as a fraction of face extent (0.0-0.15, '
+                             '0 disables); only does anything for a shape-aware swap model',
+                        dest='mask_shape_growth', type=float,
+                        default=_env_float('MASK_SHAPE_GROWTH'))
+    program.add_argument('--identity-push',
+                        help='extrapolate the source identity away from the target before '
+                             'conditioning the swapper (0.0-0.6, 0 feeds the source exactly)',
+                        dest='identity_push', type=float, default=_env_float('IDENTITY_PUSH'))
+    program.add_argument('--identity-probe',
+                        help='measure source-to-output identity every Nth frame (0 disables); '
+                             'reports as id_* in the REALISM block',
+                        dest='identity_probe', type=int, default=_env_int('IDENTITY_PROBE'))
     program.add_argument('--aligned-size', help='ceiling on compositing resolution (128-512); actual size follows face size',
                         dest='aligned_size', type=int, default=_env_int('ALIGNED_SIZE'))
     program.add_argument('--restore-size', help='FFHQ crop edge fed to the restorer (128-512); '
@@ -250,6 +264,9 @@ def parse_args() -> None:
         ('enhance_strength', args.enhance_strength),
         ('mask_feather', args.mask_feather),
         ('mask_erode', args.mask_erode),
+        ('mask_shape_growth', args.mask_shape_growth),
+        ('identity_push', args.identity_push),
+        ('identity_probe', args.identity_probe),
         ('texture_strength', args.texture_strength),
         ('texture_band', args.texture_band),
         ('texture_relief', args.texture_relief),

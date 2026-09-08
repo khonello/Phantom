@@ -23,7 +23,7 @@ Per face:
 """
 
 import time
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -33,11 +33,18 @@ from pipeline.types import Frame, Face, Mask, Matrix
 from pipeline.services.enhancement import Enhancer
 from pipeline.services.masking import FaceMasker
 from pipeline.services import guards
+from pipeline.services import identity
+from pipeline.services import swapper_models
+from pipeline.services.identity import IdentityProbe
 from pipeline.logging import emit_warning
 from pipeline.processing import texture
 from pipeline.processing.texture import SourceTexture
+# `alignment_template` imported by name rather than through the module, because
+# `_enhance` binds a local called `geometry` for its FFHQ affines and a module
+# of that name would be shadowed inside it.
 from pipeline.processing.geometry import (
     ALIGNED_STEPS,
+    alignment_template,
     DETAIL_SIGMA,
     DETAIL_SIGMA_REFERENCE,
     FFHQ_TEMPLATE as _FFHQ_TEMPLATE,
@@ -359,6 +366,110 @@ class FaceCompositor:
         # that is never on when the question comes up.
         self.last_stage_ms: Dict[str, float] = {}
 
+        # Identity, and the two things needed to measure it. Both are set by the
+        # pipeline: the probe when services are built, the embedding when the
+        # source changes. Absent either, every `id_*` reading is simply missing
+        # from the report, which is the honest rendering of "not measured".
+        self.identity: Optional[IdentityProbe] = None
+        self.source_identity: Optional[Any] = None
+
+        # Cosine similarities from the last measured frame, by stage name. Same
+        # pattern as `last_detail_ratio`: the stage that measures a thing owns
+        # the number and whoever needs it reads it afterwards.
+        self.last_identity: Dict[str, float] = {}
+
+        # Frames since the last identity measurement. Measuring is several
+        # ArcFace inferences, so it runs every Nth frame rather than on all of
+        # them — a distribution over a run is what the reading is for, and it
+        # does not need every sample to have one.
+        self._identity_tick = 0
+
+    def _template(self) -> Any:
+        """
+        The five-point template the current swap model aligns to.
+
+        Read per frame rather than cached, because `set_realism` can switch the
+        swap model mid-stream and a stale template would silently mis-frame
+        every recognition crop and put the shape ramp's eye line 6% out.
+
+        Returns:
+            Normalised 5x2 template
+        """
+        return alignment_template(
+            swapper_models.resolve(self.config.swapper_model).template)
+
+    def _identity_due(self) -> bool:
+        """
+        Whether this frame should be measured for identity.
+
+        Returns:
+            True on every Nth frame while `identity_probe` is set and a probe
+            and a source embedding are both available
+        """
+        interval = int(getattr(self.config, 'identity_probe', 0) or 0)
+        if interval <= 0:
+            return False
+        if self.identity is None or self.source_identity is None:
+            return False
+
+        self._identity_tick += 1
+        if self._identity_tick < interval:
+            return False
+
+        self._identity_tick = 0
+        return True
+
+    def _measure_identity(self, name: str, crop: Frame, template: Any) -> None:
+        """
+        Record how much of the source's identity an aligned crop carries.
+
+        Args:
+            name: Reading name — `id_swap`, `id_restore`, `id_final`
+            crop: The aligned crop as it stands at this stage
+            template: The template that crop is framed by
+        """
+        if self.identity is None:
+            return
+
+        embedding = self.identity.embed_aligned(crop, template)
+        score = identity.cosine(self.source_identity, embedding)
+        if score is not None:
+            self.last_identity[name] = score
+
+    def _measure_output(self, pasted: Optional[Frame], face: Face) -> None:
+        """
+        Record identity on the finished frame, against source *and* target.
+
+        Both, because they answer different failures and one of them is
+        invisible on its own. `id_out` falling says the source is not coming
+        through. `id_target` rising says the *target* is — that the output is
+        drifting back toward the person who was already there, which is what a
+        swap failing to take looks like and what a mask that hands most of the
+        face back to the frame produces. A run where `id_out` is mediocre and
+        `id_target` is low is a weak swap; one where both are middling is a
+        swap being diluted after the fact.
+
+        Args:
+            pasted: The finished frame
+            face: The target detection, for its keypoints and identity
+        """
+        if self.identity is None or pasted is None:
+            return
+
+        kps = getattr(face, 'kps', None)
+        embedding = self.identity.embed_frame(pasted, kps)
+        if embedding is None:
+            return
+
+        score = identity.cosine(self.source_identity, embedding)
+        if score is not None:
+            self.last_identity['id_out'] = score
+
+        against = identity.cosine(
+            getattr(face, 'normed_embedding', None), embedding)
+        if against is not None:
+            self.last_identity['id_target'] = against
+
     def clear_readings(self) -> None:
         """
         Drop what the last frame measured, without touching temporal state.
@@ -376,6 +487,7 @@ class FaceCompositor:
         measurements, and must be.
         """
         self.last_stage_ms.clear()
+        self.last_identity.clear()
         self.last_detail_ratio = None
         self.last_detail_reserve = None
         self.last_texture_headroom = None
@@ -458,23 +570,33 @@ class FaceCompositor:
 
         real = cv2.warpAffine(frame, aligned_matrix, (size, size))
 
-        # Built before restoration and smoothing, not after, so the occlusion
-        # guard can refuse the frame before anything mutates temporal state. The
-        # mask depends only on the face, the affine and the real crop, so this is
-        # the same mask it was when it came later.
+        # Hoisted above the mask, which used to build first. The shape term
+        # needs the generated crop to find the outline of the face that was
+        # actually produced, and this resize depends on nothing but `swapped`
+        # and `size`. Nothing else moved: the mask is still built before
+        # restoration and smoothing, so the occlusion guard can still refuse the
+        # frame before anything mutates temporal state.
+        fake = cv2.resize(swapped, (size, size), interpolation=cv2.INTER_CUBIC)
+
+        template = self._template()
         mask = self.masker.build(
             face, aligned_matrix, real, (frame.shape[0], frame.shape[1]),
+            swapped=fake, template=template,
         )
         elapsed('mask')
 
         if not guards.coverage_ok(self.config, self.masker.last_coverage):
             return None
 
-        fake = cv2.resize(swapped, (size, size), interpolation=cv2.INTER_CUBIC)
+        measure = self._identity_due()
+        if measure:
+            self._measure_identity('id_swap', fake, template)
 
         if self.config.enhance and self._restore_worthwhile(face):
             fake = self._enhance(fake, frame, face, aligned_matrix)
             elapsed('restore')
+            if measure:
+                self._measure_identity('id_restore', fake, template)
 
         # Temporal smoothing needs a stable subject identity. With multiple
         # faces the per-frame detection order is not stable, so smoothing
@@ -532,8 +654,20 @@ class FaceCompositor:
         )
         elapsed('detail')
 
+        if measure:
+            self._measure_identity('id_final', fake, template)
+
         pasted = self._paste(frame, fake, mask, aligned_matrix, face, extent)
         elapsed('paste')
+
+        if measure:
+            # The one that counts. Everything before it is measured in aligned
+            # space at the compositor's working resolution; this is the face at
+            # the size it leaves the pipeline, through the mask, in the frame —
+            # which is where the silhouette, the paste and the frame-space
+            # feather finally get a vote.
+            self._measure_output(pasted, face)
+
         return pasted
 
     # ------------------------------------------------------------------

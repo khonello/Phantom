@@ -6,6 +6,7 @@ and loading pre-saved embeddings. Extracted from face_analyser.py.
 """
 
 import hashlib
+import math
 import os
 import types
 from dataclasses import dataclass, field
@@ -522,39 +523,157 @@ class FaceDatabase:
             print(f'[FaceDatabase] _extract_from_image error: {type(e).__name__}: {e}', file=sys.stderr)
             return None
 
-    def _average_faces(self, faces: List[Face]) -> Optional[Face]:
+    # How far below the best photograph a weight may fall. A floor rather than a
+    # free hand, because the point of accepting several photographs is that
+    # identity is a distributed representation and one angle does not carry all
+    # of it. Without a floor a single sharp frontal shot can reduce the others
+    # to rounding error, which is multi-photo averaging switched off by
+    # accident.
+    _WEIGHT_FLOOR = 0.25
+
+    @staticmethod
+    def _pose_yaw(face: Face) -> Optional[float]:
         """
-        Average embeddings from multiple faces.
+        Yaw straight off `face.pose`, without building a Detection.
+
+        `guards.measure_yaw` is the shared definition and is preferred, but it
+        takes a `Detection` and constructing one needs a bbox and keypoints.
+        A source face that has `pose` and not those — a cached embedding, a
+        stand-in — would lose the frontality term to an AttributeError swallowed
+        by a broad `except`, which is the silent no-op this codebase keeps
+        finding. So the cheap direct read comes first and the Detection is only
+        built for the fallback that actually needs it.
 
         Args:
-            faces: List of Face objects with normed_embedding attribute
+            face: A source face
 
         Returns:
-            New Face-like object with averaged embedding, or None if empty
+            Signed yaw in degrees, or None
+        """
+        pose = getattr(face, 'pose', None)
+        if pose is None:
+            return None
+
+        try:
+            values = np.asarray(pose, dtype=np.float64).ravel()
+        except (TypeError, ValueError):
+            return None
+
+        # InsightFace orders this (pitch, yaw, roll) — the same reading
+        # `guards.measure_yaw` prefers, and the same index.
+        if values.size >= 2 and np.isfinite(values[1]):
+            return float(values[1])
+
+        return None
+
+    @staticmethod
+    def _identity_weight(face: Face) -> float:
+        """
+        How much this photograph should count toward the averaged identity.
+
+        The flat mean this replaces treats a sharp frontal portrait and a
+        blurred three-quarter shot as equal evidence, and they are not: ArcFace
+        embeddings degrade with pose, because a turned face presents less of
+        itself to a model trained mostly on frontal data. The outlier guard
+        already refuses the *wrong person*; nothing refused a right-person
+        photograph that carries a weaker reading of them, and averaging pulls
+        the result toward whatever those weaker readings have in common, which
+        is a blander face.
+
+        Two terms, both already computed during the source review:
+
+        - **Detection confidence**, straight from the detector.
+        - **Frontality**, as cos^2 of the yaw. Squared rather than linear so the
+          penalty stays gentle through the range people actually photograph
+          themselves in — 20 degrees costs 12% — and bites toward profile.
+
+        Absent either (a `.npy` embedding, a pack without `pose`), the weight is
+        1.0 and this degrades to the flat mean it replaces. A capability gap must
+        never become a silent behaviour change.
+
+        Args:
+            face: A source face
+
+        Returns:
+            A non-negative weight
+        """
+        score = getattr(face, 'det_score', None)
+        weight = 1.0 if score is None else max(0.0, float(score))
+
+        yaw: Optional[float] = FaceDatabase._pose_yaw(face)
+        if yaw is None and getattr(face, 'kps', None) is not None:
+            # The keypoint approximation, which needs the whole Detection.
+            # Reached only when `pose` is absent, so a pack that carries it
+            # never pays for the construction.
+            try:
+                yaw = guards.estimate_yaw(Detection.from_insightface(face))
+            except Exception:
+                yaw = None
+
+        if yaw is not None:
+            radians = math.radians(min(89.0, abs(float(yaw))))
+            weight *= float(math.cos(radians)) ** 2
+
+        return weight
+
+    def _average_faces(self, faces: List[Face]) -> Optional[Face]:
+        """
+        Combine several photographs into one identity, weighted by quality.
+
+        Both vectors are carried through, and that is not tidiness. The
+        normalised one is what most models are conditioned on; the **raw** one
+        is what a model with an embedding converter is fed, because the
+        converter is a non-linear map fitted on ArcFace's own output scale and
+        a unit vector is not the same input. Dropping it here was invisible for
+        as long as every registered model took the normalised vector, and would
+        have surfaced as hififace quietly producing a weaker identity from four
+        photographs than from one.
+
+        Args:
+            faces: Source faces carrying embeddings
+
+        Returns:
+            A Face-like object with `normed_embedding` and, when the inputs had
+            them, `embedding`. None if nothing usable was passed
         """
         if not faces:
             return None
 
-        # Extract embeddings
-        embeddings = []
-        for face in faces:
-            if hasattr(face, 'normed_embedding'):
-                embeddings.append(face.normed_embedding)
-
-        if not embeddings:
+        usable = [f for f in faces if getattr(f, 'normed_embedding', None) is not None]
+        if not usable:
             return None
 
-        # Average
-        embeddings_array = np.array(embeddings)
-        avg_embedding = np.mean(embeddings_array, axis=0)
+        weights = np.array(
+            [self._identity_weight(f) for f in usable], dtype=np.float64)
+        peak = float(weights.max()) if weights.size else 0.0
+        if peak <= 0.0:
+            weights = np.ones(len(usable), dtype=np.float64)
+        else:
+            weights = np.maximum(weights, peak * self._WEIGHT_FLOOR)
+        weights /= float(weights.sum())
 
-        # Normalize to unit vector
-        norm = np.linalg.norm(avg_embedding)
+        normed = np.average(
+            np.array([np.asarray(f.normed_embedding, dtype=np.float64).ravel()
+                      for f in usable]),
+            axis=0, weights=weights,
+        )
+        norm = float(np.linalg.norm(normed))
         if norm > 0:
-            avg_embedding = avg_embedding / norm
+            normed = normed / norm
 
-        # Return Face-like object
-        return types.SimpleNamespace(normed_embedding=avg_embedding)
+        raw = None
+        raws = [getattr(f, 'embedding', None) for f in usable]
+        if all(vector is not None for vector in raws):
+            raw = np.average(
+                np.array([np.asarray(v, dtype=np.float64).ravel()
+                          for v in raws]),
+                axis=0, weights=weights,
+            ).astype(np.float32)
+
+        return types.SimpleNamespace(
+            normed_embedding=normed.astype(np.float32),
+            embedding=raw,
+        )
 
     def save_embedding(self, face: Face, path: str) -> None:
         """

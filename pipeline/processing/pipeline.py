@@ -53,6 +53,7 @@ from pipeline.services.face_swapping import FaceSwapper
 from pipeline.services.enhancement import Enhancer
 from pipeline.services.database import FaceDatabase
 from pipeline.services.masking import FaceMasker
+from pipeline.services.identity import IdentityProbe
 from pipeline.services.face_tracking import LandmarkStabilizer
 from pipeline.services import guards
 from pipeline.services import templates
@@ -197,7 +198,11 @@ class ProcessingPipeline:
     def _get_masker(self) -> FaceMasker:
         """Get or create FaceMasker."""
         if self._masker is None:
-            self._masker = FaceMasker(self.config)
+            # The detector comes with it for one reason: the shape-following
+            # mask needs the landmarks of the *generated* face, and the 106-point
+            # model that finds them is already loaded in the detector's pack.
+            # Nothing else in the masker touches it.
+            self._masker = FaceMasker(self.config, self._get_detector())
         return self._masker
 
     def face_boxes(self, path: str) -> List[Dict[str, float]]:
@@ -255,6 +260,10 @@ class ProcessingPipeline:
         self._preprocessing_proc = PreprocessingProcessor(self.config)
 
         self._compositor = FaceCompositor(self.config, enhancer, masker)
+        # Shares the detector's recognition model rather than loading a second
+        # copy. Constructing it loads nothing — the model is resolved on first
+        # use, and only while `identity_probe` is set.
+        self._compositor.identity = IdentityProbe(detector)
         self._stabilizer = LandmarkStabilizer(
             alpha=self.config.alpha,
             identity_sim=self.config.guard_identity_sim,
@@ -284,6 +293,13 @@ class ProcessingPipeline:
             self._compositor.source_texture = (
                 self._swapping_proc.source_texture if loaded else None
             )
+            # The identity every `id_*` reading is measured against, and
+            # deliberately the *averaged* embedding rather than one photo's:
+            # that average is what the swapper is actually conditioned on, so
+            # it is the thing the output is failing or succeeding to reproduce.
+            source = self._swapping_proc.source_face if loaded else None
+            self._compositor.source_identity = getattr(
+                source, 'normed_embedding', None)
             # A new identity is a new chance to say the layer has nothing to
             # work with. Without this, only the first failing source is ever
             # reported and the second looks like a working layer set too low.
@@ -1031,6 +1047,13 @@ class ProcessingPipeline:
         confidence = self._compositor.last_texture_confidence
         if confidence is not None:
             self._readings.record('texture_confidence', confidence)
+
+        # Recorded under their own names rather than one 'identity' reading,
+        # because the whole value is in the differences between them: which
+        # stage the likeness is lost at is a different question from how much
+        # of it survives, and only a per-stage distribution answers the first.
+        for name, score in self._compositor.last_identity.items():
+            self._readings.record(name, score)
 
     @staticmethod
     def _unpack_timestamped_frame(

@@ -52,6 +52,8 @@ _ASSETS = 'https://github.com/facefusion/facefusion-assets/releases/download'
 
 # Bytes, for pre-seed budgeting and for spotting a truncated download.
 HYPERSWAP_SIZE_BYTES = 402742682
+HIFIFACE_SIZE_BYTES = 203784742
+HIFIFACE_CONVERTER_SIZE_BYTES = 20993559
 
 
 @dataclass(frozen=True)
@@ -98,6 +100,25 @@ class SwapperModel:
     aligned_min: int
 
     notes: str = ''
+
+    # Bytes, for the download message and for spotting a truncated file. Zero
+    # when unknown, which is the inswapper case — InsightFace fetches it.
+    size_bytes: int = 0
+
+    # Some models were not trained against ArcFace's embedding space and need a
+    # small learned map into their own. It runs **once per source**, not per
+    # frame, so it is free on the live path — but it is a second weight file,
+    # and a model that silently ran without it would produce a face that is
+    # confidently the wrong person, which is the exact failure the source guards
+    # exist to prevent. Empty means the model takes the ArcFace vector directly.
+    converter_filename: str = ''
+    converter_url: str = ''
+
+    # Whether the converter is fed the **raw** ArcFace vector or the normalised
+    # one. Only meaningful when a converter exists, and it matters: the map is
+    # non-linear, so feeding it a unit vector when it was fitted on a vector of
+    # norm ~22 is not a scaling difference, it is a different input.
+    converter_takes_raw: bool = True
 
     def look(self) -> Dict[str, float]:
         """
@@ -163,6 +184,7 @@ SWAPPER_MODELS: Dict[str, SwapperModel] = {
         enhance_strength=0.5,
         # Compositing below 256 would discard half of what the model produced.
         aligned_min=256,
+        size_bytes=HYPERSWAP_SIZE_BYTES,
         notes='256px native. Less restoration needed; floor raised to native size.',
     ),
 
@@ -178,6 +200,7 @@ SWAPPER_MODELS: Dict[str, SwapperModel] = {
         enhancer_weight=0.8,
         enhance_strength=0.5,
         aligned_min=256,
+        size_bytes=HYPERSWAP_SIZE_BYTES,
         notes='Sibling of 1a; differs in training, not interface.',
     ),
 
@@ -193,7 +216,67 @@ SWAPPER_MODELS: Dict[str, SwapperModel] = {
         enhancer_weight=0.8,
         enhance_strength=0.5,
         aligned_min=256,
+        size_bytes=HYPERSWAP_SIZE_BYTES,
         notes='Sibling of 1a; differs in training, not interface.',
+    ),
+
+    # ── 3D-shape supervised, and the first model here that is not arcface ────
+    #
+    # HiFiFace (Wang et al., IJCAI 2021) is the reason this entry exists: it is
+    # trained with a 3DMM in the loop, recombining the *source's* identity
+    # coefficients with the *target's* expression and pose, so the generator
+    # learns to move the face **contour** toward the source rather than only
+    # repainting the interior. Face outline is one of the strongest identity
+    # cues a viewer has, and it is the one thing every other model here leaves
+    # at the target's.
+    #
+    # Three things about that claim are worth stating precisely, because two of
+    # them are easy to over-read:
+    #
+    # 1. **The 3D is training-time.** This export takes an embedding and a crop,
+    #    nothing else — there is no 3DMM fit at inference and no per-frame
+    #    reconstruction cost. What ships is a generator that learned shape
+    #    awareness, not one that computes it.
+    # 2. **The compositor has to allow it.** The mask here is the convex hull of
+    #    the *target's* landmarks, so a contour this model widens is clipped
+    #    straight back off. See `mask_shape_growth` — without it, roughly half
+    #    of what this entry is for never reaches the screen.
+    # 3. **`mtcnn_512`, not `arcface_128`.** The first model registered here
+    #    that needs its own template. Everything downstream works off the
+    #    returned affine, so nothing else changes — but assuming the arcface
+    #    framing would feed it a crop ~6% off in y, which degrades quietly
+    #    rather than failing.
+    #
+    # Two weight files. The converter maps ArcFace's embedding space into the
+    # recognition space this model was trained against, and runs once per
+    # source. Vendored by facefusion from GuijiAI's release; note the tag is
+    # `models-3.1.0`, not the `models-3.3.0` the hyperswaps come from — the
+    # asset does not exist under 3.3.0 and bumping it would 404 at pod-provision
+    # time, which is the most expensive place to find out.
+    'hififace_unofficial_256': SwapperModel(
+        name='hififace_unofficial_256',
+        kind='hififace',
+        template='mtcnn_512',
+        size=256,
+        mean=(0.5, 0.5, 0.5),
+        standard_deviation=(0.5, 0.5, 0.5),
+        filename='hififace_unofficial_256.onnx',
+        url='{}/models-3.1.0/hififace_unofficial_256.onnx'.format(_ASSETS),
+        size_bytes=HIFIFACE_SIZE_BYTES,
+        converter_filename='arcface_converter_hififace.onnx',
+        converter_url='{}/models-3.1.0/arcface_converter_hififace.onnx'.format(
+            _ASSETS),
+        converter_takes_raw=True,
+        # Same reasoning as hyperswap — 256 native, so there is real detail
+        # where inswapper had upsampled guesswork and the restorer should be
+        # trusted less. Starting points, not measured: sweep them against a
+        # fixed clip with `identity_probe` on, which is the whole reason that
+        # reading exists.
+        enhancer_weight=0.8,
+        enhance_strength=0.5,
+        aligned_min=256,
+        notes='256px native, 3D-shape supervised. Needs mask_shape_growth to '
+              'deliver the contour it generates.',
     ),
 }
 

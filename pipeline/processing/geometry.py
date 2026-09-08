@@ -12,7 +12,7 @@ sits and which band counts as texture, so that every stage that has an opinion
 about either is answering from one place.
 """
 
-from typing import Optional
+from typing import Dict, Optional
 
 import numpy as np
 
@@ -29,6 +29,69 @@ FFHQ_TEMPLATE = np.array([
     [0.39308822, 0.72541100],
     [0.61150205, 0.72490465],
 ], dtype=np.float64)
+
+# ---------------------------------------------------------------------------
+# Swapper alignment templates
+# ---------------------------------------------------------------------------
+#
+# Which five-point template a swap model was trained against is a fact about the
+# weights, named by `SwapperModel.template` and resolved here. It lives beside
+# FFHQ rather than inside `face_swapping.py` because three stages now need to
+# know what space a crop is in and only one of them makes the crop: the swapper
+# builds it, `IdentityProbe` re-frames it for recognition, and the shape mask
+# reads the eye line out of it.
+#
+# All normalised to a unit square, so one constant serves 128, 256 and 512
+# alike — the framing is identical, only the sampling rate changes.
+
+# InsightFace's `arcface_dst` shifted +8px in x and divided by 128, which is the
+# transform `estimate_norm` applies for a 128px crop. Verified equal to
+# facefusion's `arcface_128` to eight decimal places, which is why inswapper and
+# hyperswap produce crops in the same space.
+ARCFACE_128_TEMPLATE = np.array([
+    [0.36167656, 0.40387734],
+    [0.63696719, 0.40235469],
+    [0.50019687, 0.56044219],
+    [0.38710391, 0.72160547],
+    [0.61507734, 0.72034453],
+], dtype=np.float64)
+
+# What HiFiFace was trained against. Note it is not merely a rescale of arcface:
+# the eye line sits at 0.467 against arcface's 0.404, so the face is placed ~6%
+# lower in the crop — more forehead above, less room below the chin. That is a
+# different framing, not a different zoom, which is why the template has to
+# travel with the model rather than being assumed.
+MTCNN_512_TEMPLATE = np.array([
+    [0.36562865, 0.46733799],
+    [0.63305391, 0.46585885],
+    [0.50019127, 0.61942959],
+    [0.39032951, 0.77598822],
+    [0.61178945, 0.77476328],
+], dtype=np.float64)
+
+ALIGNMENT_TEMPLATES: Dict[str, Points] = {
+    'arcface_128': ARCFACE_128_TEMPLATE,
+    'mtcnn_512': MTCNN_512_TEMPLATE,
+}
+
+
+def alignment_template(name: str) -> Points:
+    """
+    The five-point template a swap model aligns to.
+
+    Falls back to `arcface_128` rather than raising: an unknown template name
+    means a registry entry was added without one, and every model registered
+    here so far shares that space. A wrong-but-close crop is a worse swap; a
+    raise on the live path is no swap at all.
+
+    Args:
+        name: Template key from `SwapperModel.template`
+
+    Returns:
+        Normalised 5x2 template
+    """
+    return ALIGNMENT_TEMPLATES.get(name, ARCFACE_128_TEMPLATE)
+
 
 # Working resolutions the compositor steps through, and the ladder the texture
 # maps are derived at. Shared so that a face moving between two compositing

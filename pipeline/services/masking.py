@@ -15,6 +15,18 @@ Three terms are multiplied together:
    black border bleeds into the composite.
 3. **Occlusion** — optional DFL XSeg segmentation, so hands, microphones and
    hair crossing the face are not painted over with swapped skin.
+
+**All three describe the target.** That is right for two of them and a
+limitation for the first, because the hull is what decides the output's
+*silhouette*, and a face outline is one of the strongest identity cues a viewer
+has. For `inswapper` it costs nothing — it repaints the interior and leaves the
+contour where it found it, so the target's hull is also the generated face's
+hull. For a model trained with 3D shape supervision it is the opposite: the
+contour is the part that carries the source, and clipping it back to the
+target's landmarks discards precisely what that model exists to produce.
+
+`mask_shape_growth` is the term that lets the generated face's own outline
+through, and `_shape` is where every bound on it lives.
 """
 
 import os
@@ -27,6 +39,7 @@ import numpy.typing as npt
 
 from pipeline.config import FaceSwapConfig
 from pipeline.types import Frame, Face, Mask, Matrix
+from pipeline.processing import geometry
 from pipeline.services import guards
 from pipeline.logging import emit_status, emit_warning
 
@@ -62,15 +75,31 @@ class FaceMasker:
     _VALID_ERODE = 5
     # Feather width as a fraction of crop size.
     _FEATHER = 0.05
+    # How far below the eye line the shape term reaches full strength, as a
+    # fraction of the crop. The ramp starts at the eyes and is complete by the
+    # time it reaches the cheekbones, so the jaw and chin get the whole term and
+    # the temples get none of it.
+    _SHAPE_RAMP = 0.15
 
-    def __init__(self, config: FaceSwapConfig) -> None:
+    def __init__(
+        self,
+        config: FaceSwapConfig,
+        detector: Optional[Any] = None,
+    ) -> None:
         """
         Initialize the masker.
 
         Args:
             config: Configuration object (execution_providers, occluder toggle)
+            detector: Optional `FaceDetector`, consulted only for its 106-point
+                landmark model and only while `mask_shape_growth` is on. Absent,
+                the shape term declines and the mask is exactly what it always
+                was — which is also what happens on a model pack without one
         """
         self.config = config
+        self.detector = detector
+        # Said once, when shape following was asked for and could not run.
+        self._warned_no_shape = False
         self._session: Optional[Any] = None
         self._runner: Optional[Any] = None
         self._input_name: str = 'input'
@@ -97,6 +126,8 @@ class FaceMasker:
         matrix: Matrix,
         aligned: Frame,
         frame_shape: Tuple[int, int],
+        swapped: Optional[Frame] = None,
+        template: Optional[npt.NDArray[Any]] = None,
     ) -> Mask:
         """
         Build the compositing mask for one face.
@@ -106,6 +137,11 @@ class FaceMasker:
             matrix: 2x3 affine mapping frame space -> aligned space
             aligned: The aligned crop sampled from the frame (HxWx3)
             frame_shape: (height, width) of the source frame
+            swapped: The generated crop at the same size, when the caller has
+                it. Only read while `mask_shape_growth` is on, and only to find
+                the outline of the face that was actually generated
+            template: The five-point template `aligned` is framed by, which is
+                where the eye line comes from. Defaults to arcface's
 
         Returns:
             float32 mask in [0, 1], same height/width as `aligned`
@@ -113,7 +149,8 @@ class FaceMasker:
         size = aligned.shape[0]
 
         hull = self._hull_mask(face, matrix, size)
-        mask: Mask = hull * self._valid_mask(matrix, size, frame_shape)
+        shape, growth = self._shape(hull, swapped, face, matrix, size, template)
+        mask: Mask = shape * self._valid_mask(matrix, size, frame_shape)
 
         self.last_coverage = None
         if self.config.occluder:
@@ -122,7 +159,32 @@ class FaceMasker:
                 # Measured against the hull alone, not the hull times the valid
                 # region: a face at the frame edge is cropped, not occluded, and
                 # including that term would guard it for the wrong reason.
+                #
+                # Deliberately the *target's* hull, not the grown one. This is
+                # the occlusion guard's input, and the question it asks — is
+                # something in front of this face — is about the target's face
+                # in the target's frame. Growing its denominator would make a
+                # shape-aware model look more occluded than a plain one on
+                # identical footage.
                 self.last_coverage = guards.hull_coverage(hull, occlusion)
+
+                if growth is not None:
+                    # XSeg segments the face *in the crop it was given*, and
+                    # that crop is the target's. Asked about the band the
+                    # generated jaw now occupies it answers "not face", because
+                    # in the target's frame it genuinely is not — it is the
+                    # neck or the background behind a narrower jaw. That is the
+                    # correct answer to the wrong question, and multiplying by
+                    # it would cancel the shape term exactly.
+                    #
+                    # So the growth band is exempt. It is safe to exempt because
+                    # of what bounds it: a few percent of the face's extent,
+                    # below the eye line, and only where the generated face's
+                    # own landmarks say there is face. An occluder large enough
+                    # to matter crosses the main hull too, where it is still
+                    # measured and still guarded.
+                    occlusion = np.maximum(occlusion, growth)
+
                 mask *= occlusion
 
         # Erode before feathering, so the transition falls *inside* the face
@@ -180,6 +242,208 @@ class FaceMasker:
         mask = np.zeros((size, size), dtype=np.float32)
         cv2.fillConvexPoly(mask, cv2.convexHull(hull).astype(np.int32), (1.0,))
         return mask
+
+    def _shape(
+        self,
+        hull: Mask,
+        swapped: Optional[Frame],
+        face: Face,
+        matrix: Matrix,
+        size: int,
+        template: Optional[npt.NDArray[Any]],
+    ) -> Tuple[Mask, Optional[Mask]]:
+        """
+        Let the generated face's own outline through, within bounds.
+
+        The target's hull decides the output silhouette, and for a shape-aware
+        swap model that is the one place its work is thrown away. This measures
+        the face that was actually generated — landmarks detected on the swapped
+        crop, which is the only place that geometry exists — and admits the
+        difference.
+
+        Four bounds, each load-bearing:
+
+        - **Bounded in extent.** At most `mask_shape_growth` of the crop beyond
+          the target's hull. A shape change of a few percent of face width is
+          what these models produce; an unbounded union would be a licence to
+          paint over hair and ear on a frame where the landmark detector had a
+          bad moment.
+        - **Lower face only.** Growth at the jaw and chin covers what was neck
+          or background, which is what a wider face genuinely looks like.
+          Growth at the temples covers *hair*, which docs/ENHANCEMENT.md
+          records as the worse tell. The ramp starts at the eye line.
+        - **Only where the generated face is.** The growth is intersected with
+          the generated hull, so this can never expand the mask in a direction
+          the model did not actually put a face.
+        - **Self-neutralising.** A model that does not move the contour produces
+          a hull that already matches the target's, so the difference is empty
+          and this costs one landmark inference and changes nothing. That is
+          what makes it safe to leave on across a model switch, and it is also
+          the control: if `inswapper` output changes when this is turned on,
+          the landmark probe is wrong, not the idea.
+
+        Args:
+            hull: The target's expanded landmark hull
+            swapped: The generated crop, or None
+            face: The target detection, for its box
+            matrix: 2x3 affine, frame space -> aligned space
+            size: Aligned crop edge
+            template: The template `size` is framed by
+
+        Returns:
+            (mask, growth) where `growth` is the region admitted beyond the
+            target's hull — None when the term did not run, which is also when
+            `mask` is the hull unchanged
+        """
+        growth = float(getattr(self.config, 'mask_shape_growth', 0.0) or 0.0)
+        growth = max(0.0, min(0.15, growth))
+        if growth <= 0.0 or swapped is None:
+            return hull, None
+
+        limit = int(round(size * growth))
+        if limit < 1:
+            return hull, None
+
+        points = self._generated_landmarks(swapped, face, matrix, size)
+        if points is None:
+            return hull, None
+
+        generated = np.zeros((size, size), dtype=np.float32)
+        cv2.fillConvexPoly(
+            generated,
+            cv2.convexHull(
+                self._expand_hull(cv2.convexHull(points.astype(np.float32)))
+            ).astype(np.int32),
+            (1.0,),
+        )
+
+        # Reachable = within `limit` of the target's hull. Dilation rather than
+        # a scale factor because the bound is a distance the eye can judge —
+        # "a few pixels of jaw" — not a proportion of a polygon.
+        #
+        # Elliptical rather than the square kernel used for the erode above, and
+        # that is not cosmetic: a square dilates diagonally by `limit * sqrt(2)`,
+        # so at the jaw corners — which is exactly where a wider face differs
+        # most — a bound of 8% would have admitted 11%. The knob has to mean the
+        # distance it says.
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (limit * 2 + 1,) * 2)
+        reachable = cv2.dilate(hull, kernel, iterations=1)
+
+        admitted = np.minimum(generated, reachable) * self._lower_face(
+            size, template)
+        shaped = np.maximum(hull, admitted)
+
+        return shaped, np.clip(shaped - hull, 0.0, 1.0)
+
+    def _lower_face(
+        self,
+        size: int,
+        template: Optional[npt.NDArray[Any]],
+    ) -> Mask:
+        """
+        A weight that is 0 above the eyes and 1 below the cheekbones.
+
+        Read from the template rather than assumed, because the two templates in
+        use put the eye line in different places — arcface at 0.404 of the crop,
+        mtcnn at 0.467 — and a hard-coded row would silently move the boundary
+        by 6% of the face when the swap model changed.
+
+        Args:
+            size: Aligned crop edge
+            template: The five-point template, or None for arcface's
+
+        Returns:
+            (size, size) float32 weight
+        """
+        points = (geometry.ARCFACE_128_TEMPLATE if template is None
+                  else np.asarray(template, dtype=np.float64))
+        eyes = float(np.mean(points[0:2, 1])) * size
+
+        rows = np.arange(size, dtype=np.float32)
+        span = max(1.0, self._SHAPE_RAMP * size)
+        weight = np.clip((rows - eyes) / span, 0.0, 1.0)
+        return np.repeat(weight.reshape(-1, 1), size, axis=1)
+
+    def _generated_landmarks(
+        self,
+        swapped: Frame,
+        face: Face,
+        matrix: Matrix,
+        size: int,
+    ) -> Optional[npt.NDArray[Any]]:
+        """
+        The 106 landmarks of the *generated* face, in aligned space.
+
+        Run on the swapped crop rather than the frame, because the geometry
+        being measured exists nowhere else — the frame holds the target's face
+        and the detection holds the target's landmarks.
+
+        The box handed to the landmark model is the target's own, warped into
+        aligned space. That is exact and free: the generated face occupies the
+        same region of the crop by construction, since the crop was built from
+        the target's keypoints.
+
+        Args:
+            swapped: The generated crop
+            face: The target detection, for its box
+            matrix: 2x3 affine, frame space -> aligned space
+            size: Aligned crop edge
+
+        Returns:
+            (106, 2) points in aligned space, or None if this could not be done
+        """
+        model = None
+        if self.detector is not None:
+            try:
+                model = self.detector.landmark_model()
+            except Exception:
+                model = None
+
+        if model is None:
+            if not self._warned_no_shape:
+                self._warned_no_shape = True
+                emit_warning(
+                    'mask_shape_growth is set but no 106-point landmark model '
+                    'is available, so the mask still follows the target\'s '
+                    'outline. A shape-aware swap model will have its contour '
+                    'clipped exactly as before.',
+                    scope='MASKER',
+                )
+            return None
+
+        box = getattr(face, 'bbox', None)
+        if box is None or len(box) < 4:
+            return None
+
+        corners = np.array([
+            [box[0], box[1]], [box[2], box[1]],
+            [box[2], box[3]], [box[0], box[3]],
+        ], dtype=np.float32).reshape(-1, 1, 2)
+        aligned_box = cv2.transform(
+            corners, matrix.astype(np.float32)).reshape(-1, 2)
+
+        low = np.clip(aligned_box.min(axis=0), 0.0, float(size))
+        high = np.clip(aligned_box.max(axis=0), 0.0, float(size))
+        if float(high[0] - low[0]) < 8.0 or float(high[1] - low[1]) < 8.0:
+            return None
+
+        try:
+            probe = Face(bbox=np.array(
+                [low[0], low[1], high[0], high[1]], dtype=np.float32,
+            ), det_score=1.0)
+            points = model.get(swapped, probe)
+        except Exception:
+            # A diagnostic-grade extra inference on the live path. It declines
+            # rather than raising for the same reason `BoundRunner` does: this
+            # is an enhancement to a mask that already works, and a per-frame
+            # exception here would cost the call.
+            return None
+
+        if points is None or len(points) < 3:
+            return None
+
+        return np.asarray(points, dtype=np.float32)[:, :2]
 
     @staticmethod
     def _aligned_landmarks(face: Face, matrix: Matrix) -> Optional[npt.NDArray[Any]]:

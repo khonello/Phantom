@@ -30,8 +30,31 @@ same compositor.
 
 ### Start here in a new session
 
-Two things are queued, and they are queued in this order because the first is
-free and the second is not.
+**Identity is now measurable, and nothing has been measured yet.** That is the
+newest and largest queued item — see
+**[docs/IDENTITY_WORK.md](docs/IDENTITY_WORK.md)**. The reported complaint was
+that the output resembles the source "good, but not very good", and it was
+raised about the swap model; nothing in this repository could have said whether
+the swap model was the cause, because identity was the one realism quantity
+nothing measured. Six things were built for it and **every one of them is
+unjudged on footage**:
+
+- `identity_probe=N` reports ArcFace cosine at five points in the chain and says
+  which stage cost the most — the compositor has four stages that attack
+  likeness, and restoration at `enhance_strength` 0.7 is the prime suspect
+- `tools/identity_probe.py` sweeps a lever against one still, no pod needed
+- `hififace_unofficial_256` is registered — 3D-shape supervised, the only model
+  here that moves the face *contour*
+- `mask_shape_growth` stops the target's landmark hull clipping that contour off
+- `identity_push` extrapolates the source identity away from the target's
+- source averaging is pose-weighted, and now carries the raw embedding
+
+Run them in the order docs/IDENTITY_WORK.md ends with: **measure the current
+default first**, then the free levers, then the models. Every one of those steps
+decides whether the next is worth taking.
+
+Two other things are queued, in this order because the first is free and the
+second is not.
 
 **1. The pod run — half done, and the half that remains is the half that
 matters.** Run 2026-09-05 against the Denmark 4090.
@@ -780,7 +803,12 @@ GPU work can reach.
   keep — the dropdown is a ceiling automation never exceeds, and adapting down
   is fast while adapting up is slow —
   `test_photo_batch.py` covers the photo path, including that a refused photo
-  leaves no output file behind, `test_templates.py` covers the bundled
+  leaves no output file behind, `test_identity.py` covers the identity work —
+  including the two claims that would otherwise fail silently: that the
+  recognition probe re-frames a crop by the template it was *given* (reading one
+  with the wrong template must **not** land on target, or the check is vacuous),
+  and that the shape mask is a byte-for-byte no-op when the generated face has
+  the target's outline, `test_templates.py` covers the bundled
   library and the face its manifest names, and `test_texture.py` covers the
   source-texture layer — including that its band follows the *target* face's
   size rather than the crop it was cached at, which is the mistake that would
@@ -844,6 +872,15 @@ GPU work can reach.
 - **Guard calibration**: `python pipeline.py --stream --guard-observe --guard-report r.json`
 - **Realism**: `python pipeline.py --stream --debug-frames clip/` then
   `python tools/compare_frames.py clip/ [--against clip2/]`
+- **Identity**: `python tools/identity_probe.py -s <face> -t <photo>
+  [--sweep field=a,b,c ...] [--save-frames dir/]` — runs the **real**
+  compositing path on one still and reports ArcFace similarity between the
+  source and the output at each stage, so "which stage lost the likeness" has an
+  answer instead of an opinion. Sweeps are a full product across every
+  `--sweep`, and `--save-frames` is not optional in practice: a cosine measures
+  one axis of three, and a higher number that reads as plastic is not a better
+  swap. On a running stream the same readings come from `identity_probe=5` via
+  `tools/realism.py`
 
 ### Building for distribution
 - **Desktop standalone**: `python tools/build_desktop.py` (add `--print-only`
@@ -1764,6 +1801,9 @@ Two things it deliberately does **not** do, both recorded rather than forgotten:
 | `texture_contrast` | `1.6` | Amplitude shaping on the mark octave, at constant total energy. A sparse mark is invisible to a second moment, so an RMS budget flattens it into the dense noise around it; this moves the same energy back into it. Mark octave only — shaping the pore octave makes speckle. Inert at `texture_band` 1.0, for the same reason `texture_relief` is |
 | `mask_feather` | `0.04` | Frame-space seam transition, as a fraction of the face's extent in frame (floor 2px). Was effectively 1%, giving a ~1.4px transition on a 101px face — a hard edge, and the reported "pasted on" look |
 | `mask_erode` | `0.03` | Pulls the mask in, in aligned space, **before** it is feathered, so the transition sits on skin rather than straddling the expanded hull onto neck and hair |
+| `mask_shape_growth` | `0.0` | How far the mask may follow the **generated** face's outline rather than the target's, as a fraction of the face's extent. The mask is a hull of the *target's* landmarks, so the output silhouette is always the target's — free for `inswapper`, which does not move the contour, and destructive for a shape-aware model, which does. Bounded, lower-face only, and self-neutralising. See "Identity" below |
+| `identity_push` | `0.0` | Extrapolates the source identity away from the target's in ArcFace space before the swapper is conditioned on it (`src*(1+k) - tgt*k`, renormalised). Every model lands *between* the two faces; this moves the point it aims at. 0.2-0.3 to start, hard-clamped at 0.6 |
+| `identity_probe` | `0` | Measure source-to-output ArcFace similarity every Nth frame. Reports `id_swap`/`id_restore`/`id_final`/`id_out`/`id_target` in the REALISM block. Off on a call, `5` for a measurement session |
 | `diffuse_strength` | `0.0` | Subsurface scatter — softens *shading* the way light under skin does, on LAB's L channel only, with eyes/nose/mouth cut out. Answers "the skin reads hard", which is a different complaint from "plastic" and a different band. **Off by default, never judged on footage.** 0.2-0.4 expected |
 | `aligned_size` | `256` | **Ceiling** on compositing resolution (clamped 128–512). The size actually used follows the face's own size in frame, in steps, with hysteresis — a distant face is not upsampled to detail its webcam never captured, and costs proportionally less |
 | `temporal_alpha` | `0.6` | EMA on aligned pixels, kills shimmer (`1.0` disables) |
@@ -1778,14 +1818,35 @@ carrying both a **spec** (kind, alignment template, native size, normalisation,
 URL) and a **look profile** (`enhancer_weight`, `enhance_strength`,
 `aligned_min`).
 
-| | inswapper_128 | hyperswap_1a/1b/1c_256 |
-|---|---|---|
-| Source input | ArcFace embedding via `emap` | ArcFace embedding, direct |
-| Template | `arcface_128` | `arcface_128` (identical) |
-| Native size | 128 | 256 |
-| `enhance_strength` | 0.7 | 0.5 |
-| `enhancer_weight` | 0.7 | 0.8 |
-| `aligned_min` | 128 | 256 |
+| | inswapper_128 | hyperswap_1a/1b/1c_256 | hififace_unofficial_256 |
+|---|---|---|---|
+| Source input | ArcFace embedding via `emap` | ArcFace embedding, direct | ArcFace embedding through a **converter** |
+| Template | `arcface_128` | `arcface_128` (identical) | **`mtcnn_512`** |
+| Native size | 128 | 256 | 256 |
+| `enhance_strength` | 0.7 | 0.5 | 0.5 |
+| `enhancer_weight` | 0.7 | 0.8 | 0.8 |
+| `aligned_min` | 128 | 256 | 256 |
+
+**hififace is the one that moves face *shape*.** It is trained with a 3DMM in
+the loop — the source's identity coefficients recombined with the target's
+expression and pose — so the generator learns to move the face **contour**
+toward the source rather than only repainting the interior. Face outline is one
+of the strongest identity cues a viewer has, and it is the one thing every other
+model here leaves at the target's.
+
+Three things about it that are easy to get wrong:
+
+- **The 3D is training-time.** The export takes an embedding and a crop, nothing
+  else. No 3DMM fit at inference, no per-frame reconstruction cost.
+- **`mask_shape_growth` has to be on or half of it is discarded.** The mask is a
+  hull of the target's landmarks; a contour this model widens is clipped
+  straight back off. Measuring it at growth 0 and 0.08 on the same clip *is* the
+  experiment.
+- **`models-3.1.0`, not `models-3.3.0`.** The tag is load-bearing and the asset
+  does not exist under 3.3.0. It also pulls a second 21 MB file — the converter
+  that maps ArcFace's embedding space into its own, which runs **once per
+  source**, not per frame, and is fed the *raw* vector rather than the
+  normalised one.
 
 The appearance knobs used to live in `PRESETS._LOOK`, identical in every preset.
 That reasoning was right (a preset picks compute, not looks) but the location
@@ -2477,6 +2538,7 @@ back to the other backend or off — rather than failing.
 - `pipeline/services/database.py`: `FaceDatabase` embedding cache, averaging, `review_sources`
 - `pipeline/services/guards.py`: Source and runtime input guards, threshold validation
 - `pipeline/services/readings.py`: `Readings` — per-frame realism scalars, reported as distributions when a stream stops or a batch job finishes
+- `pipeline/services/identity.py`: `IdentityProbe` — ArcFace similarity between the source and the output, measured per compositing stage. Shares the detector's own recognition model rather than loading a second copy, and re-frames aligned crops from whichever swapper template made them into the `arcface_112` framing recognition needs
 
 ### Processing Pipeline
 - `pipeline/processing/pipeline.py`: `ProcessingPipeline` orchestrator (batch & stream modes)

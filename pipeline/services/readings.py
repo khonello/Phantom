@@ -146,6 +146,91 @@ class Readings:
         return '\n'.join(lines)
 
     @staticmethod
+    def _identity_verdicts(data: Dict[str, Any]) -> List[str]:
+        """
+        Say where the likeness went, when identity was measured.
+
+        The readings are cosines and a cosine on its own tells almost nobody
+        anything. What is actionable is which *step* lost the most, because each
+        step has a different lever behind it — and that only exists as a
+        difference between two of these numbers.
+
+        Deliberately reported as attribution rather than as a grade. There is no
+        score at which a swap is "good"; there is only a stage that cost more
+        than the others, and a knob attached to it.
+        """
+        notes: List[str] = []
+
+        out = data.get('id_out')
+        if out is None:
+            return notes
+
+        swap = data.get('id_swap')
+        restore = data.get('id_restore')
+        final = data.get('id_final')
+        target = data.get('id_target')
+
+        notes.append(
+            '  -> identity: output {:.3f} against the source (p50). '
+            'Read the drops below, not this number.'.format(out['p50']))
+
+        # Attribution, stage by stage, but only for stages that ran. Each is a
+        # different knob, and naming the knob is the point.
+        if swap is not None:
+            steps = []
+            if restore is not None:
+                steps.append((
+                    'restoration', swap['p50'] - restore['p50'],
+                    'enhance_strength, or restoration_preset'))
+                previous = restore['p50']
+            else:
+                previous = swap['p50']
+
+            if final is not None:
+                steps.append((
+                    'colour/detail/texture', previous - final['p50'],
+                    'color_strength — skin tone is an identity cue'))
+                previous = final['p50']
+
+            steps.append((
+                'mask and paste', previous - out['p50'],
+                'mask_erode, mask_feather, mask_shape_growth'))
+
+            notes.append(
+                '     the swapper produced {:.3f}; what happened after:'.format(
+                    swap['p50']))
+            for name, cost, lever in steps:
+                notes.append(
+                    '       {:<22} {:+.3f}   ({})'.format(name, -cost, lever))
+
+            worst = max(steps, key=lambda item: item[1])
+            if worst[1] > 0.02:
+                notes.append(
+                    '     -> {} is the largest single loss. Sweep {} before '
+                    'changing the swap model.'.format(worst[0], worst[2]))
+            elif swap['p50'] < 0.45:
+                notes.append(
+                    '     -> the compositor costs almost nothing here; the '
+                    'swap itself is the ceiling. This is the case for a '
+                    'different swapper, or identity_push.')
+
+        if target is not None:
+            if target['p50'] >= out['p50']:
+                notes.append(
+                    '     -> WARNING: the output resembles the TARGET more '
+                    'than the source ({:.3f} vs {:.3f}). The swap is not '
+                    'taking — check the source loaded, and that the mask is '
+                    'not handing most of the face back to the frame.'.format(
+                        target['p50'], out['p50']))
+            else:
+                notes.append(
+                    '     target similarity {:.3f}, source {:.3f}. The gap is '
+                    'the swap actually working.'.format(
+                        target['p50'], out['p50']))
+
+        return notes
+
+    @staticmethod
     def _verdicts(data: Dict[str, Any]) -> List[str]:
         """
         Say what the numbers mean, for the two that have a decision waiting.
@@ -191,6 +276,8 @@ class Readings:
                     'for real skin detail (p50). Without that reservation this '
                     'stage reaches parity on its own and leaves the texture '
                     'layer a rounding error to spend.'.format(reserve['p50']))
+
+        notes.extend(Readings._identity_verdicts(data))
 
         headroom = data.get('texture_headroom')
         if headroom is not None:

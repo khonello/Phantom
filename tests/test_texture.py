@@ -1147,7 +1147,7 @@ def composite_with(texture_strength, diffuse_strength):
     masker = MagicMock()
     masker.last_coverage = 1.0
 
-    def _build(_face, _matrix, real_crop, _shape):
+    def _build(_face, _matrix, real_crop, _shape, **_kwargs):
         edge = real_crop.shape[0]
         m = np.zeros((edge, edge), dtype=np.float32)
         cv2.circle(m, (edge // 2, edge // 2), int(edge * 0.42), 1.0, -1)

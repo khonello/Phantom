@@ -108,6 +108,27 @@ def _render(data: Dict[str, Any]) -> List[str]:
         realism.get('color_correction'), realism.get('grain'), realism.get('occluder'))))
 
     out.append('')
+    out.append('IDENTITY')
+    ident = data.get('identity') or {}
+    out.append(_line('identity_push', ident.get('push')))
+
+    growth = ident.get('shape_growth')
+    if growth and not ident.get('shape_growth_useful'):
+        # Not an error — the term is self-neutralising — but a reader who set
+        # it expecting a wider jaw should know the model does not produce one.
+        out.append(_line('mask_shape_growth', '{}  (inert - this swap model '
+                                              'does not move the contour)'.format(growth)))
+    elif ident.get('shape_growth_useful') and not growth:
+        out.append(_line('mask_shape_growth', '0  (a shape-aware model is '
+                                              'loaded and its contour is being clipped)'))
+    else:
+        out.append(_line('mask_shape_growth', growth))
+
+    interval = ident.get('probe_interval') or 0
+    out.append(_line('identity_probe', 'off' if not interval
+                     else 'every {} frames'.format(interval)))
+
+    out.append('')
     out.append('CAPTURE')
     out.append(_line('preset', capture.get('quality')))
     out.append(_line('resolution', '{}x{} @ {}fps'.format(

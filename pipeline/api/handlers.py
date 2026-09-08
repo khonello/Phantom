@@ -37,6 +37,7 @@ from pipeline.processing import texture
 from pipeline.services import guards
 from pipeline.services import swapper_models
 from pipeline.services import enhancer_models
+from pipeline.services import face_swapping
 from pipeline.services import onnx_session
 from pipeline.services.database import SourceReview
 from pipeline.services.templates import TemplateLibrary
@@ -590,6 +591,20 @@ def handle_get_stats(
             'grain': config.grain,
             'occluder': config.occluder,
         },
+        # Reported separately from `realism` because these three answer one
+        # question — is the output going to look like the source — and because
+        # two of them do nothing on their own. `mask_shape_growth` is inert
+        # unless the swap model moves the face contour, and `identity_probe`
+        # only decides whether the answer gets measured.
+        'identity': {
+            'push': config.identity_push,
+            'shape_growth': config.mask_shape_growth,
+            'probe_interval': config.identity_probe,
+            # A shape-aware model whose contour is being clipped back off is
+            # the configuration this whole section exists to make visible.
+            'shape_growth_useful': swapper_models.resolve(
+                config.swapper_model).kind == 'hififace',
+        },
         'capture': {
             'quality': config.quality,
             'width': config.capture_width,
@@ -944,6 +959,22 @@ _REALISM_FIELDS: Dict[str, Any] = {
     # the face wide is not a seam fix, it is a dissolve.
     'mask_feather': lambda v: min(0.25, max(0.0, float(v))),
     'mask_erode': lambda v: min(0.25, max(0.0, float(v))),
+    # How far the mask may follow the generated face's own outline. Clamped
+    # well short of a free hand: this admits swapped skin outside the target's
+    # landmark silhouette, and past ~15% of the face's extent that stops being
+    # a jawline and starts being hair and ear.
+    'mask_shape_growth': lambda v: min(0.15, max(0.0, float(v))),
+    # The two identity levers. Both live-switchable for the reason the swapper
+    # is: whether a face reads as the right person is a footage question, and
+    # A/B against one clip is the only way to answer it.
+    #
+    # `identity_probe` is the instrument rather than a knob — it measures and
+    # changes nothing — but it belongs here because the measurement has to be
+    # switchable on a pod without a restart, which is the whole argument for
+    # this command existing.
+    'identity_push': lambda v: min(
+        face_swapping.PUSH_MAX, max(0.0, float(v))),
+    'identity_probe': lambda v: max(0, int(v)),
     # The scatter pass. Independently toggleable on purpose: it and
     # `texture_strength` work in different bands and either could be blamed for
     # the other's artefact, so isolating them is required tooling.

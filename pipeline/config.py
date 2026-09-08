@@ -203,6 +203,39 @@ class FaceSwapConfig:
     mask_feather: float = 0.04
     mask_erode: float = 0.03
 
+    # How far the mask may follow the **generated** face's own outline instead
+    # of the target's, as a fraction of the face's extent. 0 is the behaviour
+    # that has always shipped.
+    #
+    # The mask is a convex hull of the *target's* 106 landmarks, so the output
+    # silhouette is the target's face, always. For inswapper that costs nothing
+    # — it repaints the interior and leaves the contour where it found it — but
+    # a model trained with 3D shape supervision generates a contour that follows
+    # the *source*, and clipping it back to the target's hull throws away the
+    # part of that model which is not available anywhere else. Face outline is
+    # one of the strongest identity cues a viewer has.
+    #
+    # Bounded, lower-face only, and self-neutralising: see `FaceMasker._shape`
+    # for why each of those is load-bearing. A model that does not move the
+    # contour produces a hull that already matches, so this does nothing at all
+    # and is safe to leave on.
+    mask_shape_growth: float = 0.0
+
+    # Extrapolate the source identity away from the target's, in ArcFace space,
+    # before the swapper is conditioned on it. 0 feeds the source exactly, which
+    # is what has always shipped. See `FaceSwapper._push`.
+    identity_push: float = 0.0
+
+    # Measure how much of the source's identity survives, every Nth frame.
+    # 0 is off. Costs one ArcFace inference per measured stage, on a model
+    # already resident, and reports as `id_*` in the REALISM block.
+    #
+    # A diagnostic rather than a knob — nothing reads the result except the
+    # readings — but the most important one in this file, because identity is
+    # the quantity the product exists to deliver and was the only one nothing
+    # measured. See pipeline/services/identity.py.
+    identity_probe: int = 0
+
     # Subsurface scattering, approximated. Real skin is translucent: light
     # enters, bounces around under the surface and leaves somewhere slightly
     # else, which softens the *shading* over a millimetre or two without
@@ -515,6 +548,9 @@ class FaceSwapConfig:
             'color_strength': self.color_strength,
             'mask_feather': self.mask_feather,
             'mask_erode': self.mask_erode,
+            'mask_shape_growth': self.mask_shape_growth,
+            'identity_push': self.identity_push,
+            'identity_probe': self.identity_probe,
             'diffuse_strength': self.diffuse_strength,
             'texture_strength': self.texture_strength,
             'texture_band': self.texture_band,

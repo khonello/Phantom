@@ -275,6 +275,48 @@ class FaceDetector:
             scope='FACE_DETECTOR',
         )
 
+    def recognition_model(self) -> Optional[Any]:
+        """
+        The ArcFace recognition model from the loaded pack, if it has one.
+
+        Exposed so `IdentityProbe` can embed the pipeline's *output* without
+        loading a second copy of `w600k_r50` onto the GPU. `buffalo_l` carries
+        it; a pack trimmed with `allowed_modules` may not, which is a capability
+        gap rather than a fault — the caller goes quiet, exactly as the guards do
+        when `face.pose` is missing.
+
+        Returns:
+            The recognition model, or None if this pack has none
+        """
+        try:
+            models = getattr(self._get_analyser(), 'models', None)
+            if not isinstance(models, dict):
+                return None
+            return models.get('recognition')
+        except Exception:
+            return None
+
+    def landmark_model(self) -> Optional[Any]:
+        """
+        The 106-point 2D landmark model from the loaded pack, if it has one.
+
+        Exposed for the same reason as `recognition_model`, and used for the
+        same class of job: running a model the pack already holds over a crop
+        this pipeline produced, rather than over the frame it came from. The
+        shape-following mask needs the landmarks of the **generated** face, and
+        those exist nowhere else.
+
+        Returns:
+            The landmark model, or None if this pack has none
+        """
+        try:
+            models = getattr(self._get_analyser(), 'models', None)
+            if not isinstance(models, dict):
+                return None
+            return models.get('landmark_2d_106')
+        except Exception:
+            return None
+
     def clear(self) -> None:
         """Clear the cached model (useful for memory cleanup)."""
         with self._lock:
