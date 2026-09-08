@@ -274,6 +274,22 @@ all three requirement sets together. The split here is history, not design.
 `ffmpeg` must be on `PATH` for RENDER mode (this machine has 7.1). OBS and the
 audio cable are the other two, covered above. Everything else is pip.
 
+**One model file**, for background replacement in the FILTERS panel:
+
+    python tools/fetch_segmentation_model.py
+
+~6 MB, downloaded to `desktop/models/`, verified by loading it and running one
+frame through. It is OpenCV's own PPHumanSeg export, Apache-2.0, and it runs
+through `cv2.dnn` — which is why this is a *file* rather than another Python
+dependency. `--check` reports what is installed without downloading.
+`PHANTOM_SEGMENT_MODEL` points at a file elsewhere.
+
+Without it the background rail still appears and selecting a background does
+**nothing** — the layer degrades to a pass-through and prints once what is
+missing and where it looked. That is deliberate: this is a decorative stage on
+the display path, and it must not be able to fail a live call. It is also the
+one part of the desktop that runs an ML model at all; nothing else here does.
+
 ---
 
 # Part 2 — The pipeline machine

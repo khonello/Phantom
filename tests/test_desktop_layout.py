@@ -60,7 +60,8 @@ _STATE = {
     'targetThumbnail': '', 'outputPath': '/tmp/out.mp4', 'outputThumbnail': '',
     'detectionStatus': '', 'guardReason': '', 'latencyText': '',
     'loadingMessage': '', 'restoration': 'auto', 'activeFilter': 'none',
-    'activeEffect': 'none', 'sessionReason': '', 'authError': '',
+    'activeEffect': 'none', 'activeBackground': 'none',
+    'sessionReason': '', 'authError': '',
     'pickerPhoto': '',
     'connected': True, 'pipelineRunning': False, 'batchRunning': False,
     'batchComplete': False, 'sourceSet': True, 'targetSet': True,
@@ -70,7 +71,14 @@ _STATE = {
     'authRequired': False, 'authChecking': False, 'statusError': False,
     'liveVersion': 0, 'webcamVersion': 0, 'authMinutes': 60,
     'maxPhotoTargets': 4, 'pickerTotal': 0, 'selectedTemplate': -1,
-    'filterList': [], 'effectList': [], 'templates': [], 'photoTargets': [],
+    'filterList': [], 'effectList': [],
+    # Populated rather than empty: the background rail is the tallest thing on
+    # the right, it grew from five entries to nine when it stopped holding the
+    # effects, and an empty model would instantiate no delegates and prove
+    # nothing about whether it still fits at `minimumHeight`.
+    'backgroundList': [{'key': 'k%d' % i, 'name': 'Name%d' % i}
+                       for i in range(9)],
+    'templates': [], 'photoTargets': [],
     'photoResults': [], 'pickerBoxes': [], 'pickerPosition': [],
 }
 
@@ -213,4 +221,92 @@ def test_the_content_grows_past_a_short_viewport(mode: str) -> None:
         'are reporting no implicit height again, so Math.max always picks the '
         'viewport and the Flickable has nothing to scroll'.format(
             mode, short['content'], short['viewport'])
+    )
+
+
+def _rail_extent(height: int) -> dict:
+    """
+    Load the window with the filter panel open and measure the background rail.
+
+    Its own loader rather than a parameter on `_measure`: that helper guards a
+    specific past bug about the sidebar's Flickable, and widening it to answer a
+    second question would make the failure message ambiguous about which one
+    broke.
+
+    Args:
+        height: Window height to lay out at
+
+    Returns:
+        {'rail': available height, 'content': height the chips actually need}
+    """
+    app = QGuiApplication.instance() or QGuiApplication(sys.argv[:1])
+
+    bridge = QQmlPropertyMap()
+    for key, value in _STATE.items():
+        bridge.insert(key, value)
+    bridge.insert('currentMode', 'realtime')
+    bridge.insert('mediaTab', 'video')
+    # The rail is only laid out while the panel is open.
+    bridge.insert('filterPanel', True)
+
+    engine = QQmlApplicationEngine()
+    engine.rootContext().setContextProperty('bridge', bridge)
+    engine.load(QUrl.fromLocalFile(QML))
+
+    roots = engine.rootObjects()
+    assert roots, 'main.qml produced no root object'
+    window = roots[0]
+    window.setProperty('width', 1600)
+    window.setProperty('height', height)
+
+    result: dict = {}
+
+    def collect() -> None:
+        rail = window.findChild(QQuickItem, 'backgroundRail')
+        assert rail is not None, 'the background rail is not in the window'
+
+        needed = 0.0
+        for kid in rail.childItems():
+            kid_height = kid.property('height') or 0
+            if kid_height > 0:
+                needed = max(needed, kid.mapToItem(rail, 0, kid_height).y())
+
+        result.update(
+            rail=float(rail.property('height')),
+            content=float(needed),
+        )
+        app.quit()
+
+    QTimer.singleShot(120, collect)
+    QTimer.singleShot(8000, app.quit)
+    app.exec()
+
+    engine.deleteLater()
+    assert result, 'the window never laid out'
+    return result
+
+
+@pytest.mark.parametrize('height', [900, 700, 620])
+def test_the_background_rail_fits_without_scrolling(height: int) -> None:
+    """
+    Every background chip is on screen at the window's minimum height.
+
+    The rail is anchored, not scrollable, so anything past its bottom edge is
+    simply unreachable — there is nothing to scroll and no indication that a
+    chip exists. It held five effects and now holds nine backgrounds, which is
+    the change that makes this worth pinning rather than assuming.
+
+    620 is `minimumHeight`; below that the window cannot be resized, so a
+    failure there is the real floor rather than a hypothetical one.
+    """
+    measured = _rail_extent(height)
+    # Guards the guard: a rail that measured nothing — wrong objectName, panel
+    # never opened, delegates not instantiated — would satisfy the fit test
+    # vacuously and go on satisfying it after the rail broke.
+    assert measured['content'] > 0, 'the rail measured no chips at all'
+    assert measured['content'] <= measured['rail'], (
+        'at {}px the rail is {:.0f} tall but its chips need {:.0f} — '
+        '{:.0f}px of them are off the bottom'.format(
+            height, measured['rail'], measured['content'],
+            measured['content'] - measured['rail'])
     )

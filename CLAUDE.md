@@ -1789,74 +1789,177 @@ readers looking for a multi-file feature that never existed. The code still says
 `run_batch`, correctly — there it means "not streaming", and it now covers
 photos and templates too.
 
-### Filters and effects — the last layers
-Two decorative layers over the finished swap, in this order:
+### Filters, backgrounds and effects — the last layers
 
-    swap  ->  filter (regrades the picture)  ->  effect (draws on top of it)
+Three decorative layers over the finished swap, in this order:
 
-A **filter** (`desktop/filters.py`) is a grade — Warm, Mono, Noir. An **effect**
-(`desktop/effects.py`) is an overlay — Confetti, Snow, Hearts, Bubbles, Sparkle.
-Filter first, because an effect is meant to sit *on* the picture rather than be
-part of it; grading confetti would tint it to match a look it is supposed to be
-separate from.
+    swap  ->  background (replaces what is behind them)
+          ->  filter     (regrades the picture)
+          ->  effect     (draws on top of it)
+
+A **background** (`desktop/backgrounds.py`) replaces the room — Blur, Blur+, and
+five solid colours. A **filter** (`desktop/filters.py`) is a grade — Warm, Mono,
+Noir. An **effect** (`desktop/effects.py`) is an overlay — Confetti, Snow,
+Hearts, Bubbles, Sparkle.
+
+**The order is not arrangement, it is correctness.** A filter regrades the whole
+picture, so a background replaced *before* it is graded along with everything
+else; grading first would leave an ungraded background behind a graded person,
+which reads as pasted on — the same failure the compositor's colour stages exist
+to prevent at the jaw. An effect comes last because it is meant to sit *on* the
+picture rather than be part of it; grading confetti would tint it to match a
+look it is supposed to be separate from.
 
 Both are shown by one control. Pressing FILTERS shrinks the viewport and reveals
 a **horizontal strip** of grades along the bottom and a **vertical rail** of
-overlays down the right; HIDE gives the space back. APPLY sits beside HIDE
+backgrounds down the right; HIDE gives the space back. APPLY sits beside HIDE
 rather than at the end of the chips, since it acts on the whole panel and not on
 any one chip.
 
-**Effects are a function of the clock, not of call count.** Every particle's
-position is computed from a timestamp and wraps with a modulo, so nothing holds
-state between frames. That is what makes the overlay safe to render from two
-places at two different rates — the webcam thread's local preview and the
-display timer's pipeline frames — which a `step()`-style animator could not be:
-advanced by both, it would run at the sum of their rates. Nothing is loaded from
-disk either; these are drawn, not decoded, so there are no assets to bundle and
-no GIF to keep in step with a frame rate.
+**The rail used to hold the effects and now holds the backgrounds.** Effects were
+never used, and a background is what someone on a video call actually reaches
+for. `desktop/effects.py` is **unwired, not deleted**: `_decorate` still applies
+an effect key, the bridge still exposes `effectList` / `selectEffect`, and the
+module costs exactly zero while no key is set — so restoring a picker is a
+one-place change rather than rebuilding a measured layer. Delete it later, with
+evidence, or not at all.
+
+Two properties do the work for all three:
+
+- **Last, always.** A filter is applied after the swap has fully composited.
+  Grading first would have `FaceCompositor` match the face to an already-graded
+  frame and then grade it again; applied last, a filter cannot break the swap
+  underneath it. The webcam frame sent *upstream* is deliberately ungraded for
+  the same reason — only the local preview gets it.
+- **Desktop-side, never the pipeline.** They need nothing the face models
+  provide, so they must not compete for a latency budget the swap has not been
+  measured against, and changing one should be a local variable rather than a
+  round trip to a rented GPU.
+
+Choosing is not applying. The picker sets the look and the preview shows it, but
+nothing leaves the machine until **APPLY** is pressed — so a look can be
+auditioned without it reaching a call. The same key is read by the display, the
+virtual camera and a saved photo through one accessor, so those three can never
+disagree about whether a layer is on.
+
+Filters and backgrounds default **off**, and should stay off during the pod
+session: that session exists to judge whether the swap reads as real, and
+anything on top changes what is being looked at.
 
 Measured at 960x540: filters worst 7.5ms (Soft), effects worst 2.8ms (Bubbles),
 against a 33ms display tick — and **zero** when nothing is on, since the
 undecorated path still lets Qt load the JPEG itself.
+
+**Background is the expensive one: 19.5ms per frame at 640x360**, on a four-core
+laptop, and it started at 42.9ms. Two things got it there, and both are worth
+knowing before anyone "simplifies" them:
+
+- **The composite is integer.** Converting both pictures to float32 and blending
+  with a float alpha is seven full-frame float passes — 12.3ms. `cv2.multiply`
+  on uint8 with a scale factor stays in 8-bit SIMD: **3.5ms**, maximum
+  difference 2/255, which is inside the grain the compositor already added.
+- **The matte is recomputed every other frame.** The model is 28ms of the
+  original 43 and cannot be made cheaper: threading past two cores buys nothing
+  (45.8 / 28.4 / 28.7 / 27.3ms at 1 / 2 / 4 / 8 threads) and its input edge is
+  fixed by the export. Decimation is defensible *here* and not for the swap — a
+  silhouette is slowly varying, the mask is already an EMA, and being one frame
+  late costs a few pixels of background on a shoulder rather than a face lagging
+  its own head. The bill is 66ms of matte lag at 15fps on the fastest movement;
+  revisit `_MATTE_INTERVAL` if the edge is seen swimming on quick turns.
+
+A dead net gives up rather than holding its last mask. `Segmenter` nulls its net
+on any inference failure, so the failure is permanent, and holding would paint a
+frozen silhouette over moving video for the rest of the session.
+
+That last property is why **`_has_decoration()` has to name every layer**. A
+layer left out of it does nothing at all whenever no other layer is on, then
+starts working the moment one is: silent, no error, and reproducible only by
+accident. Same class as the webp mimetype bug below.
 
 That layout is not a style choice. The first version was a separate window with
 its own preview, and it was wrong the moment the image tab was open — it showed
 the live camera in a mode that has no live camera. A strip has nothing to
 preview: whatever the mode was already showing is what a filter is judged
 against, so the body is identical in every mode and only the panels move.
-`filterStrip.reserved` and `effectRail.reserved` are the single numbers both
+`filterStrip.reserved` and `backgroundRail.reserved` are the single numbers both
 viewports read, so the body and the panels cannot disagree about the split.
 
 Showing the strip persists across a media-tab switch — it is a preference, not
 a detour.
 
-Two properties do the work for both:
+#### What background replacement does and does not buy
 
-- **Last, always.** A filter is applied after the swap has fully composited.
-  Grading first would have `FaceCompositor` match the face to an already-graded
-  frame and then grade it again; applied last, a filter cannot break the swap
-  underneath it. The webcam frame sent *upstream* is deliberately ungraded for
-  the same reason — only the local preview gets the filter.
-- **Desktop-side, never the pipeline.** Filters need nothing the face models
-  provide, so they must not compete for a latency budget the swap has not been
-  measured against, and changing one should be a local variable rather than a
-  round trip to a rented GPU. `desktop/filters.py` is lookup tables and one
-  cached multiply — worst case ~7ms at 960x540 against a 33ms timer, and
-  **exactly zero** when nothing is enabled, since the unfiltered path still
-  lets Qt decode the JPEG itself.
+It runs on the frame **that came back from the pod**, after the swap, before the
+viewport and the virtual camera. Three consequences, and all three are why it is
+placed there:
 
-Choosing is not applying. The picker sets the look and the preview shows it, but
-nothing leaves the machine until **APPLY** is pressed — so a look can be
-auditioned without it reaching a call. The same key is read by the display, the
-virtual camera and a saved photo through one accessor, so those three can never
-disagree about whether a filter is on.
+- **Every conferencing app gets the same behaviour.** Some provide a background
+  of their own, some do not, and the ones that do disagree about quality. Doing
+  it at the virtual camera is one answer everywhere instead of one per app —
+  which is the whole reason to build it when Zoom already has its own.
+- **The pipeline's measurements are untouched.** `--debug-frames` are written on
+  the pod, before this stage exists, so `tools/compare_frames.py` still divides
+  the face's statistics by a **real** background. Note what segmenting *before*
+  the upload would have done instead: `compare_frames.py` takes "outside" as
+  everything beyond a dilated face mask, so a blurred or flat background
+  collapses `outside_hf` and `outside_sigma`, the face/frame detail ratio jumps
+  from 0.584 to well above 1.0, and every reading taken afterwards is
+  incomparable with every reading taken before.
+- **It costs the swap nothing** — it spends the desktop's 33ms display tick, not
+  the pipeline's 50ms frame deadline.
 
-Filters default **off**, and should stay off during the pod session: that
-session exists to judge whether the swap reads as real, and a grade on top
-changes what is being looked at.
+What it does **not** buy, and must not be sold as: the operator's real room still
+travels to the pod, because the frame is segmented after it comes back. This is a
+feature for the call, not a privacy measure, and it saves no uplink either.
+Moving it ahead of the upload would make it both — and would break the
+measurement property above, which is the trade to weigh if anyone proposes it.
+
+**Blur is the forgiving mode and solid colour is the dangerous one**, which is
+why the list is ordered that way and why the colours come last. A matte error
+under blur puts a few pixels of a *blurred copy of the same scene* against a
+sharp person: low contrast, close to invisible. The same error against a constant
+colour is a high-contrast fringe, and hair is exactly where a cheap segmenter is
+least certain. Judge it on footage by the right question — not "does the
+background look good" but **"does the face still read real with it on"**, since
+the matte edge is attached to the person's silhouette and a viewer will attribute
+an artefact near the head to the swap.
+
+**No new dependency, and one file that is not in the repository.** The desktop
+deliberately loads no face model; `cv2.dnn` ships inside the opencv-python that
+filters already require and reads ONNX directly, so this adds a **model file**
+rather than a package. `python tools/fetch_segmentation_model.py` gets it —
+OpenCV's own PPHumanSeg export, ~6 MB, **Apache-2.0**, which is the licence
+question worth asking before something ships to paying customers. It verifies by
+loading the file and running a frame through, because a truncated download, an
+error page, or a **Git LFS pointer** under an `.onnx` name would all leave the
+feature quietly dead; the last is not hypothetical, since `raw.githubusercontent`
+serves the pointer and only `media.githubusercontent` serves the payload. Absent
+the file the layer is a no-op that says once what is missing — the same way the
+pipeline degrades without the occluder, rather than failing a live call over a
+decorative stage.
+
+`MODELS` in `backgrounds.py` is a registry, the same shape as
+`swapper_models.py` and `enhancer_models.py` and for the same reason: **the model
+owns the facts about itself.** Input edge, normalisation and channel order are
+properties of the weights, not preferences — PPHumanSeg is 192px and wants
+`[-1, 1]`, a MediaPipe-style export is 256px and wants `[0, 1]`, and feeding
+either the other's convention yields a washed-out matte that reads as a weak
+model rather than a wrong input. The output plane is read rather than assumed:
+one-channel sigmoid and two-channel softmax are both handled, and guessing wrong
+would invert the matte and composite the room over the person.
+
+**One renderer per stream, and that is the load-bearing part.** `_decorate` runs
+from the display timer *and* the webcam thread, over two genuinely different
+videos. A matte has to be smoothed across frames or its boundary crawls — failure
+mode 3, on the longest boundary in the picture — and smoothing is **state**. One
+shared EMA would be advanced by both callers at the sum of their rates while
+blending two unrelated pictures. `desktop/effects.py` dodges this by being a pure
+function of the clock; a matte cannot be, so the state is separated by stream
+instead: `_bg_display`, `_bg_webcam`, and a throwaway for a saved still, which
+has nothing to smooth and must not disturb either.
 
 Not covered: **RENDER**. A video is written pipeline-side, so the desktop never
-holds those frames. Filtering a render needs either a pipeline stage or a local
+holds those frames. Decorating a render needs either a pipeline stage or a local
 FFmpeg pass, and neither is built.
 
 ### Template targets

@@ -1451,7 +1451,7 @@ Window {
                     anchors {
                         fill: parent
                         bottomMargin: filterStrip.reserved + tuningStrip.reserved
-                        rightMargin: effectRail.reserved
+                        rightMargin: backgroundRail.reserved
                     }
                     visible: bridge.currentMode === "realtime"
 
@@ -1757,7 +1757,7 @@ Window {
                     anchors {
                         fill: parent
                         bottomMargin: filterStrip.reserved + tuningStrip.reserved
-                        rightMargin: effectRail.reserved
+                        rightMargin: backgroundRail.reserved
                     }
                     visible: bridge.currentMode !== "realtime"
 
@@ -2216,7 +2216,12 @@ Window {
                         MouseArea {
                             id: applyArea
                             anchors.fill: parent
+                            // `activeEffect` stays in the test although the
+                            // rail no longer sets it: the effects layer is
+                            // unwired rather than removed, so re-adding a
+                            // picker stays a one-place change.
                             enabled: bridge.activeFilter !== "none"
+                                     || bridge.activeBackground !== "none"
                                      || bridge.activeEffect !== "none"
                                      || bridge.filtersEnabled
                             onClicked: bridge.toggleFilters()
@@ -2383,14 +2388,33 @@ Window {
                     }
                 }
 
-                // ══ EFFECT RAIL ════════════════════════════════════════════
-                // The overlays — confetti and the rest. Vertical on the right,
-                // because they are a different kind of thing from a grade: one
-                // changes the colour of the picture, the other puts something on
-                // top of it. Shown and hidden by the same control as the strip,
-                // since they are two halves of one panel.
+                // ══ BACKGROUND RAIL ════════════════════════════════════════
+                // What sits behind the person. Vertical on the right, because
+                // it is a different kind of thing from a grade: one changes the
+                // colour of the picture, the other replaces part of it. Shown
+                // and hidden by the same control as the strip, since they are
+                // two halves of one panel.
+                //
+                // This rail used to hold the overlay effects — confetti, snow
+                // and the rest. They are still in `desktop/effects.py`, still
+                // applied by `_decorate`, and cost exactly nothing while no key
+                // is set; what they lost is the picker. A background is what an
+                // operator on a video call actually reaches for, and the effects
+                // had never been used.
+                //
+                // Order matters in the list, not just in the chain: blur is the
+                // forgiving mode, because a matte error under it puts a blurred
+                // copy of the same scene against the person. The solid colours
+                // are last because the same error against a constant colour is
+                // a high-contrast fringe, and hair is where the matte is least
+                // certain.
                 Item {
-                    id: effectRail
+                    id: backgroundRail
+                    // Named so tests/test_desktop_layout.py can measure it. The
+                    // list grew from five entries to nine when it stopped
+                    // holding the effects, and it is anchored rather than
+                    // scrollable, so "does it still fit" is a real question.
+                    objectName: "backgroundRail"
                     property int reserved: bridge.filterPanel ? width + 12 : 0
 
                     anchors {
@@ -2405,11 +2429,11 @@ Window {
                         spacing: 6
 
                         Repeater {
-                            model: bridge.effectList
+                            model: bridge.backgroundList
 
                             Rectangle {
                                 width: 76; height: 30; radius: 6
-                                property bool isActive: bridge.activeEffect === modelData.key
+                                property bool isActive: bridge.activeBackground === modelData.key
                                 color: isActive ? "#1a1a30" : (eh.containsMouse ? "#111120" : "#0d0d18")
                                 border.color: isActive ? "#2e2e55" : "#14142a"
                                 border.width: 1
@@ -2425,7 +2449,7 @@ Window {
                                 HoverHandler { id: eh }
                                 MouseArea {
                                     anchors.fill: parent
-                                    onClicked: bridge.selectEffect(modelData.key)
+                                    onClicked: bridge.selectBackground(modelData.key)
                                     cursorShape: Qt.PointingHandCursor
                                 }
                             }

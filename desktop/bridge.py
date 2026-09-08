@@ -27,6 +27,7 @@ from pipeline.api.schema import (
     VIDEO_CHUNK_BYTES,
 )
 from desktop import auth
+from desktop import backgrounds as scene_backgrounds
 from desktop import effects as overlay_effects
 from desktop import filters as look_filters
 from desktop.controller import PipelineClient
@@ -251,6 +252,7 @@ class Bridge(QObject):
     filterPanelChanged = Signal(bool)
     filterChanged = Signal(str)
     effectChanged = Signal(str)
+    backgroundChanged = Signal(str)
     filtersEnabledChanged = Signal(bool)
     templatesChanged = Signal()
     selectedTemplateChanged = Signal(str)
@@ -407,7 +409,21 @@ class Bridge(QObject):
         self._filter_panel: bool = False
         self._filter: str = 'none'
         self._effect: str = 'none'
+        self._background: str = 'none'
         self._filters_enabled: bool = False
+
+        # One background renderer per stream, and the split is load-bearing.
+        # `_decorate` is called from the display timer and from the webcam
+        # thread, over two different videos; the matte is smoothed across
+        # frames, and one shared EMA would be advanced by both callers at the
+        # sum of their rates while blending two unrelated pictures. Effects
+        # dodge this by being a function of the clock — a matte cannot be, so
+        # the state is separated by stream instead. A saved photo gets a
+        # throwaway: one frame has nothing to smooth and must not disturb a
+        # live stream's mask.
+        self._bg_display = scene_backgrounds.Renderer()
+        self._bg_webcam = scene_backgrounds.Renderer()
+        self._warned_no_segmenter: bool = False
         self._webcam_version = 0
         self._live_version = 0
         self._quality = 'optimal'
@@ -1331,6 +1347,16 @@ class Bridge(QObject):
         """Key of the selected overlay effect."""
         return self._effect
 
+    @Property(list, constant=True)
+    def backgroundList(self) -> List[Dict[str, str]]:
+        """Every available background as {key, name}."""
+        return scene_backgrounds.names()
+
+    @Property(str, notify=backgroundChanged)
+    def activeBackground(self) -> str:
+        """Key of the selected background."""
+        return self._background
+
     @Property(bool, notify=filtersEnabledChanged)
     def filtersEnabled(self) -> bool:
         """Whether the selected filter is actually being applied."""
@@ -1490,6 +1516,29 @@ class Bridge(QObject):
         self._effect = key
         self.effectChanged.emit(key)
 
+    @Slot(str)
+    def selectBackground(self, key: str) -> None:
+        """
+        Choose a background. Applying is still the APPLY button.
+
+        Both renderers are reset rather than left holding the previous mode's
+        smoothed matte, which would otherwise bleed one background's edge into
+        the first frames of the next.
+        """
+        if scene_backgrounds.get(key) is None or key == self._background:
+            return
+        self._background = key
+        self._bg_display.reset()
+        self._bg_webcam.reset()
+        if key != 'none' and not self._bg_display.available:
+            # Once, not per frame: this is a 30fps path and the operator has
+            # just asked for something that will visibly not happen.
+            if not self._warned_no_segmenter:
+                self._warned_no_segmenter = True
+                print('[Bridge] background selected but {}'.format(
+                    self._bg_display.failure), file=sys.stderr)
+        self.backgroundChanged.emit(key)
+
     @Slot()
     def toggleFilters(self) -> None:
         """Turn the selected filter on or off everywhere."""
@@ -1508,34 +1557,69 @@ class Bridge(QObject):
             return ''
         return self._effect
 
+    def _background_key(self) -> str:
+        """The background to composite right now, or '' for none."""
+        if not self._filters_enabled:
+            return ''
+        return self._background
+
     def _decorating(self) -> bool:
         """
         Whether anything decorative is switched on.
 
         Checked before decoding, so a frame nobody is grading keeps the cheap
         path where Qt loads the JPEG itself and no decode happens in Python.
-        """
-        return bool(self._filter_key()) or bool(self._effect_key())
 
-    def _decorate(self, frame: Any) -> Any:
+        Every decorative layer has to be named here. A layer missing from this
+        test does nothing at all whenever no other layer is on, and then starts
+        working the moment one is — silent, with no error, and reproducible only
+        by accident.
         """
-        Apply the decorative layers, in order: grade, then overlay.
+        return (bool(self._filter_key())
+                or bool(self._effect_key())
+                or bool(self._background_key()))
 
-        Filter first because it regrades the whole picture; the effect is drawn
-        on top of the result rather than being graded along with it. One method
-        so the display, the virtual camera and a saved photo cannot end up
-        applying them in different orders.
+    def _decorate(
+        self,
+        frame: Any,
+        renderer: Optional[scene_backgrounds.Renderer] = None,
+    ) -> Any:
+        """
+        Apply the decorative layers, in order: background, grade, then overlay.
+
+        **Background first, and it cannot be moved.** A filter regrades the
+        whole picture, so a background replaced before it is graded along with
+        everything else and stays consistent; grading first would leave an
+        ungraded background sitting behind a graded person, which reads as
+        pasted on — the same failure the compositor spends its colour stages
+        avoiding at the jaw.
+
+        Filter then overlay for the reason that ordering already existed: the
+        effect is drawn on top of the graded result rather than being graded
+        along with it. One method, so the display, the virtual camera and a
+        saved photo cannot end up applying them in different orders.
 
         The overlay is a function of the clock rather than of how many times
         this has been called, which is what lets the webcam thread and the
-        display timer both render without doubling the animation's speed.
+        display timer both render without doubling the animation's speed. The
+        background cannot be made stateless the same way — a matte has to be
+        smoothed across frames — so it takes its state from a per-stream
+        `renderer` instead.
 
         Args:
             frame: BGR frame, already swapped
+            renderer: Background state for *this* stream. Defaults to the
+                      display's; the webcam thread passes its own, and a still
+                      should pass a throwaway
 
         Returns:
             The decorated frame, or the input untouched when nothing is on
         """
+        background_key = self._background_key()
+        if background_key:
+            lane = renderer if renderer is not None else self._bg_display
+            frame = lane.render(frame, background_key)
+
         filter_key = self._filter_key()
         if filter_key:
             frame = look_filters.apply(frame, filter_key)
@@ -2109,7 +2193,8 @@ class Bridge(QObject):
                             np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR
                         )
                         if decoded is not None:
-                            cv2.imwrite(out_path, self._decorate(decoded))
+                            cv2.imwrite(out_path, self._decorate(
+                                decoded, scene_backgrounds.Renderer()))
                         else:
                             with open(out_path, 'wb') as fh:
                                 fh.write(image_bytes)
@@ -2856,7 +2941,7 @@ class Bridge(QObject):
                 if frame is None:
                     live_buffer.update_from_bytes(jpeg_bytes)
                 else:
-                    frame = self._decorate(frame)
+                    frame = self._decorate(frame, self._bg_display)
                     live_buffer.update_from_numpy(frame)
                     if self._virtual_cam_active:
                         self._push_frame_to_vcam(frame)
@@ -3579,7 +3664,8 @@ class Bridge(QObject):
                     # The local preview does get it, so a look can be
                     # auditioned before any pipeline is running — which is when
                     # someone would be choosing one.
-                    webcam_buffer.update_from_numpy(self._decorate(frame))
+                    webcam_buffer.update_from_numpy(
+                        self._decorate(frame, self._bg_webcam))
 
                     failures = 0
                     reported = False

@@ -16,8 +16,13 @@
 PySide6>=6.5.0
 
 # Frame handling: decode what the pipeline returns, encode what is sent up,
-# and every filter and effect. numpy comes with it but is pinned explicitly
-# because the compositing helpers assume it directly.
+# and every filter, background and effect. numpy comes with it but is pinned
+# explicitly because the compositing helpers assume it directly.
+#
+# `cv2.dnn` is load-bearing here and easy to overlook: it is what runs the
+# background segmentation model, which is why that feature adds a model file
+# rather than onnxruntime. This stays the only inference the desktop does — no
+# face model belongs on this machine.
 opencv-python>=4.8.0
 numpy>=1.24.0
 
