@@ -10,7 +10,7 @@ Previously this warmed only the detector and called `Enhancer()` with no
 arguments, which raises TypeError and was swallowed by a bare except — so
 restoration has never actually been pre-warmed, and CodeFormer downloaded
 on the first frame instead. The swapper was never warmed at all, which
-matters more now: hyperswap is a 384 MB download.
+matters more now: a non-incumbent swap model is a 200-1600 MB download.
 """
 
 import os
@@ -71,7 +71,8 @@ def _swapper() -> None:
             raise RuntimeError('inswapper weights unavailable')
         swapper._get_swapper()
     else:
-        # Downloads on first call. 384 MB for hyperswap, which is exactly the
+        # Downloads on first call. Hundreds of megabytes for a non-incumbent
+        # model, which is exactly the
         # kind of wait that should not land on a customer.
         if swapper._get_session(model) is None:
             raise RuntimeError('{} weights unavailable'.format(model.name))

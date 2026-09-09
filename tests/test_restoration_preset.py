@@ -80,7 +80,7 @@ def test_full_keeps_all_of_the_restored_face():
 
 def test_auto_returns_to_the_model_profile():
     """`auto` is only meaningful as the model's own value."""
-    c = _config('hyperswap_1a_256')
+    c = _config('alphaface_256')
     profile_strength = c.enhance_strength
 
     c.apply_restoration_preset('full')
@@ -103,7 +103,7 @@ def test_an_unknown_preset_is_refused_and_changes_nothing():
 def test_a_model_change_does_not_undo_an_explicit_choice():
     """
     `apply_model_profile` sets enhance_strength per model — 0.7 for inswapper,
-    0.5 for hyperswap — and the desktop applies a profile on start. Without
+    0.5 for alphaface — and the desktop applies a profile on start. Without
     this, picking a strength and then changing swapper would revert it with
     nothing said: the same shape as `startPipeline` firing `set_enhance` over a
     pipeline launched with `--no-enhance`.
@@ -112,10 +112,10 @@ def test_a_model_change_does_not_undo_an_explicit_choice():
     c.apply_restoration_preset('subtle')
     chosen = c.enhance_strength
 
-    c.apply_model_profile('hyperswap_1a_256')
+    c.apply_model_profile('alphaface_256')
 
     assert c.enhance_strength == chosen, 'the model profile overrode the operator'
-    assert c.swapper_model == 'hyperswap_1a_256', 'the model itself must still change'
+    assert c.swapper_model == 'alphaface_256', 'the model itself must still change'
 
 
 def test_auto_still_follows_the_model_across_a_change():
@@ -123,11 +123,11 @@ def test_auto_still_follows_the_model_across_a_change():
     c = _config('inswapper_128')
     assert c.restoration_preset == 'auto'
 
-    c.apply_model_profile('hyperswap_1a_256')
+    c.apply_model_profile('alphaface_256')
 
     from pipeline.services import swapper_models
     assert c.enhance_strength == swapper_models.resolve(
-        'hyperswap_1a_256').enhance_strength
+        'alphaface_256').enhance_strength
 
 
 def test_a_model_change_still_moves_everything_else():
@@ -135,7 +135,7 @@ def test_a_model_change_still_moves_everything_else():
     c = _config('inswapper_128')
     c.apply_restoration_preset('subtle')
 
-    c.apply_model_profile('hyperswap_1a_256')
+    c.apply_model_profile('alphaface_256')
 
     assert c.aligned_min == 256
 

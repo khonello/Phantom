@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from typing import Dict, Tuple
 
 # Same host and release the swapper weights come from. Note the tag differs:
-# the restoration models live under `models-3.0.0`, while hyperswap needs
+# the restoration models live under `models-3.0.0`, while some swappers need
 # `models-3.3.0` — 3.3.0 carries no restoration assets at all. Verified
 # 2026-08-30 by listing both releases.
 _ASSETS = 'https://github.com/facefusion/facefusion-assets/releases/download'

@@ -57,7 +57,7 @@ def test_reports_resolved_models_not_requested_ones():
     """
     config = FaceSwapConfig()
     config.set('enhancer_model', 'coformer')     # typo
-    config.set('swapper_model', 'hyperswapp')    # typo
+    config.set('swapper_model', 'alphafacep')    # typo
 
     data = _stats(config)
     assert data['enhancer']['model'] == 'gpen_bfr_256'
@@ -66,7 +66,7 @@ def test_reports_resolved_models_not_requested_ones():
 
 def test_reports_the_swapper_native_size():
     config = FaceSwapConfig()
-    config.set('swapper_model', 'hyperswap_1a_256')
+    config.set('swapper_model', 'alphaface_256')
     assert _stats(config)['swapper']['native_size'] == 256
 
 

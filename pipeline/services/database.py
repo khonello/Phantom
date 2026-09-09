@@ -738,11 +738,35 @@ class FaceDatabase:
         raw = None
         raws = [getattr(f, 'embedding', None) for f in usable]
         if all(vector is not None for vector in raws):
-            raw = np.average(
-                np.array([np.asarray(v, dtype=np.float64).ravel()
-                          for v in raws]),
-                axis=0, weights=weights,
-            ).astype(np.float32)
+            # The magnitude is restored, and that is a fix rather than tidiness.
+            #
+            # Averaging vectors that point in different directions produces a
+            # resultant *shorter* than any of its inputs, by exactly the amount
+            # they disagree. Two photographs of one person sit around cosine
+            # 0.75-0.9 in ArcFace space, so the plain average of their raw
+            # vectors comes out 5-20% below the norm of a real embedding —
+            # further below the more photographs are added, and the more the
+            # person varies between them. Uploading a fourth photograph made the
+            # conditioning vector *weaker*.
+            #
+            # That was invisible while inswapper was the only model, because it
+            # divides by the norm and is scale-invariant. It stopped being
+            # invisible the moment `alphaface` (conditioned on the raw vector)
+            # and the `crossface` converters (non-linear maps fitted on
+            # ArcFace's own output scale) were registered — a shrunk magnitude
+            # is not a scaled input to those, it is a different one, and it
+            # degrades toward a blander identity rather than failing.
+            #
+            # Pointed along `normed` rather than averaged separately, so the two
+            # vectors this returns cannot disagree about direction: they are one
+            # identity expressed at two scales, which is what every consumer
+            # assumes.
+            magnitude = float(np.average(
+                [float(np.linalg.norm(np.asarray(v, dtype=np.float64).ravel()))
+                 for v in raws],
+                weights=weights,
+            ))
+            raw = (normed * magnitude).astype(np.float32)
 
         return types.SimpleNamespace(
             normed_embedding=normed.astype(np.float32),

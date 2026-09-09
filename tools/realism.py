@@ -9,7 +9,7 @@ knobs, and the CLI flags are read once at process start. So the documented way
 to "A/B live" required writing a WebSocket client first.
 
     python tools/realism.py --host 1.2.3.4 --port 19278 \\
-        swapper_model=hyperswap_1a_256 enhance_strength=0.7
+        swapper_model=alphaface_256 enhance_strength=0.7
 
     python tools/realism.py --host 1.2.3.4 --port 19278 enhance=false
     python tools/realism.py --host 1.2.3.4 --port 19278 --show

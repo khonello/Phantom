@@ -68,12 +68,16 @@ _SWEEP: List[Any] = [
     # follows face size.
     ('aligned_128', {'aligned_size': 128}),
 
-    # hyperswap is 256px native against inswapper's 128, and its profile asks
+    # alphaface is 256px native against inswapper's 128, and its profile asks
     # for *less* restoration (enhance_strength 0.5 vs 0.7) because the swap it
     # produces needs less. A bigger swap that buys a cheaper restore may be a
     # net win; it may also just be a bigger swap. Untested either way.
-    ('hyperswap', {'swapper_model': 'hyperswap_1a_256'}),
-    ('hyperswap+no_restore', {'swapper_model': 'hyperswap_1a_256', 'enhance': False}),
+    #
+    # This slot used to hold hyperswap. It was measured at 62.2ms/frame
+    # against inswapper's 58.9 — slower, for a model tuned to respect the
+    # target — and removed from the registry on 2026-09-09.
+    ('alphaface', {'swapper_model': 'alphaface_256'}),
+    ('alphaface+no_restore', {'swapper_model': 'alphaface_256', 'enhance': False}),
 ]
 
 # The realism pass. Different question entirely: the speed sweep asks what a

@@ -1,24 +1,36 @@
 """
 Face swapping service for the Phantom pipeline.
 
-Three inference families, selected by `config.swapper_model` and described in
+Five inference families, selected by `config.swapper_model` and described in
 `pipeline/services/swapper_models.py`:
 
 - **inswapper** — run through InsightFace's own `INSwapper`, which owns the
   alignment, the `emap` projection of the source embedding, and the crop. This
   is the incumbent path and is untouched.
-- **hyperswap** — 256px native, run on a plain onnxruntime session here. Same
-  ArcFace alignment template and the same *embedding* source contract, which is
-  the whole reason it can be swapped in without the compositor, masker or guards
-  changing.
 - **hififace** — 256px native, trained with a 3DMM in the loop so the generated
   face follows the source's *contour* and not only its interior. Two departures
   from the others, both handled here rather than downstream: it aligns to
   `mtcnn_512` rather than arcface, and its identity vector goes through a small
   learned converter into the recognition space it was trained against.
+- **alphaface** — 256px native, conditioned on the **raw** ArcFace vector with
+  no converter, and injecting that identity at every encoder stage rather than
+  once at the bottleneck. That is the mechanism the identity work is looking
+  for, which is why it is here.
+- **ghost** — 256px native, Apache-2.0, and the only entry that is. Converter
+  output is used **un-normalised**, unlike every other converter model.
+- **simswap** — 256 and 512 native. Registered to be falsified: it is the
+  weakest of these on identity and its known failure is target leakage, but the
+  512 variant is the only 512-native swapper available.
 
-All three return the aligned crop plus the affine that produced it, so
-compositing stays where it belongs.
+Every family but inswapper runs on a session built here, and all of them return
+the aligned crop plus the affine that produced it, so compositing stays where it
+belongs.
+
+**No convention below is guessed.** `source_form`, `normalise_source` and
+`denormalize_output` are facts about each export, taken from facefusion's
+reference integration and carried in the registry — every one of them fails
+silently rather than loudly when it is wrong, producing a blander identity or a
+tinted crop rather than an exception.
 
 **One lever cuts across all of them: `identity_push`.** Every model lands
 somewhere between the source and the target — that compromise is what "the
@@ -39,7 +51,7 @@ import numpy as np
 from pipeline.config import FaceSwapConfig
 from pipeline.types import Frame, Face
 from pipeline.processing import geometry
-from pipeline.services import swapper_models
+from pipeline.services import downloads, identity_models, swapper_models
 from pipeline.logging import emit_status, emit_error, emit_warning
 
 # The five-point templates now live in `processing/geometry.py`, beside FFHQ and
@@ -51,7 +63,7 @@ from pipeline.logging import emit_status, emit_error, emit_warning
 # exactly InsightFace's `arcface_dst` shifted by +8px in x and divided by 128 —
 # the transform its own `estimate_norm` applies for a 128px crop — and equal to
 # facefusion's `arcface_128` to eight decimal places, which is why inswapper and
-# hyperswap produce crops in the same space.
+# alphaface produce crops in the same space.
 _ARCFACE_TEMPLATE = geometry.ARCFACE_128_TEMPLATE
 
 # Ceiling on `identity_push`. Past roughly this the conditioning vector leaves
@@ -117,6 +129,16 @@ class FaceSwapper:
         # Said once, when a converter model is handed a unit vector because the
         # source has no raw embedding to rescale.
         self._warned_unit_source = False
+        # Said once, when an image-source model is selected against a source
+        # that has no pixels to give it.
+        self._warned_no_source_image = False
+
+        # Trained per-identity model, its introspected input names and size.
+        self._identity_session: Optional[Any] = None
+        self._identity_name: str = ''
+        self._identity_input: str = 'in_face:0'
+        self._identity_morph_input: str = ''
+        self._identity_size: int = 0
         # Set once if this InsightFace build cannot return the unpasted swap,
         # so the fallback warning is not repeated on every frame.
         self._aligned_unsupported = False
@@ -353,44 +375,133 @@ class FaceSwapper:
             return None
 
         normed = self._push(normed, target)
+        vector = self._in_source_form(model, source, normed)
 
-        if not model.converter_filename:
-            return np.asarray(normed, dtype=np.float32)
+        if model.converter_filename:
+            converted = self._convert(model, vector)
+            if converted is None:
+                return None
+            vector = np.asarray(converted, dtype=np.float32)
 
-        if model.converter_takes_raw:
-            raw = getattr(source, 'embedding', None)
-            if raw is None:
-                # A `.npy` source, or an averaged one that dropped the raw
-                # vector. Said once: the converter still produces a usable
-                # identity from a unit vector, but it was fitted on vectors of
-                # norm ~20 and this is a quieter, blander identity rather than
-                # a failure — exactly the kind of degradation that gets blamed
-                # on the model.
-                if not self._warned_unit_source:
-                    self._warned_unit_source = True
-                    emit_warning(
-                        f'{model.name} converts a raw ArcFace embedding and '
-                        f'this source has only a normalised one (a .npy '
-                        f'source, or an average taken before this mattered). '
-                        f'Identity will be weaker than from the photographs.',
-                        scope='SWAPPER',
-                    )
-                vector = np.asarray(normed, dtype=np.float32)
-            else:
-                vector = np.asarray(
-                    self._rescale(raw, normed), dtype=np.float32)
-        else:
-            vector = np.asarray(normed, dtype=np.float32)
+        if not model.normalise_source:
+            return vector.astype(np.float32)
 
-        converted = self._convert(model, vector)
-        if converted is None:
-            return None
-
-        norm = float(np.linalg.norm(converted))
+        norm = float(np.linalg.norm(vector))
         if norm < 1e-8:
             return None
 
-        return (converted / norm).astype(np.float32)
+        return (vector / norm).astype(np.float32)
+
+    def _in_source_form(
+        self,
+        model: 'swapper_models.SwapperModel',
+        source: Face,
+        normed: Any,
+    ) -> Any:
+        """
+        The source vector in the form this model — or its converter — expects.
+
+        `'raw'` means the unnormalised ArcFace vector, of norm ~20. It is not a
+        scaling detail: a converter is a non-linear map fitted on that
+        magnitude, and `alphaface` is conditioned on it directly, so handing
+        either a unit vector produces a quieter identity rather than an error.
+
+        Args:
+            model: Registry entry, naming the form it was fitted on
+            source: Source face
+            normed: The unit vector, already pushed
+
+        Returns:
+            A float32 vector in the requested form, falling back to the unit
+            vector — with one warning — when no raw embedding survives
+        """
+        if model.source_form != 'raw':
+            return np.asarray(normed, dtype=np.float32)
+
+        raw = getattr(source, 'embedding', None)
+        if raw is not None:
+            return np.asarray(self._rescale(raw, normed), dtype=np.float32)
+
+        # A `.npy` source, or an averaged one that dropped the raw vector. Said
+        # once: this still produces a usable identity, but it is a quieter,
+        # blander one rather than a failure — exactly the kind of degradation
+        # that gets blamed on the model.
+        if not self._warned_unit_source:
+            self._warned_unit_source = True
+            emit_warning(
+                f'{model.name} is conditioned on a raw ArcFace embedding and '
+                f'this source has only a normalised one (a .npy source, or an '
+                f'average taken before this mattered). Identity will be weaker '
+                f'than from the photographs.',
+                scope='SWAPPER',
+            )
+        return np.asarray(normed, dtype=np.float32)
+
+    def source_image_blob(
+        self,
+        model: 'swapper_models.SwapperModel',
+        source: Face,
+    ) -> Optional[Any]:
+        """
+        The source **crop** to condition an image-source model on.
+
+        `blendswap` and `uniface` are handed a picture rather than a vector, so
+        none of the embedding machinery applies to them — and, importantly,
+        `identity_push` does not either. There is no identity space to
+        extrapolate in; the lever is silently inapplicable rather than silently
+        ignored, and this is the one place that is true.
+
+        The crop is warped into the model's **own** source framing, which is
+        not the framing it wants for its target: blendswap reads a 112px
+        arcface_112_v2 source against an FFHQ target, uniface a 256px FFHQ
+        source. Assuming one from the other produces a face rather than an
+        error, degrading quietly.
+
+        Args:
+            model: Registry entry, naming the source framing and edge
+            source: Source face carrying the chosen photograph and its
+                    keypoints — see `SwappingProcessor._attach_source_image`
+
+        Returns:
+            An NCHW float32 blob in [0, 1], or None when this source has no
+            pixels (an `.npy` embedding set), which is said once
+        """
+        image = getattr(source, 'source_frame', None)
+        kps = getattr(source, 'source_kps', None)
+        if image is None or kps is None:
+            if not self._warned_no_source_image:
+                self._warned_no_source_image = True
+                emit_error(
+                    f'{model.name} is conditioned on a source image and this '
+                    f'source has none — an .npy embedding cannot feed it. '
+                    f'Choose an embedding-based model, or supply photographs.',
+                    scope='SWAPPER',
+                )
+            return None
+
+        template = geometry.alignment_template(model.source_template)
+        points = np.asarray(kps, dtype=np.float64)
+        if points.shape[0] != template.shape[0]:
+            return None
+
+        from pipeline.processing.compositor import estimate_similarity
+
+        edge = model.source_size or model.size
+        matrix = estimate_similarity(points, template * edge)
+        if matrix is None:
+            return None
+
+        crop = cv2.warpAffine(
+            image, matrix.astype(np.float32), (edge, edge),
+            borderMode=cv2.BORDER_REPLICATE, flags=cv2.INTER_AREA,
+        )
+
+        # No mean/deviation here, deliberately: those describe the **target**
+        # crop's normalisation, and facefusion applies neither to the source
+        # frame. Reusing them would be the sort of plausible symmetry that
+        # produces a washed-out identity and no error.
+        blob = crop[:, :, ::-1].astype(np.float32) / 255.0
+        return np.expand_dims(blob.transpose(2, 0, 1), axis=0)
 
     def _convert(
         self,
@@ -437,6 +548,8 @@ class FaceSwapper:
         # source at a time and the push rarely moves; cleared with the model.
         if len(self._converted) > 8:
             self._converted.clear()
+            self._identity_session = None
+            self._identity_name = ''
         self._converted[key] = converted
         return converted
 
@@ -453,17 +566,22 @@ class FaceSwapper:
         Returns:
             An InferenceSession, or None if the weights could not be obtained
         """
-        if self._converter is not None and self._converter_model == model.name:
+        # Keyed on the converter file, not the model: several models share one
+        # (both simswap variants do), and reloading 21 MB because the model
+        # name changed would be a cache that misses when it should hit.
+        if (self._converter is not None
+                and self._converter_model == model.converter_filename):
             return self._converter
 
         with self._lock:
-            if self._converter is not None and self._converter_model == model.name:
+            if (self._converter is not None
+                    and self._converter_model == model.converter_filename):
                 return self._converter
 
             path = self._resolve_named_model(model.converter_filename)
             if not os.path.isfile(path) and not self._fetch(
                 model.converter_url, model.converter_filename,
-                swapper_models.HIFIFACE_CONVERTER_SIZE_BYTES, path,
+                model.converter_size_bytes, path,
             ):
                 return None
 
@@ -471,7 +589,7 @@ class FaceSwapper:
                 from pipeline.services.onnx_session import create_session
 
                 session = create_session(
-                    self.config, path, f'{model.name}_converter',
+                    self.config, path, model.converter_filename,
                     static_shapes=True,
                 )
             except Exception as e:
@@ -483,11 +601,12 @@ class FaceSwapper:
                 return None
 
             self._converter = session
-            self._converter_model = model.name
+            self._converter_model = model.converter_filename
             return session
 
     # ------------------------------------------------------------------
-    # Non-inswapper families (hyperswap, hififace): plain onnxruntime
+    # Non-inswapper families (hififace, alphaface, ghost, simswap, and the
+    # two image-source ones): plain onnxruntime
     # ------------------------------------------------------------------
 
     def _get_session(self, model: 'swapper_models.SwapperModel') -> Optional[Any]:
@@ -570,7 +689,7 @@ class FaceSwapper:
         Separate from `_download` because a model can need more than one: an
         embedding converter is a second file with its own URL, and the size in
         the message is the model's own rather than a constant that happened to
-        be right while every registered model was a hyperswap.
+        be right while every registered model shared one size.
 
         Args:
             url: Where to fetch it from
@@ -582,6 +701,15 @@ class FaceSwapper:
             True if the file is present afterwards
         """
         if not url:
+            return False
+
+        # The deployment decides whether a weight may be fetched at all. A
+        # refusal lands on the same path a missing file already lands on, which
+        # is tested, and it names the variable that would allow it — otherwise
+        # this reads as "the model is broken" rather than "you said not to".
+        refusal = downloads.refuse_reason(filename)
+        if refusal:
+            emit_warning(refusal, scope='SWAPPER')
             return False
 
         size = (' (~{} MB)'.format(size_bytes // (1024 * 1024))
@@ -618,8 +746,10 @@ class FaceSwapper:
         called `normed_embedding`. Passing the scalar would produce garbage
         rather than an error, so this reads the InsightFace name deliberately.
 
-        Unlike inswapper there is no `emap` projection — the normalised
-        embedding is fed straight in.
+        Unlike inswapper there is no `emap` projection. What is fed in — raw or
+        normalised, converted or not — is the registry's `source_form` and
+        `normalise_source`, since the families disagree and none of them errors
+        when handed the wrong one.
 
         Args:
             model: Registry entry
@@ -634,8 +764,14 @@ class FaceSwapper:
         if session is None:
             return None
 
-        embedding = self.source_vector(model, source, target)
-        if embedding is None:
+        if model.source_kind == 'image':
+            conditioning = self.source_image_blob(model, source)
+        else:
+            conditioning = self.source_vector(model, source, target)
+            if conditioning is not None:
+                conditioning = np.asarray(
+                    conditioning, dtype=np.float32).reshape(1, -1)
+        if conditioning is None:
             return None
 
         template = geometry.alignment_template(model.template)
@@ -673,9 +809,7 @@ class FaceSwapper:
 
         try:
             output = session.run(None, {
-                self._source_input: np.asarray(
-                    embedding, dtype=np.float32,
-                ).reshape(1, -1),
+                self._source_input: conditioning,
                 self._target_input: blob,
             })[0][0]
         except Exception as e:
@@ -685,9 +819,172 @@ class FaceSwapper:
             )
             return None
 
-        result = output.transpose(1, 2, 0) * deviation + mean
+        result = output.transpose(1, 2, 0)
+        if model.denormalize_output:
+            result = result * deviation + mean
         result = np.clip(result, 0.0, 1.0)[:, :, ::-1] * 255.0
         return result.astype(np.uint8), matrix
+
+    # ------------------------------------------------------------------
+    # Trained per-identity models (TRAINED tier)
+    # ------------------------------------------------------------------
+
+    def swap_identity(
+        self,
+        model: "identity_models.IdentityModel",
+        target: Face,
+        frame: Frame,
+    ) -> Optional[Tuple[Frame, Any]]:
+        """
+        Run a per-identity model, which takes no source at all.
+
+        The identity is in the weights. Nothing about embeddings, averaging,
+        `source_blend` or `identity_push` reaches this path, and the source
+        guards protect nothing here because no source photograph is consulted.
+        That is why this is a tier rather than another swap model.
+
+        Three conventions differ from every other model in this pipeline, and
+        each produces a plausible-looking bad face rather than an error:
+
+        1. **NHWC**, not NCHW. No transpose.
+        2. **BGR**, not RGB. No channel reversal.
+        3. **Sharpened first.** DeepFaceLive applies an unsharp mask before
+           inference and these were trained against that input, so skipping it
+           gives a softer result that reads as a weaker model.
+
+        Args:
+            model: The trained model to run
+            target: Target face whose `kps` drive the alignment
+            frame: Frame to sample the crop from
+
+        Returns:
+            (crop, matrix) in the same convention every other path returns, so
+            the compositor is unaware this tier exists, or None
+        """
+        session = self._get_identity_session(model)
+        if session is None:
+            return None
+
+        size = self._identity_size
+        template = geometry.alignment_template(model.template)
+        kps = getattr(target, 'kps', None)
+        if kps is None or len(kps) != len(template):
+            return None
+
+        from pipeline.processing.compositor import estimate_similarity
+
+        matrix = estimate_similarity(
+            np.asarray(kps, dtype=np.float64), template * size)
+        if matrix is None:
+            return None
+
+        matrix = matrix.astype(np.float32)
+        crop = cv2.warpAffine(
+            frame, matrix, (size, size),
+            borderMode=cv2.BORDER_REPLICATE, flags=cv2.INTER_AREA,
+        )
+
+        # The unsharp mask, exactly as DeepFaceLive applies it.
+        crop = cv2.addWeighted(
+            crop, 1.75, cv2.GaussianBlur(crop, (0, 0), 2), -0.75, 0)
+        blob = np.expand_dims(crop.astype(np.float32) / 255.0, axis=0)
+
+        inputs: Dict[str, Any] = {self._identity_input: blob}
+        if self._identity_morph_input:
+            # 1.0 is all the way to the trained identity, which is the whole
+            # point of this tier; anything less interpolates back toward the
+            # target and is exposed only so the trade can be measured.
+            morph = float(np.clip(
+                getattr(self.config, 'identity_morph', 1.0), 0.0, 1.0))
+            inputs[self._identity_morph_input] = np.array(
+                [morph], dtype=np.float32)
+
+        try:
+            outputs = session.run(None, inputs)
+        except Exception as e:
+            emit_error(
+                f'{model.name} inference failed: {type(e).__name__}: {e}',
+                exception=e, scope='SWAPPER',
+            )
+            return None
+
+        # Three outputs, and the MIDDLE one is the face. The order is the
+        # export's, not a choice: (target mask, face, source mask). Reading the
+        # first as the image yields a greyscale mask pasted over the frame,
+        # which looks like a catastrophic model rather than a wiring mistake.
+        if len(outputs) < 2:
+            return None
+        result = np.asarray(outputs[1][0], dtype=np.float32)
+        result = np.clip(result * 255.0, 0.0, 255.0)
+        return result.astype(np.uint8), matrix
+
+    def _get_identity_session(
+        self,
+        model: "identity_models.IdentityModel",
+    ) -> Optional[Any]:
+        """
+        Load a trained model, introspecting its shape and optional morph input.
+
+        Args:
+            model: Registry entry to load
+
+        Returns:
+            An InferenceSession, or None if the weights would not load
+        """
+        if (self._identity_session is not None
+                and self._identity_name == model.name):
+            return self._identity_session
+
+        with self._lock:
+            if (self._identity_session is not None
+                    and self._identity_name == model.name):
+                return self._identity_session
+
+            try:
+                from pipeline.services.onnx_session import create_session
+
+                session = create_session(
+                    self.config, model.path, model.name, static_shapes=True,
+                )
+            except Exception as e:
+                emit_error(
+                    f'Failed to load {model.name}: {type(e).__name__}: {e}',
+                    exception=e, scope='SWAPPER',
+                )
+                return None
+
+            # The crop size is a property of the export, read rather than
+            # configured: these are trained at 224, 256, 320 or 384 depending
+            # on who made them, and there is no registry line to carry it.
+            size = 0
+            for spec in session.get_inputs():
+                if spec.name == 'in_face:0' or 'face' in spec.name.lower():
+                    self._identity_input = spec.name
+                    shape = list(spec.shape)
+                    if len(shape) == 4 and isinstance(shape[1], int):
+                        size = int(shape[1])
+            self._identity_morph_input = next(
+                (spec.name for spec in session.get_inputs()
+                 if 'morph' in spec.name.lower()), '')
+
+            if size <= 0:
+                emit_error(
+                    f'{model.name} declares no face input size; it may not be '
+                    f'a DeepFaceLab export.',
+                    scope='SWAPPER',
+                )
+                return None
+
+            self._identity_size = size
+            self._identity_session = session
+            self._identity_name = model.name
+            emit_status(
+                f'Trained model: {model.name} ({size}px, {model.template}'
+                + (', morph' if self._identity_morph_input else '')
+                + ') - no source photograph is used',
+                scope='SWAPPER',
+            )
+            return session
 
     def _resolve_named_model(self, filename: str) -> str:
         """

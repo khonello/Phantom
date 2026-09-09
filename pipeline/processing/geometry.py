@@ -47,7 +47,7 @@ FFHQ_TEMPLATE = np.array([
 # InsightFace's `arcface_dst` shifted +8px in x and divided by 128, which is the
 # transform `estimate_norm` applies for a 128px crop. Verified equal to
 # facefusion's `arcface_128` to eight decimal places, which is why inswapper and
-# hyperswap produce crops in the same space.
+# alphaface produce crops in the same space.
 ARCFACE_128_TEMPLATE = np.array([
     [0.36167656, 0.40387734],
     [0.63696719, 0.40235469],
@@ -69,8 +69,52 @@ MTCNN_512_TEMPLATE = np.array([
     [0.61178945, 0.77476328],
 ], dtype=np.float64)
 
+# What SimSwap was trained against — InsightFace's original 112x112 arcface
+# framing, unshifted. Against `arcface_128` the face sits ~5% lower and ~2%
+# larger, so the two are close enough that a crop made with the wrong one still
+# produces a face rather than an error, and different enough that it degrades
+# quietly. That is the whole argument for carrying the template with the model.
+ARCFACE_112_V1_TEMPLATE = np.array([
+    [0.35473214, 0.45658929],
+    [0.64526786, 0.45658929],
+    [0.50000000, 0.61154464],
+    [0.37913393, 0.77687500],
+    [0.62086607, 0.77687500],
+], dtype=np.float64)
+
+# InsightFace's 112 template as the recognition models use it, and the framing
+# `blendswap` expects for its **source** crop. Note a model can want one space
+# for the target and another for the source — blendswap reads its target in
+# FFHQ framing and its source in this one — which is why a template is named
+# per role rather than per model.
+ARCFACE_112_V2_TEMPLATE = np.array([
+    [0.34191607, 0.46157411],
+    [0.65653393, 0.45983393],
+    [0.50022500, 0.64050536],
+    [0.37097589, 0.82469196],
+    [0.63151696, 0.82325089],
+], dtype=np.float64)
+
+# DeepFaceLab's whole-face framing, which every `.dfm` export aligns to. It is
+# the widest template here — the eye line sits at 0.393 against arcface's 0.404
+# and the mouth corners are higher, so the crop reaches further past the jaw and
+# further up the forehead. That extra margin is not incidental: it is the region
+# in which a per-identity model is able to move the silhouette, which is the one
+# thing every general model leaves at the target's.
+DFL_WHOLE_FACE_TEMPLATE = np.array([
+    [0.35342266, 0.39285716],
+    [0.62797622, 0.39285716],
+    [0.48660713, 0.54017860],
+    [0.38839287, 0.68750011],
+    [0.59821427, 0.68750011],
+], dtype=np.float64)
+
 ALIGNMENT_TEMPLATES: Dict[str, Points] = {
+    'arcface_112_v1': ARCFACE_112_V1_TEMPLATE,
+    'dfl_whole_face': DFL_WHOLE_FACE_TEMPLATE,
+    'arcface_112_v2': ARCFACE_112_V2_TEMPLATE,
     'arcface_128': ARCFACE_128_TEMPLATE,
+    'ffhq_512': FFHQ_TEMPLATE,
     'mtcnn_512': MTCNN_512_TEMPLATE,
 }
 

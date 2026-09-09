@@ -430,15 +430,24 @@ check('an unknown template falls back rather than raising',
       geometry.ARCFACE_128_TEMPLATE)
 check('it declares an embedding converter',
       bool(model.converter_filename) and bool(model.converter_url))
-check('the converter is fetched from the tag that actually carries it',
-      'models-3.1.0' in model.url and 'models-3.1.0' in model.converter_url,
+check('the model is fetched from the tag that actually carries it',
+      'models-3.1.0' in model.url,
       model.url)
+check('the converter is the maintained crossface one, on its own tag',
+      'crossface' in model.converter_filename
+      and 'models-3.4.0' in model.converter_url,
+      model.converter_url)
+check('every converter model declares the size of its converter, so a '
+      'truncated download is visible',
+      all(swapper_models.resolve(n).converter_size_bytes > 0
+          for n in swapper_models.names()
+          if swapper_models.resolve(n).converter_filename))
 check('every registered model still declares a template that resolves',
       all(geometry.alignment_template(swapper_models.resolve(n).template)
           is not None for n in swapper_models.names()))
 check('the models that take a bare ArcFace vector declare no converter',
       not swapper_models.resolve('inswapper_128').converter_filename
-      and not swapper_models.resolve('hyperswap_1a_256').converter_filename)
+      and not swapper_models.resolve('alphaface_256').converter_filename)
 
 
 # ── 6. Keeping some of the source's complexion ────────────────────────────
@@ -581,6 +590,44 @@ check('a single photograph is unchanged by every strategy',
       all(abs(float(np.dot(
           blended(s, [photo(FRONTAL)]).normed_embedding, FRONTAL)) - 1.0) < 1e-6
           for s in ('mean', 'weighted', 'norm', 'best', 'median')))
+
+# ── The averaged raw vector keeps a real embedding's magnitude ─────────
+#
+# Averaging vectors that disagree yields a resultant shorter than any input,
+# so the plain mean of raw ArcFace vectors came out 5-20% under the norm of a
+# real embedding — worse the more photographs were added. Invisible under
+# inswapper, which divides by the norm; a different input entirely to
+# `alphaface` and to the `crossface` converters, which were fitted on
+# ArcFace's own output scale. It degrades to a blander identity, never an
+# error, which is why it needs a test rather than a look.
+print()
+print('The averaged raw vector keeps a usable magnitude')
+
+_photo_norm = 21.0
+for _strategy in ('mean', 'weighted', 'norm', 'best', 'median'):
+    _averaged = blended(_strategy, tilted)
+    _magnitude = float(np.linalg.norm(
+        np.asarray(_averaged.embedding, dtype=np.float64)))
+    check('{}: the raw vector still has a real embedding norm'.format(
+              _strategy),
+          abs(_magnitude - _photo_norm) < 1e-3,
+          'got {:.3f}, photographs carry {:.1f}'.format(
+              _magnitude, _photo_norm))
+
+_averaged = blended('weighted', tilted)
+check('the raw and normalised vectors point the same way',
+      float(np.dot(
+          np.asarray(_averaged.embedding, dtype=np.float64)
+          / np.linalg.norm(_averaged.embedding),
+          np.asarray(_averaged.normed_embedding, dtype=np.float64),
+      )) > 1.0 - 1e-6,
+      'they are one identity at two scales; consumers assume that')
+
+check('averaging more photographs does not shrink the magnitude',
+      abs(float(np.linalg.norm(np.asarray(
+          blended('mean', tilted + [photo(FRONTAL)]).embedding,
+          dtype=np.float64))) - _photo_norm) < 1e-3,
+      'uploading a fourth photograph used to weaken the conditioning vector')
 
 
 print('\n' + '=' * 70)

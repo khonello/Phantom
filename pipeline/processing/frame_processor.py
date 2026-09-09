@@ -31,6 +31,7 @@ from pipeline.config import FaceSwapConfig
 from pipeline.types import Frame, Face, Detection, Matrix
 from pipeline.services.face_detection import FaceDetector
 from pipeline.services.face_swapping import FaceSwapper
+from pipeline.services import identity_models
 from pipeline.services.database import FaceDatabase, SourceReview
 from pipeline.services import templates
 from pipeline.processing import texture
@@ -182,6 +183,11 @@ class SwappingProcessor(FrameProcessor):
         # of the source photographs, which the compositor never sees.
         self.source_texture: Optional[SourceTexture] = None
 
+        # Said once, when a trained model is named and its weights are not
+        # on disk. Not per frame: that is a configuration mistake, and one
+        # line about it is help while thirty a second is noise.
+        self._warned_trained_missing: bool = False
+
     def set_source(self, paths: List[str]) -> bool:
         """
         Validate source images, then load the face from those that passed.
@@ -224,6 +230,7 @@ class SwappingProcessor(FrameProcessor):
                 return False
 
             self._load_texture(review.accepted)
+            self._attach_source_image(review.accepted)
 
             emit_status(
                 f'Source face loaded from {len(review.accepted)} of '
@@ -234,6 +241,58 @@ class SwappingProcessor(FrameProcessor):
         except Exception as e:
             emit_warning(f"Failed to load source: {e}", scope='SWAPPER')
             return False
+
+    def _attach_source_image(self, accepted: List[str]) -> None:
+        """
+        Carry one source photograph on the source face, for image-based models.
+
+        `blendswap` and `uniface` are conditioned on a picture rather than an
+        embedding. They were previously excluded from the registry to protect
+        the multi-photo averaging, which had it backwards: the source contract
+        is a fact about the weights, and this pipeline should meet each model
+        where it is rather than deciding which models may exist.
+
+        **The same photograph the texture layer chose**, and not by coincidence.
+        `select_texture_source` scores sharpness, size, frontality and clipping
+        during the review that already read every image, and those are exactly
+        the merits an identity encoder reads a face for. Sharing the pick also
+        means the pores and the identity come from one face rather than two,
+        which is the thing that would otherwise disagree.
+
+        The guards are untouched by this. They run at upload over every
+        photograph; what the swapper is later handed does not weaken them.
+
+        Silent and non-fatal: an all-`.npy` source set has no pixels, and the
+        embedding models — which are all of them but two — need none. The model
+        that needs one says so itself, once, when it is actually selected.
+
+        Args:
+            accepted: Source paths that passed the guards
+        """
+        if self.source_face is None:
+            return
+
+        best = self.database.select_texture_source(accepted)
+        if best is None:
+            return
+
+        path, face = best
+        frame = cv2.imread(path)
+        kps = getattr(face, 'kps', None)
+        if frame is None or kps is None:
+            return
+
+        try:
+            self.source_face.source_frame = frame
+            self.source_face.source_kps = np.asarray(kps, dtype=np.float64)
+        except (AttributeError, TypeError):
+            # A Face implementation that refuses attributes. The embedding path
+            # is unaffected, so this degrades rather than failing a session.
+            emit_warning(
+                'Could not carry a source image on the source face; '
+                'image-conditioned swap models will be unavailable.',
+                scope='SWAPPER',
+            )
 
     def _load_texture(self, accepted: List[str]) -> None:
         """
@@ -307,9 +366,40 @@ class SwappingProcessor(FrameProcessor):
         Returns:
             (aligned_crop, matrix), or None if unavailable
         """
+        # A trained model takes no source, so the source check must not gate
+        # it — that check exists to stop the operator's real face reaching a
+        # call, and here there is nothing to be missing. Resolved per call
+        # rather than cached: these arrive by being copied into a directory,
+        # with no restart between training one and wanting it.
+        trained = self._trained_model()
+        if trained is not None:
+            return self.swapper.swap_identity(trained, face, frame)
+
         if self.source_face is None:
             return None
         return self.swapper.swap_aligned(self.source_face, face, frame)
+
+    def _trained_model(self) -> Optional[identity_models.IdentityModel]:
+        """
+        The trained per-identity model this config selects, if any.
+
+        Returns:
+            The model, or None when the TRAINED tier is off or its weights are
+            absent. A missing artifact is reported once and then behaves as
+            off, because the alternative — failing every frame — would take
+            down a session over a configuration mistake
+        """
+        name = str(getattr(self.config, 'identity_model', '') or '').strip()
+        if not name:
+            return None
+
+        try:
+            return identity_models.resolve(name)
+        except KeyError as e:
+            if not self._warned_trained_missing:
+                self._warned_trained_missing = True
+                emit_warning(str(e), scope='SWAPPER')
+            return None
 
     def swap_pasted(self, frame: Frame, face: Face) -> Frame:
         """
