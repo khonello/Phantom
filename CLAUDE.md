@@ -556,8 +556,12 @@ GPU work can reach.
   key=value ...` — the only way to reach `set_realism` without writing a
   WebSocket client. Covers model selection, realism knobs, guard thresholds and
   speed levers; prints what was applied and what was refused. `--show` reads
-  the pipeline's status instead. **`.env` reaches a pod only at creation**, so
-  on a running pod this is the way to change a model rather than editing `.env`
+  the pipeline's status instead. **`.env` is re-read on every boot — `start`
+  *and* `resume`** — because the forwarding happens as a shell prefix on the
+  pipeline launch command (`_remote_env_exports`), not as docker env at
+  creation. What it cannot reach is a pipeline **already running**, which is
+  what this tool is for. The older note here said "only at creation", which
+  wrongly implied a new rental was needed to change a model
 - **On-instance work**: `python vast/orchestrator.py run "<command>"`, and
   `logs [n]` for the pipeline log. Only port 9000 is exposed and the SSH proxy
   drops `exec_command`, so both drive the interactive shell the deploy opens
