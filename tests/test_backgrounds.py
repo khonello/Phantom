@@ -30,6 +30,8 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+import types
+
 import numpy as np
 import pytest
 
@@ -452,3 +454,61 @@ def test_the_decoration_gate_names_the_background():
     bridge._filters_enabled = True
     bridge._background = 'none'
     assert bridge._decorating()
+
+
+def test_picking_a_look_engages_the_panel(monkeypatch):
+    """
+    A picker whose chips light up while the picture does not move is broken.
+
+    Selecting a background changed nothing until ENABLE was pressed
+    separately, and the reported symptom was exactly that: "clicking any of
+    the vertical options doesn't seem to work". The chip highlighted, the
+    frame did not, and there was no way to tell a pending look from a dead
+    feature.
+
+    Note which resolution this is. The other one — render the pick locally
+    while the virtual camera stays ungraded — would make the operator's
+    preview disagree with what the call sees, which is the failure the single
+    accessor exists to prevent. So picking engages everything at once, and
+    ENABLE stays a master switch rather than becoming a commit step.
+    """
+    from desktop.bridge import Bridge
+
+    seen = []
+    monkeypatch.setattr(Bridge, 'filtersEnabledChanged',
+                        types.SimpleNamespace(emit=seen.append))
+    for name in ('filterChanged', 'effectChanged', 'backgroundChanged'):
+        monkeypatch.setattr(Bridge, name,
+                            types.SimpleNamespace(emit=lambda _v: None))
+
+    bridge = Bridge.__new__(Bridge)
+    bridge._filters_enabled = False
+    bridge._filter = 'none'
+    bridge._effect = 'none'
+    bridge._background = 'none'
+    bridge._bg_display = backgrounds.Renderer()
+    bridge._bg_webcam = backgrounds.Renderer()
+    bridge._warned_no_segmenter = False
+
+    assert not bridge._decorating(), 'nothing picked, nothing decorated'
+
+    bridge.selectBackground('blur')
+    assert bridge._filters_enabled, (
+        'picking a background must engage the panel, or the click does nothing')
+    assert bridge._decorating(), 'and the frame must reach the decorated path'
+    assert seen == [True], 'the UI has to be told once, not per click'
+
+    # Picking `none` for one layer says nothing about the other two, so it
+    # must not tear the whole panel down.
+    bridge.selectBackground('none')
+    assert bridge._filters_enabled, (
+        'turning one layer off is not a statement about the others')
+
+    # ENABLE keeps its meaning: everything off, picks retained.
+    bridge.toggleFilters()
+    assert not bridge._filters_enabled
+    assert not bridge._decorating()
+
+    # And a filter engages it just the same, so the two pickers agree.
+    bridge.selectFilter('warm')
+    assert bridge._filters_enabled, 'the filter strip must behave as the rail'

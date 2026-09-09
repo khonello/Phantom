@@ -2193,10 +2193,13 @@ Window {
 
                     }
 
-                    // Choosing is not applying: a look can be picked and seen here
-                    // without it reaching a call until this is pressed. Sits beside
-                    // the show/hide control rather than at the end of the chips,
-                    // because it acts on the whole panel and not on any one chip.
+                    // A master switch, not a commit step. Picking a look engages
+                    // the panel itself (Bridge._engage), because a picker whose
+                    // chips light up while the picture does not move reads as
+                    // broken. This turns every layer off at once without
+                    // discarding the picks. Sits beside the show/hide control
+                    // rather than at the end of the chips, because it acts on the
+                    // whole panel and not on any one chip.
                     Rectangle {
                         anchors { right: parent.right; rightMargin: 124; bottom: parent.bottom; bottomMargin: 16 }
                         width: 76; height: 30; radius: 6

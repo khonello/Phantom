@@ -2167,11 +2167,20 @@ Two properties do the work for all three:
   measured against, and changing one should be a local variable rather than a
   round trip to a rented GPU.
 
-Choosing is not applying. The picker sets the look and the preview shows it, but
-nothing leaves the machine until **APPLY** is pressed — so a look can be
-auditioned without it reaching a call. The same key is read by the display, the
-virtual camera and a saved photo through one accessor, so those three can never
-disagree about whether a layer is on.
+**Picking a look engages the panel.** It did not, and that was the bug behind
+"clicking any of the vertical options doesn't seem to work" — the chip
+highlighted, `_background_key()` still returned `''` because `_filters_enabled`
+was false, and nothing distinguished a pending look from a dead feature.
+`Bridge._engage` now turns the panel on with the click that chose the look.
+
+This file used to claim the preview showed a look while the call did not, and
+that was never true: one accessor feeds the display, the virtual camera and a
+saved photo, so all three are on or all three are off. That rule is kept rather
+than the audition — an operator looking at a graded preview the far end is not
+seeing is a worse failure than one who cannot audition. **ENABLE is therefore a
+master switch, not a commit step**: it turns every layer off without discarding
+the picks, and each list keeps its own `none`. Picking `none` for one layer does
+not disengage, since turning one layer off says nothing about the other two.
 
 Filters and backgrounds default **off**, and should stay off during the pod
 session: that session exists to judge whether the swap reads as real, and

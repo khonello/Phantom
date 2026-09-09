@@ -1500,26 +1500,28 @@ class Bridge(QObject):
         """
         Choose a filter.
 
-        Choosing is not applying: the enable toggle is separate so a look can
-        be auditioned on the filter page without it reaching the call.
+        Picking one engages the panel, so the preview moves on the click that
+        chose it. See `_engage`.
         """
         if look_filters.get(key) is None or key == self._filter:
             return
         self._filter = key
+        self._engage(key)
         self.filterChanged.emit(key)
 
     @Slot(str)
     def selectEffect(self, key: str) -> None:
-        """Choose an overlay effect. Applying is still the APPLY button."""
+        """Choose an overlay effect. Picking one engages the panel."""
         if overlay_effects.get(key) is None or key == self._effect:
             return
         self._effect = key
+        self._engage(key)
         self.effectChanged.emit(key)
 
     @Slot(str)
     def selectBackground(self, key: str) -> None:
         """
-        Choose a background. Applying is still the APPLY button.
+        Choose a background. Picking one engages the panel — see `_engage`.
 
         Both renderers are reset rather than left holding the previous mode's
         smoothed matte, which would otherwise bleed one background's edge into
@@ -1528,6 +1530,7 @@ class Bridge(QObject):
         if scene_backgrounds.get(key) is None or key == self._background:
             return
         self._background = key
+        self._engage(key)
         self._bg_display.reset()
         self._bg_webcam.reset()
         if key != 'none' and not self._bg_display.available:
@@ -1544,6 +1547,36 @@ class Bridge(QObject):
         """Turn the selected filter on or off everywhere."""
         self._filters_enabled = not self._filters_enabled
         self.filtersEnabledChanged.emit(self._filters_enabled)
+
+    def _engage(self, key: str) -> None:
+        """
+        Turn the panel on when a look is picked, so picking one shows it.
+
+        Selecting used to change nothing until ENABLE was pressed separately,
+        and a picker whose chips highlight while the picture does not move
+        reads as broken rather than as pending. The comment here used to claim
+        a look could be "auditioned without it reaching the call" — that was
+        never what the code did, because `_background_key` and its siblings
+        gate the display on the same flag as the virtual camera.
+
+        Deliberately not the other resolution of that contradiction. Rendering
+        a look locally while the call stays ungraded would make the preview
+        disagree with what the far end sees, which is the exact failure the
+        single-accessor rule exists to prevent — the operator would be looking
+        at something nobody else is.
+
+        So ENABLE keeps its meaning as a master switch rather than a commit
+        step: it turns every layer off without discarding the picks, and every
+        list keeps its own `none`. Picking `none` does not disengage, because
+        turning one layer off is not a statement about the other two.
+
+        Args:
+            key: The look just chosen
+        """
+        if key == 'none' or self._filters_enabled:
+            return
+        self._filters_enabled = True
+        self.filtersEnabledChanged.emit(True)
 
     def _filter_key(self) -> str:
         """The filter to apply right now, or '' for none."""
