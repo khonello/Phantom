@@ -205,7 +205,7 @@ VIDEO_CHUNK_BYTES = 4 * 1024 * 1024
 # `auto` is the default and means "whatever this swap model's profile asks
 # for". It exists so the operator's choice and the model's profile cannot fight:
 # `apply_model_profile` sets `enhance_strength` per model — 0.7 for
-# inswapper_128, 0.5 for hyperswap — and without `auto` a model change would
+# inswapper_128, 0.5 for the 256-native models — and without `auto` a change
 # silently revert a choice the operator had made. That is precisely the
 # `set_enhance` mistake already recorded in CLAUDE.md, where `startPipeline`
 # reverted a pipeline launched with `--no-enhance`.
@@ -291,7 +291,6 @@ EVENTS: Dict[str, Dict[str, Any]] = {
 # Typed message envelopes for future WebSocket API server (Phase 4)
 
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass

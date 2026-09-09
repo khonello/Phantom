@@ -256,6 +256,40 @@ class FaceSwapConfig:
     # is what has always shipped. See `FaceSwapper._push`.
     identity_push: float = 0.0
 
+    # Replace the whole swap path with a studio backend, for jobs that are not
+    # a call. Empty is off, which is every live session and the default.
+    #
+    # Deliberately separate from `swapper_model` rather than another name in
+    # that registry. A swap model returns an aligned crop for `FaceCompositor`
+    # to finish; these return a finished picture and must **not** be composited,
+    # since colour matching, detail matching and a target-landmark hull would
+    # put back the target information they exist to remove — and two of the
+    # three swap the whole head, which a hull mask would clip back to a face.
+    #
+    # None of them can hold a frame deadline; the fastest is ~0.6s per image
+    # against 50ms. `run_stream` refuses a set value rather than trying, because
+    # the alternative is a call that emits nothing at all.
+    # See `pipeline/services/studio_swappers.py`.
+    studio_swapper: str = ''
+
+    # A model trained on ONE person, beforehand. The TRAINED tier — see
+    # `pipeline/services/tiers.py` and `identity_models.py`.
+    #
+    # When set it REPLACES the swap model entirely and no source photograph is
+    # used: the identity is in the weights, so embeddings, averaging,
+    # `source_blend`, `identity_push` and the source guards are all
+    # inapplicable rather than merely unused. That is the whole reason it is a
+    # tier and not another name in `swapper_models.py`.
+    #
+    # Empty is off, which is every session until someone has trained one.
+    identity_model: str = ''
+
+    # How far toward the trained identity to go, for exports that expose it.
+    # 1.0 is all the way, which is the point of the tier; lower interpolates
+    # back toward the target and exists so the trade can be measured rather
+    # than assumed. Ignored by exports without a morph input.
+    identity_morph: float = 1.0
+
     # Measure how much of the source's identity survives, every Nth frame.
     # 0 is off. Costs one ArcFace inference per measured stage, on a model
     # already resident, and reports as `id_*` in the REALISM block.
@@ -582,6 +616,9 @@ class FaceSwapConfig:
             'mask_erode': self.mask_erode,
             'mask_shape_growth': self.mask_shape_growth,
             'identity_push': self.identity_push,
+            'studio_swapper': self.studio_swapper,
+            'identity_model': self.identity_model,
+            'identity_morph': self.identity_morph,
             'identity_probe': self.identity_probe,
             'diffuse_strength': self.diffuse_strength,
             'texture_strength': self.texture_strength,

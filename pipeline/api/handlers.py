@@ -979,6 +979,7 @@ _REALISM_FIELDS: Dict[str, Any] = {
     # landmark silhouette, and past ~15% of the face's extent that stops being
     # a jawline and starts being hair and ear.
     'mask_shape_growth': lambda v: min(0.15, max(0.0, float(v))),
+    'identity_morph': lambda v: min(1.0, max(0.0, float(v))),
     # The two identity levers. Both live-switchable for the reason the swapper
     # is: whether a face reads as the right person is a footage question, and
     # A/B against one clip is the only way to answer it.

@@ -29,6 +29,7 @@ from pipeline.processing.pipeline import ProcessingPipeline
 from pipeline.events import BUS
 from pipeline.logging import emit_status
 from pipeline.api.schema import PRESETS
+from pipeline.services import studio_swappers
 from pipeline.services import swapper_models
 from pipeline.services import enhancer_models
 from pipeline.services import database
@@ -165,6 +166,25 @@ def parse_args() -> None:
                         help='extrapolate the source identity away from the target before '
                              'conditioning the swapper (0.0-0.6, 0 feeds the source exactly)',
                         dest='identity_push', type=float, default=_env_float('IDENTITY_PUSH'))
+    program.add_argument('--studio-swapper',
+                        help='replace the swap path with a studio backend for '
+                             'non-live jobs; refused on a stream, since none of '
+                             'them can hold a frame deadline',
+                        dest='studio_swapper',
+                        choices=list(studio_swappers.names()),
+                        default=os.environ.get('STUDIO_SWAPPER'))
+    program.add_argument('--identity-model',
+                        help='a model trained on ONE person, beforehand '
+                             '(TRAINED tier). Replaces the swap model and uses '
+                             'no source photograph at all',
+                        dest='identity_model',
+                        default=os.environ.get('IDENTITY_MODEL'))
+    program.add_argument('--identity-morph',
+                        help='how far toward the trained identity to go '
+                             '(0.0-1.0, 1.0 is all the way); ignored by '
+                             'exports without a morph input',
+                        dest='identity_morph', type=float,
+                        default=_env_float('IDENTITY_MORPH'))
     program.add_argument('--complexion-keep',
                         help='keep this fraction of the source\'s own skin tone through '
                              'colour matching (0.0-1.0, 0 corrects fully); chroma only, '
@@ -277,6 +297,9 @@ def parse_args() -> None:
         ('mask_erode', args.mask_erode),
         ('mask_shape_growth', args.mask_shape_growth),
         ('identity_push', args.identity_push),
+        ('studio_swapper', args.studio_swapper),
+        ('identity_model', args.identity_model),
+        ('identity_morph', args.identity_morph),
         ('identity_probe', args.identity_probe),
         ('complexion_keep', args.complexion_keep),
         ('source_blend', args.source_blend),

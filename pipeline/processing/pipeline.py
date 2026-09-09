@@ -56,11 +56,15 @@ from pipeline.services.masking import FaceMasker
 from pipeline.services.identity import IdentityProbe
 from pipeline.services.face_tracking import LandmarkStabilizer
 from pipeline.services import guards
+from pipeline.services import identity_models
+from pipeline.services import swapper_models
+from pipeline.services import tiers
 from pipeline.services import templates
 from pipeline.services import execution
 from pipeline.services.latency import LatencyBudget
 
 from pipeline.processing.compositor import FaceCompositor
+from pipeline.processing.studio import StudioSwapper, resolve_backend
 from pipeline.services.readings import Readings
 from pipeline.processing.frame_processor import (
     DetectionProcessor,
@@ -547,6 +551,17 @@ class ProcessingPipeline:
         # this every measurement is diluted by every measurement before it.
         self._latency.reset()
         self._readings.reset()
+
+        # A studio backend must never reach a call. The fastest of them is
+        # ~0.6s per image against a 50ms deadline, so this is not a slow stream
+        # — it is a stream that emits nothing while the operator's conferencing
+        # app shows a frozen frame and every diagnostic reads healthy. Refused
+        # here rather than in the frame loop so it is said once, before the
+        # models are warmed and before the pod bills for a session that cannot
+        # work. See `StudioSwapperModel.is_live_safe`.
+        if not self._clear_for_live():
+            return
+
         self._build_processors()
         self._warm_up_models()
         emit_status('Stream pipeline started', scope='PIPELINE')
@@ -743,7 +758,8 @@ class ProcessingPipeline:
         # cause: the source failed to load, or was cleared mid-session. A stream
         # is allowed to start before a source is set and says so in the log, but
         # "no swap yet" must still not mean "show them as they are".
-        if self._swapping_proc.source_face is None:
+        if (self._swapping_proc.source_face is None
+                and not self.config.identity_model):
             self._guard_frame(guards.NO_SOURCE, '')
             self._emit_guarded(seq, capture_ts, debug_input)
             self._log_timing(seq, started, detected, time.perf_counter())
@@ -1352,6 +1368,117 @@ class ProcessingPipeline:
 
         return FrameSwap(frame, faces=swapped_count)
 
+    # ------------------------------------------------------------------
+    # Studio backends
+    # ------------------------------------------------------------------
+
+    def _clear_for_live(self) -> bool:
+        """
+        Whether every selected model may run on a call.
+
+        The single enforcement point for the tier system, and it runs **before
+        the models are warmed** so a session that cannot work is refused before
+        the pod bills for loading weights. Each of the three registries answers
+        the same question about itself — see `pipeline/services/tiers.py` — so
+        a model cannot reach a call by being added to the wrong list or by
+        having a speed comment edited.
+
+        Two failures, deliberately worded differently, because they call for
+        opposite fixes: a STUDIO model is the wrong tool for this job, and a
+        TRAINED model is the right tool that does not exist yet for this person.
+
+        Returns:
+            True when the stream may proceed
+        """
+        deadline = 1000.0 / max(1, self.config.capture_fps)
+
+        backend = resolve_backend(self.config)
+        if backend is not None:
+            reason = tiers.require_live(
+                backend.model.tier, backend.model.name, deadline)
+            if reason:
+                emit_error(reason + ' (studio_swapper)', scope='PIPELINE')
+                return False
+
+        name = str(self.config.identity_model or '').strip()
+        if name:
+            reason = tiers.require_trained_artifact(
+                tiers.TRAINED, name, identity_models.available(name))
+            if reason:
+                emit_error(
+                    reason + ' Looked in {}.'.format(
+                        identity_models.directory()),
+                    scope='PIPELINE',
+                )
+                return False
+            return True
+
+        swapper = swapper_models.resolve(self.config.swapper_model)
+        reason = tiers.require_live(swapper.tier, swapper.name, deadline)
+        if reason:
+            emit_error(reason + ' (swapper_model)', scope='PIPELINE')
+            return False
+
+        return True
+
+    def _studio_source(self) -> Optional[str]:
+        """
+        The single source photograph to hand a studio backend.
+
+        These take an image, not an embedding, so the multi-photo average this
+        pipeline builds cannot reach them. `select_texture_source` already
+        answers "which of these photographs is best" — scored on sharpness,
+        size, frontality and clipping during the review that read every image
+        — and those are the same merits a diffusion identity encoder wants.
+        Reused rather than re-derived, and rather than silently taking the
+        first path the operator happened to pick.
+
+        Returns:
+            Path to the best source image, or None if there is none
+        """
+        sources = self.config.source_paths or (
+            [self.config.source_path] if self.config.source_path else []
+        )
+        sources = [p for p in sources if p]
+        if not sources:
+            return None
+
+        chosen = self._get_database().select_texture_source(sources)
+        return chosen[0] if chosen else sources[0]
+
+    def _studio_swap(
+        self,
+        backend: StudioSwapper,
+        target_path: str,
+        output_path: str,
+    ) -> Tuple[bool, str]:
+        """
+        Run a studio backend for one target.
+
+        Args:
+            backend: The resolved backend
+            target_path: Image or video to swap into
+            output_path: Where the finished result belongs
+
+        Returns:
+            (ok, reason). `reason` is empty on success and is the operator-
+            facing explanation otherwise
+        """
+        source = self._studio_source()
+        if not source:
+            return False, 'no source photograph to swap from'
+
+        emit_status(
+            '{} ({}, {}px{}) — bypassing the compositor'.format(
+                backend.model.name, backend.model.media,
+                backend.model.resolution,
+                ', head swap' if backend.model.swaps_head else ''),
+            scope='STUDIO',
+        )
+        if backend.swap(source, target_path, output_path):
+            return True, ''
+        return False, '{} produced no output'.format(backend.model.name)
+
     def _process_image_batch(
         self,
         target_path: str,
@@ -1376,6 +1503,27 @@ class ProcessingPipeline:
         Returns:
             PhotoResult describing what happened to this image
         """
+        # A studio backend replaces this whole path rather than joining it:
+        # it does its own detection, alignment, masking and blending, and two
+        # of the three swap the head rather than the face. Compositing on top
+        # would re-introduce the target information they exist to remove.
+        #
+        # A mismatch — a video backend selected for a photo job — is refused
+        # rather than quietly falling back to the ONNX path, since a result
+        # from a model nobody chose is the confidently-wrong output the guards
+        # exist to prevent.
+        backend = resolve_backend(self.config)
+        if backend is not None:
+            destination = output_path or self._photo_output_path(target_path)
+            ok, reason = self._studio_swap(backend, target_path, destination)
+            if not ok:
+                return PhotoResult.skipped(target_path, reason)
+            emit_status(f"Batch output saved to: {destination}", scope='PIPELINE')
+            # One face, always: these backends swap the face their own detector
+            # selects and report no count, so this is what happened rather than
+            # a placeholder.
+            return PhotoResult.swapped(target_path, destination, 1)
+
         frame = cv2.imread(target_path)
         if frame is None:
             reason = 'could not be read as an image'
@@ -1520,6 +1668,20 @@ class ProcessingPipeline:
         """
         if not output_path:
             emit_error('No output path specified for video batch', scope='PIPELINE')
+            return
+
+        # As in the image path: a studio backend replaces this entirely.
+        # DreamID-V is the only video-native one and it attends across frames,
+        # which is the argument for it — frame-independent swapping is what the
+        # temporal EMA downstream exists to paper over.
+        backend = resolve_backend(self.config)
+        if backend is not None:
+            ok, reason = self._studio_swap(backend, target_path, output_path)
+            if not ok:
+                emit_error(
+                    '{}: {}'.format(os.path.basename(target_path), reason),
+                    scope='PIPELINE',
+                )
             return
 
         # The source rate is needed either way: it is what the extracted frames
