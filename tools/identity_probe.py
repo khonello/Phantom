@@ -64,6 +64,10 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from pipeline.config import FaceSwapConfig                        # noqa: E402
+from pipeline.core import (                                        # noqa: E402
+    decode_execution_providers,
+    suggest_default_execution_providers,
+)
 from pipeline.processing.compositor import FaceCompositor         # noqa: E402
 from pipeline.services.database import FaceDatabase               # noqa: E402
 from pipeline.services.enhancement import Enhancer                # noqa: E402
@@ -473,8 +477,22 @@ def main() -> int:
         raise SystemExit(f'could not read target: {args.target}')
 
     config = FaceSwapConfig()
-    if args.execution_provider:
-        config.set('execution_providers', [args.execution_provider])
+
+    # `FaceSwapConfig` defaults to CPU, and `core.py` is what normally replaces
+    # that with the best available provider. This tool never went through
+    # `core.py`, so it ran every model on CPU — on a rented GPU, silently, which
+    # is the exact failure `execution.verify` exists to halt and which this
+    # bypasses by building its services directly. The readings themselves are
+    # provider-independent (fp32 either way), so nothing measured before this
+    # was wrong; it was just paying GPU rates for CPU inference.
+    #
+    # Resolved through `core.py`'s own functions rather than a second copy of
+    # the logic, for the reason `onnx_session.py` gives about four levers and
+    # three call sites: a duplicate would drift.
+    requested = ([args.execution_provider] if args.execution_provider
+                 else suggest_default_execution_providers())
+    resolved = decode_execution_providers(requested)
+    config.set('execution_providers', resolved)
     # Nothing reads these during a direct run — the compositor is called here,
     # not by the pipeline — but the probe interval gates the measurement, so it
     # has to be on for any of this to report anything at all.
@@ -482,7 +500,12 @@ def main() -> int:
 
     print('Source: {}'.format(', '.join(
         os.path.basename(p) for p in args.source)))
-    print('Target: {}\n'.format(os.path.basename(args.target)))
+    print('Target: {}'.format(os.path.basename(args.target)))
+    # Said rather than assumed. A run that quietly used CPU is not wrong — the
+    # readings are provider-independent — but it is slow enough to matter on a
+    # paid pod, and the reader should not have to infer it from onnxruntime's
+    # own debug lines.
+    print('Providers: {}\n'.format(', '.join(resolved)))
 
     rig = Rig(config)
     source = rig.load_source(list(args.source), holdout=args.holdout)
