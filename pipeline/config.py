@@ -230,8 +230,29 @@ class FaceSwapConfig:
     # side differs most. Eroding first puts the soft part on skin. Deliberately
     # not "extend the mask": growing the *coverage* puts swapped skin where hair
     # should be, which docs/ENHANCEMENT.md records as the worse tell.
+    #
+    # **0.03 was measured and halved (2026-09-09).** A 3x3 sweep of erode
+    # against feather on one still, alphaface, RTX 5880 Ada: erode is by far the
+    # dominant term, and it costs on both axes at once rather than trading
+    # between them.
+    #
+    #     erode  feather   id_out   id_target
+    #      0.00     0.02     0.800       0.192
+    #      0.03     0.04     0.713       0.293    <- the old default
+    #      0.06     0.08     0.604       0.429
+    #
+    # So the old default gave up 0.087 of source similarity *and* handed 0.101
+    # back to the target. The frames say the cosine is mostly right: there is no
+    # colour seam at the jaw at any setting, and the only place the settings
+    # visibly differ is the hairline, where a smaller erode lets the smoothed
+    # swap reach into the fine hair at the temples.
+    #
+    # Halved rather than zeroed, because that hairline cost is real and the
+    # still it was measured on is the *easy* case for it — the subject's hair is
+    # tied back. A target with loose hair across the temple is what would decide
+    # between 0.015 and 0.0, and has not been run.
     mask_feather: float = 0.04
-    mask_erode: float = 0.03
+    mask_erode: float = 0.015
 
     # How far the mask may follow the **generated** face's own outline instead
     # of the target's, as a fraction of the face's extent. 0 is the behaviour

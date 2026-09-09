@@ -69,6 +69,7 @@ from pipeline.core import (                                        # noqa: E402
     decode_execution_providers,
     suggest_default_execution_providers,
 )
+from pipeline.processing import texture                           # noqa: E402
 from pipeline.processing.compositor import FaceCompositor         # noqa: E402
 from pipeline.services.database import (                          # noqa: E402
     FaceDatabase,
@@ -91,6 +92,14 @@ _STAGES = ('id_swap', 'id_restore', 'id_final', 'id_out', 'id_target')
 # configuration, so it cannot vary down a sweep and is printed once above the
 # table instead.
 _SHAPE = ('shape_shift', 'outline_swap', 'outline_shift')
+
+# Whether the texture layer had anything to spend, and whether pose let it spend
+# it. Reported in their own block rather than as more columns, and only when the
+# layer actually ran — a `texture_strength` sweep that comes back flat is
+# ambiguous without them (too weak, or declining for a reason unrelated to
+# strength), which is the exact question `detail_reserve` was added to answer.
+_TEXTURE = ('texture_headroom', 'detail_reserve', 'texture_confidence',
+            'detail_ratio')
 
 # What each step between two stages has a knob for. Printed with the attribution
 # so a reading arrives with its remedy attached.
@@ -251,6 +260,29 @@ class Rig:
         # different angles average into a face nobody has. Unaffected by
         # `--holdout`, which is about which identity vector grades the output
         # and has nothing to say about geometry.
+        # Skin texture, from the *texture* pick. Without this the whole layer is
+        # inert here — `_add_texture` needs a `source_texture` and the pipeline
+        # sets one in `SwappingProcessor._load_texture`, which this rig does not
+        # go through. A `texture_strength` sweep would then return identical
+        # rows and read as "the layer does nothing", which is worse than no
+        # measurement: it is a confident wrong answer about a layer that was
+        # never switched on.
+        donor = self.database.select_texture_source(accepted)
+        self.compositor.source_texture = (
+            None if donor is None else texture.extract(donor[0], donor[1]))
+
+        if announce and self.compositor.source_texture is not None:
+            pores, marks = self.compositor.source_texture.octaves
+            print('  texture source: {} ({}px face, pores {:.2f}, '
+                  'marks {:.2f}){}'.format(
+                      os.path.basename(donor[0]),
+                      self.compositor.source_texture.native_px, pores, marks,
+                      ' - upsampled, so the band is thinner than it looks'
+                      if self.compositor.source_texture.upsampled else ''))
+        elif announce and donor is not None:
+            print('  texture source: extraction failed; texture_strength will '
+                  'do nothing')
+
         best = self.database.select_shape_source(accepted)
         self.compositor.source_shape = (
             None if best is None
@@ -307,6 +339,15 @@ class Rig:
 
         readings = dict(self.compositor.last_identity)
         readings.update(self.compositor.last_shape)
+
+        for name, value in (
+                ('texture_headroom', self.compositor.last_texture_headroom),
+                ('texture_confidence', self.compositor.last_texture_confidence),
+                ('detail_reserve', self.compositor.last_detail_reserve),
+                ('detail_ratio', self.compositor.last_detail_ratio)):
+            if value is not None:
+                readings[name] = float(value)
+
         return output, readings
 
 
@@ -575,6 +616,23 @@ def main() -> int:
             name = label.replace(' ', '_').replace('=', '-').replace('/', '-')
             cv2.imwrite(os.path.join(
                 args.save_frames, '{}.png'.format(name)), output)
+
+    # Whether the texture layer had anything to spend. Printed only when it
+    # ran, and as its own block rather than as four more columns — the main
+    # table is already eight wide.
+    if any(any(k in r['readings'] for k in _TEXTURE) for r in results):
+        print('\n  texture readings')
+        print('  {:<{}}  {:>9} {:>9} {:>9} {:>9}'.format(
+            '', width, 'headroom', 'reserve', 'pose', 'detail'))
+        for result, label in zip(results, labels):
+            cells = []
+            for name in _TEXTURE:
+                value = result['readings'].get(name)
+                cells.append('       —' if value is None
+                             else '{:9.3f}'.format(value))
+            print('  {:<{}}  {}'.format(label, width, ' '.join(cells)))
+        print('  headroom near zero means the layer had nothing to add, and '
+              'raising texture_strength will not change that.')
 
     if baseline:
         print('\n  where it goes, for `{}`:'.format(labels[0]))

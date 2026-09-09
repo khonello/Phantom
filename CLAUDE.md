@@ -1443,7 +1443,7 @@ Full session record, with every table: docs/TEXTURE_PIPELINE.md §15.
 | `texture_relief` | `0.65` | The mark octave's share of the budget against the pore octave, in quadrature. The two are normalised separately, so this is a share of the budget rather than of whatever the photo held most of. `0.0` is the pores-only behaviour exactly, and so is **any value at all when `texture_band` is 1.0** — there is no mark octave to weight. Measured at the freckles, 0.65 gives 13.5x plain skin and 0.9 gives 23.7x |
 | `texture_contrast` | `1.6` | Amplitude shaping on the mark octave, at constant total energy. A sparse mark is invisible to a second moment, so an RMS budget flattens it into the dense noise around it; this moves the same energy back into it. Mark octave only — shaping the pore octave makes speckle. Inert at `texture_band` 1.0, for the same reason `texture_relief` is |
 | `mask_feather` | `0.04` | Frame-space seam transition, as a fraction of the face's extent in frame (floor 2px). Was effectively 1%, giving a ~1.4px transition on a 101px face — a hard edge, and the reported "pasted on" look |
-| `mask_erode` | `0.03` | Pulls the mask in, in aligned space, **before** it is feathered, so the transition sits on skin rather than straddling the expanded hull onto neck and hair |
+| `mask_erode` | `0.015` | Pulls the mask in, in aligned space, **before** it is feathered, so the transition sits on skin rather than straddling the expanded hull onto neck and hair. **Halved from 0.03 on measurement** — see "What the mask costs" below |
 | `mask_shape_growth` | `0.0` | How far the mask may follow the **generated** face's outline rather than the target's, as a fraction of the face's extent. The mask is a hull of the *target's* landmarks, so the output silhouette is always the target's — free for `inswapper`, which does not move the contour, and destructive for a shape-aware model, which does. Bounded, lower-face only, and self-neutralising. See "Identity" below |
 | `identity_push` | `0.0` | Extrapolates the source identity away from the target's in ArcFace space before the swapper is conditioned on it (`src*(1+k) - tgt*k`, renormalised). Every model lands *between* the two faces; this moves the point it aims at. 0.2-0.3 to start, hard-clamped at 0.6 |
 | `identity_probe` | `0` | Measure source-to-output ArcFace similarity every Nth frame. Reports `id_swap`/`id_restore`/`id_final`/`id_out`/`id_target` in the REALISM block — **and the `shape_*` / `outline_*` readings**, which cost one further landmark inference. One interval rather than two because a cosine and a shape residual are only interpretable together. Off on a call, `5` for a measurement session |
@@ -1456,6 +1456,50 @@ Full session record, with every table: docs/TEXTURE_PIPELINE.md §15.
 | `color_strength` | `1.0` | Scales that transfer |
 | `grain` | `True` | Matches sensor noise on the composited face |
 | `occluder` | `True` | XSeg mask so hands/mics are not overpainted |
+
+### What the mask costs — measured 2026-09-09
+
+First real run of the identity and shape probes. One still, `source/one` (21
+photographs accepted of 30), `source/two/IMG_3623.jpg`, alphaface_256 on an RTX
+5880 Ada.
+
+**The mask is the largest identity loss in the whole chain, and restoration is
+free.** For the baseline configuration: restoration `+0.001`, colour/detail
+/texture `-0.006`, **mask and paste `-0.101`**. `gpen_bfr_256` costs nothing in
+identity, which retires a standing suspicion about it.
+
+`mask_erode` is the dominant lever, and it costs on **both** axes rather than
+trading between them:
+
+| erode | feather | `id_out` | `id_target` |
+|---|---|---|---|
+| **0.00** | **0.02** | **0.800** | **0.192** |
+| 0.00 | 0.04 | 0.790 | 0.211 |
+| 0.03 | 0.04 (old default) | 0.713 | 0.293 |
+| 0.06 | 0.08 | 0.604 | 0.429 |
+
+Feather is secondary — at erode 0 it runs 0.800 / 0.790 / 0.761 across
+0.02/0.04/0.08. **The default is now 0.015**, halved rather than zeroed: the
+frames show the only place the settings visibly differ is the **hairline**,
+where a smaller erode lets the smoothed swap reach into fine hair at the
+temples. There is **no colour seam at the jaw at any setting** — the colour
+stages are doing their job. That still is the *easy* case for the hairline
+question, since the subject's hair is tied back; a target with loose hair across
+the temple is what would decide between 0.015 and 0.0, and has not been run.
+
+**What the frames say that no number did.** The visible defect is not a seam —
+it is that the swap is conspicuously *smoother* than the target, which carries
+freckles, cheek redness and real skin texture. Failure mode 1, and
+`texture_strength` is still `0.0`. At the jaw the discontinuity that does exist
+is a **texture** step, not a colour step.
+
+**The shape metric agreed with the eye, which is the validation it needed.**
+`outline_swap` `+0.001` says the generator did not move the contour, and in the
+frames the jaw and chin outline is unchanged from the target while eyebrows,
+eyes, nose and lips are all clearly the source's. `mask_shape_growth` is
+confirmed inert on alphaface. Note also that the *frontal* shape reference
+raised `shape_mismatch` from 0.099 to **0.142** — the 28° reference had been
+understating the true head-shape difference, not inflating it.
 
 ### Head shape — the axis the cosine cannot see
 
