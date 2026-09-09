@@ -298,6 +298,14 @@ class FaceSwapConfig:
     # readings — but the most important one in this file, because identity is
     # the quantity the product exists to deliver and was the only one nothing
     # measured. See pipeline/services/identity.py.
+    #
+    # It gates the **shape** readings too (`shape_*`, `outline_*`), which cost
+    # one further landmark inference on the finished frame. One interval rather
+    # than two because the two answer halves of one question and are only
+    # interpretable together: ArcFace is invariant to much of the geometry the
+    # shape metric measures, so a run carrying one without the other invites
+    # reading a good cosine as covering head shape, which it does not.
+    # See pipeline/services/shape.py.
     identity_probe: int = 0
 
     # Subsurface scattering, approximated. Real skin is translucent: light

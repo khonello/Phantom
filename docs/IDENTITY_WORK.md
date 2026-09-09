@@ -354,6 +354,21 @@ accident because it produces confident-looking numbers.
 
 In this order, because each step decides whether the next is worth taking.
 
+**0. Read `shape_mismatch` first, because it decides whether any of the rest is
+the right question.** It is the one reading that is a property of the *pairing*
+rather than of a setting: how far apart the source's and the target's head
+shapes are, as a fraction of face size. Under ~0.02 the two heads are
+geometrically close and shape is not what is costing the swap. Well above it,
+the generator is being asked to resolve a conflict no knob in §2 touches, and
+`outline_shift` says how much of that conflict the output actually resolved.
+
+This exists because of an observation from footage rather than from a number:
+swaps read better when the source and target head shapes are similar, and badly
+when they are not. That was unmeasurable until `pipeline/services/shape.py` —
+and it is invisible to everything in §1 and §2, because **ArcFace is trained to
+be invariant to most of the geometry it describes.** A swap can move the jawline
+visibly and shift `id_out` by almost nothing.
+
 **1. Measure the current default before changing anything.** `identity_probe=5`
 on a stream, or `tools/identity_probe.py` on a still. Read `id_swap` against
 `id_out`. That single gap is what the compositor charges for the seam, and until
@@ -377,6 +392,37 @@ and worst of the three judged by eye.) `hififace_unofficial_256` needs `mask_sha
 0.06-0.08 to show what it is for — measure it with the growth at 0 *and* at
 0.08, because the difference between those two is the entire argument for
 §3 and §4.
+
+**Read that pair on `outline_shift`, not on `id_out`.** `mask_shape_growth`
+exists to stop the target's landmark hull clipping a widened contour back off,
+and the contour is exactly the channel the cosine cannot see — so the experiment
+that was queued for a year had, until now, no instrument that could report its
+result.
+
+**And read it as the three-point attribution, not as one number.** A flat
+`outline_shift` has two causes with opposite remedies, and the finished frame
+cannot tell them apart:
+
+| `outline_swap` | `outline_shift` | What it means | What to do |
+|---|---|---|---|
+| high | low | the contour was generated and clipped | raise `mask_shape_growth` |
+| low | low | it was never generated | the mask is innocent; change the model |
+| high | high | it survived | the model is the ceiling |
+
+`outline_final` sits between them so restoration can be separated from the mask
+— a restorer regresses a face toward its training manifold at `enhance_strength`
+and is the third candidate nobody would suspect of eating a jawline. The report
+names whichever stage took the most rather than assuming the mask.
+
+For alphaface expect the second row on every setting of `mask_shape_growth`:
+it repaints the interior and leaves the contour, so the term is self-neutralising
+and there is nothing to admit. That is the control, not a fault.
+
+**4a. Both readings at once, and expect them to disagree.** A configuration that
+wins on `id_out` and loses on `outline_shift` is a real result, not a
+contradiction: they measure different things, and the second is the one a viewer
+reads first. `tools/identity_probe.py` prints the best of each and says so when
+they name different configurations.
 
 **4. Look at the frames.** Every number here measures one axis of three. The
 other two are whether it reads as plastic and whether there is a seam, and those

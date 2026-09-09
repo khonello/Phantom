@@ -24,6 +24,13 @@ so*. Each is pinned at the point where it would silently become a no-op:
 4. **Pose-weighted averaging** must degrade to the flat mean it replaces when
    the inputs carry no pose or score, and must keep the raw embedding that a
    converter-based model needs.
+
+5. **The shape metric** must be invariant to a similarity transform of any of
+   its three inputs — they are read off three different images at three
+   different scales, so a reading that moved with the crop would be measuring
+   the camera. Its two endpoints must be exact, and its outline subset must
+   land on the silhouette rather than on whichever points happen to sit far
+   from the centroid.
 """
 
 import sys
@@ -60,6 +67,8 @@ from pipeline.processing.compositor import FaceCompositor
 from pipeline.services.database import SOURCE_BLENDS, FaceDatabase
 from pipeline.services.face_swapping import FaceSwapper, PUSH_MAX
 from pipeline.services.masking import FaceMasker
+from pipeline.services import shape as shape_metric
+from pipeline.services.readings import Readings
 
 PASS: list = []
 FAIL: list = []
@@ -628,6 +637,249 @@ check('averaging more photographs does not shrink the magnitude',
           blended('mean', tilted + [photo(FRONTAL)]).embedding,
           dtype=np.float64))) - _photo_norm) < 1e-3,
       'uploading a fourth photograph used to weaken the conditioning vector')
+
+
+# ── 5. The shape metric ────────────────────────────────────────────────────
+print("\nShape: did the output take the source's head shape or the target's")
+
+_N_OUTLINE = 36
+
+
+def head(jaw: float = 1.0, eyes: float = 1.0) -> np.ndarray:
+    """
+    A 106-point face: an outline arc plus interior features.
+
+    `jaw` widens the contour, `eyes` moves the interior features apart. They are
+    separate levers so that a change to one can be checked *not* to register as
+    the other, which is the whole claim the outline subset makes.
+    """
+    t = np.linspace(-1.35, 1.35, _N_OUTLINE)
+    outline = np.stack([np.sin(t) * 0.50 * jaw, -np.cos(t) * 0.62 + 0.16], 1)
+
+    feats = []
+    for cx in (-0.20 * eyes, 0.20 * eyes):
+        feats += [[cx + dx, 0.10] for dx in (-0.07, 0.0, 0.07)]
+    for cx in (-0.22 * eyes, 0.22 * eyes):
+        feats += [[cx + dx, 0.22] for dx in (-0.08, 0.0, 0.08)]
+    feats += [[0.0, y] for y in (0.06, -0.02, -0.10)]
+    feats += [[dx, -0.16] for dx in (-0.06, 0.0, 0.06)]
+    feats += [[dx, -0.34] for dx in (-0.13, -0.06, 0.0, 0.06, 0.13)]
+    feats += [[dx, -0.28] for dx in (-0.10, 0.0, 0.10)]
+    inner = np.array(feats, dtype=float)
+    pad = np.repeat(inner[-1:], 70 - inner.shape[0], axis=0) + np.linspace(
+        0, 0.02, 70 - inner.shape[0])[:, None]
+    return np.concatenate([outline, inner, pad], 0)
+
+
+_SRC = head(jaw=0.78, eyes=1.18)
+_TGT = head(jaw=1.25, eyes=0.85)
+
+# Both endpoints have to be exact, or the scale in between means nothing.
+_kept = shape_metric.compare(_SRC, _TGT, _TGT)
+check("an output with the target's shape reads 0.000",
+      _kept is not None and abs(_kept.shift) < 1e-9,
+      '{:+.6f}'.format(_kept.shift))
+
+_took = shape_metric.compare(_SRC, _TGT, _SRC)
+check("an output with the source's shape reads 1.000",
+      _took is not None and abs(_took.shift - 1.0) < 1e-9,
+      '{:+.6f}'.format(_took.shift))
+check('and the outline reading agrees at both ends',
+      abs(_kept.outline_shift) < 1e-9
+      and abs(_took.outline_shift - 1.0) < 1e-9)
+
+# Similarity invariance. The three landmark sets are read off three different
+# images at three different scales, so a reading that moved with the crop would
+# be measuring the camera rather than the face.
+_theta = 0.4
+_rot = np.array([[np.cos(_theta), -np.sin(_theta)],
+                 [np.sin(_theta), np.cos(_theta)]])
+_moved = (_TGT * 3.7) @ _rot.T + np.array([120.0, -45.0])
+_invariant = shape_metric.compare(_SRC, _TGT, _moved)
+check('scaling, rotating and moving the output changes nothing',
+      abs(_invariant.shift) < 1e-9,
+      'shift {:+.8f} after x3.7 and 23 degrees'.format(_invariant.shift))
+
+_far = shape_metric.compare(_SRC * 9.0 + 500.0, _TGT, _TGT)
+check('and neither does rescaling the source photograph',
+      abs(_far.shift) < 1e-9, '{:+.8f}'.format(_far.shift))
+
+# The outline subset must be the silhouette. A radial ranking from the centroid
+# was tried first and picked the brow ends over the chin — a face is taller than
+# it is wide — so this pins that the hull-distance ranking does not.
+_split = shape_metric.outline_indices(_SRC)
+check('the outline subset is resolvable', _split is not None)
+_picked = set(_split[0].tolist())
+_arc = set(range(_N_OUTLINE))
+check('every point it picks is genuine contour',
+      _picked <= _arc,
+      '{} of {} on the arc'.format(len(_picked & _arc), len(_picked)))
+check('and it picks nearly all of the contour',
+      len(_picked & _arc) >= int(_N_OUTLINE * 0.9),
+      '{} of {}'.format(len(_picked & _arc), _N_OUTLINE))
+
+# Why the outline reading exists: it separates a model that moved the contour
+# from one that only repainted the interior. inswapper and alphaface are the
+# second kind, and the whole-face reading understates the difference.
+_contour = _TGT.copy()
+_contour[:_N_OUTLINE] = _SRC[:_N_OUTLINE]
+_interior = _TGT.copy()
+_interior[_N_OUTLINE:] = _SRC[_N_OUTLINE:]
+
+_a = shape_metric.compare(_SRC, _TGT, _contour)
+_b = shape_metric.compare(_SRC, _TGT, _interior)
+check('a moved contour reads high at the outline',
+      _a.outline_shift > 0.7, '{:+.3f}'.format(_a.outline_shift))
+check('an unmoved contour reads near zero at the outline',
+      _b.outline_shift < 0.15, '{:+.3f}'.format(_b.outline_shift))
+check('and the outline reading separates them better than the whole face',
+      (_a.outline_shift - _b.outline_shift) > (_a.shift - _b.shift),
+      'outline {:.3f} vs whole-face {:.3f}'.format(
+          _a.outline_shift - _b.outline_shift, _a.shift - _b.shift))
+
+# Two heads that already agree have no disagreement to resolve, and the ratio
+# would be dividing noise by noise.
+_matched = shape_metric.compare(_SRC, _SRC, _SRC)
+check('matching head shapes withhold the ratio rather than reporting one',
+      _matched is not None and _matched.shift is None
+      and _matched.mismatch < 1e-9)
+
+# Direction has to survive. Moving away from the source is a different finding
+# from not moving, and must not be clipped to zero.
+_away = shape_metric.compare(_SRC, _TGT, _TGT + (_TGT - _SRC) * 0.5)
+check('an output further from the source than the target reads negative',
+      _away.shift < -0.05, '{:+.3f}'.format(_away.shift))
+
+# Absent readings are omitted rather than zeroed: zero means "kept the target's
+# shape", which is a measurement, not a failure to measure.
+check('unmeasurable readings are omitted, not zeroed',
+      'shape_shift' not in _matched.as_readings()
+      and 'shape_mismatch' in _matched.as_readings())
+
+# A pack with no landmark model leaves the probe silent rather than raising.
+_blind = shape_metric.ShapeProbe(
+    types.SimpleNamespace(landmark_model=lambda: None))
+check('no landmark model means no shape probe, and no exception',
+      not _blind.available
+      and _blind.landmarks(np.zeros((64, 64, 3), np.uint8),
+                           [0.0, 0.0, 60.0, 60.0]) is None)
+
+# Mismatched point counts are a wiring mistake, not a shape difference.
+check('point sets of different sizes are refused',
+      shape_metric.compare(_SRC, _TGT, _TGT[:-4]) is None)
+
+# The attribution split. A crop in aligned space has to be comparable with
+# landmarks in frame space without anything being re-derived, or the generated
+# contour cannot be measured at all — it exists in no other space.
+_ALIGNED = 256
+_probe_model = MagicMock()
+_probe_model.get.return_value = _CONTOUR_IN_CROP = (
+    _SRC * 60.0 + np.array([128.0, 128.0]))
+_probe = shape_metric.ShapeProbe(
+    types.SimpleNamespace(landmark_model=lambda: _probe_model))
+
+# `Face` comes from the stubbed insightface, so calling it returns a MagicMock
+# and the bbox never reaches an attribute anything can read back. Stand a real
+# object in its place for the duration, or the box is untestable — and the box
+# is the part of this that can silently be wrong.
+_saved_face = shape_metric.Face
+shape_metric.Face = lambda **kw: types.SimpleNamespace(**kw)
+
+_crop = np.zeros((_ALIGNED, _ALIGNED, 3), dtype=np.uint8)
+_to_aligned = np.array([[2.0, 0.0, 0.0], [0.0, 2.0, 0.0]], dtype=np.float32)
+_in_crop = _probe.landmarks_aligned(
+    _crop, [10.0, 10.0, 100.0, 120.0], _to_aligned)
+check('an aligned crop yields landmarks in crop coordinates',
+      _in_crop is not None and _in_crop.shape == (106, 2))
+
+_box = np.asarray(_probe_model.get.call_args[0][1].bbox, dtype=float)
+check('the box handed to the model is the target box warped into the crop',
+      abs(_box[0] - 20.0) < 1e-3 and abs(_box[3] - 240.0) < 1e-3,
+      'got {}'.format([round(float(v), 1) for v in _box]))
+
+# A box warped outside the crop must be clipped, not passed through negative.
+_probe_model.get.reset_mock()
+_probe.landmarks_aligned(_crop, [-400.0, -400.0, 40.0, 40.0], _to_aligned)
+_clipped = np.asarray(_probe_model.get.call_args[0][1].bbox, dtype=float)
+check('a box reaching outside the crop is clipped to it',
+      _clipped[0] >= 0.0 and _clipped[2] <= _ALIGNED,
+      'got {}'.format([round(float(v), 1) for v in _clipped]))
+
+shape_metric.Face = _saved_face
+
+# The claim the whole attribution rests on: a crop measured in aligned space is
+# directly comparable with a frame measured in frame space, because each set is
+# normalised independently before the fit.
+_aligned_contour = _CONTOUR_IN_CROP
+_frame_contour = _SRC * 11.0 + np.array([900.0, 40.0])
+check('the same shape read in two different spaces reads identically',
+      abs(shape_metric.compare(_SRC, _TGT, _aligned_contour).outline_shift
+          - shape_metric.compare(_SRC, _TGT, _frame_contour).outline_shift)
+      < 1e-9)
+
+# Attribution has to survive into the report, and the two causes of a low
+# shift must produce different recommendations.
+_clipped_report = Readings()
+_ceiling_report = Readings()
+for _ in range(12):
+    # Generated a contour, then lost it downstream -> mask_shape_growth.
+    _clipped_report.record('shape_mismatch', 0.06)
+    _clipped_report.record('outline_mismatch', 0.08)
+    _clipped_report.record('outline_swap', 0.40)
+    _clipped_report.record('outline_final', 0.36)
+    _clipped_report.record('outline_shift', 0.05)
+    # Never generated one -> a different model, and the mask is innocent.
+    _ceiling_report.record('shape_mismatch', 0.06)
+    _ceiling_report.record('outline_mismatch', 0.08)
+    _ceiling_report.record('outline_swap', 0.01)
+    _ceiling_report.record('outline_shift', 0.01)
+
+_clipped_text = _clipped_report.format_report()
+_ceiling_text = _ceiling_report.format_report()
+check('a clipped contour reports what was generated against what survived',
+      'the generator produced' in _clipped_text
+      and 'taken back downstream' in _clipped_text)
+check('an unmoved contour says the mask is not the lever',
+      'mask_shape_growth is not' in _ceiling_text
+      and 'GENERATOR never moved' in _ceiling_text)
+check('and the two do not give the same advice',
+      ('GENERATOR never moved' in _ceiling_text)
+      != ('GENERATOR never moved' in _clipped_text))
+
+# The stage that took the most is named, rather than the mask being assumed.
+# Restoration can eat a contour too — it regresses a face toward its training
+# manifold — and recommending the wrong knob is worse than recommending none.
+_restore_report = Readings()
+for _ in range(12):
+    _restore_report.record('shape_mismatch', 0.06)
+    _restore_report.record('outline_swap', 0.40)
+    _restore_report.record('outline_final', 0.09)   # restoration took 0.31
+    _restore_report.record('outline_shift', 0.08)   # the mask took 0.01
+_restore_text = _restore_report.format_report()
+check('a contour lost to restoration blames restoration, not the mask',
+      'most of it by restoration' in _restore_text
+      and 'Sweep enhance_strength' in _restore_text)
+check('and the mask-clipped case still blames the mask',
+      'most of it by mask and paste' in _clipped_text
+      and 'Sweep mask_shape_growth' in _clipped_text)
+
+# Without the intermediate reading there is nothing to attribute, and the
+# report must fall back rather than invent a stage.
+_bare = Readings()
+for _ in range(12):
+    _bare.record('shape_mismatch', 0.06)
+    _bare.record('outline_shift', 0.02)
+check('no intermediate reading falls back instead of attributing',
+      'the generator produced' not in _bare.format_report()
+      and 'entirely the target' in _bare.format_report())
+
+# And a pairing whose heads already agree must not recommend anything at all.
+_close = Readings()
+for _ in range(12):
+    _close.record('shape_mismatch', 0.008)
+    _close.record('outline_shift', 0.01)
+check('heads that already match recommend no lever',
+      'mask_shape_growth' not in _close.format_report())
 
 
 print('\n' + '=' * 70)

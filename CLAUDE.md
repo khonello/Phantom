@@ -47,6 +47,20 @@ judge); and `source_blend` — sweep that one **only** with `--holdout`, or ever
 strategy wins. Run them in the order docs/IDENTITY_WORK.md ends with: **measure
 the current default first**, then the free levers, then the models.
 
+**A seventh was added 2026-09-09, and it changes what the first step reads.**
+The complaint above was raised about the swap model; a separate observation off
+footage says results are much better when the source and target **head shapes**
+are similar and degrade when they are not. Nothing measured that either, and
+the existing instrument could not — ArcFace is trained to be invariant to most
+of that geometry. `pipeline/services/shape.py` now reports `shape_mismatch`
+(how far apart the two heads are, a property of the *pairing* that no setting
+moves), `shape_shift` and `outline_shift` (**0 kept the target's head shape, 1
+took the source's**), on the same `identity_probe=N` interval and in the same
+REALISM block and `tools/identity_probe.py` table. It is verified on synthetic
+shapes and **unmeasured on real footage**. Read `shape_mismatch` before
+anything else: under ~0.02 the heads are close and shape is not the cost. See
+"Head shape" below.
+
 Two other things are queued, in this order because the first is free.
 
 **1. The pod run — half done, and the half that remains is the half that
@@ -603,7 +617,7 @@ GPU work can reach.
   `--sweep`, and `--save-frames` is not optional in practice: a cosine measures
   one axis of three, and a higher number that reads as plastic is not a better
   swap. On a running stream the same readings come from `identity_probe=5` via
-  `tools/realism.py`
+  `tools/realism.py`. **The same run now also reports head shape** — see below
 
 ### Building for distribution
 - **Desktop standalone**: `python tools/build_desktop.py` (add `--print-only`
@@ -1432,7 +1446,7 @@ Full session record, with every table: docs/TEXTURE_PIPELINE.md §15.
 | `mask_erode` | `0.03` | Pulls the mask in, in aligned space, **before** it is feathered, so the transition sits on skin rather than straddling the expanded hull onto neck and hair |
 | `mask_shape_growth` | `0.0` | How far the mask may follow the **generated** face's outline rather than the target's, as a fraction of the face's extent. The mask is a hull of the *target's* landmarks, so the output silhouette is always the target's — free for `inswapper`, which does not move the contour, and destructive for a shape-aware model, which does. Bounded, lower-face only, and self-neutralising. See "Identity" below |
 | `identity_push` | `0.0` | Extrapolates the source identity away from the target's in ArcFace space before the swapper is conditioned on it (`src*(1+k) - tgt*k`, renormalised). Every model lands *between* the two faces; this moves the point it aims at. 0.2-0.3 to start, hard-clamped at 0.6 |
-| `identity_probe` | `0` | Measure source-to-output ArcFace similarity every Nth frame. Reports `id_swap`/`id_restore`/`id_final`/`id_out`/`id_target` in the REALISM block. Off on a call, `5` for a measurement session |
+| `identity_probe` | `0` | Measure source-to-output ArcFace similarity every Nth frame. Reports `id_swap`/`id_restore`/`id_final`/`id_out`/`id_target` in the REALISM block — **and the `shape_*` / `outline_*` readings**, which cost one further landmark inference. One interval rather than two because a cosine and a shape residual are only interpretable together. Off on a call, `5` for a measurement session |
 | `complexion_keep` | `0.0` | Keep this fraction of the source's own skin tone through colour matching. **Chroma only** — luminance is still corrected in full, because a brightness step at the jaw is the most visible seam there is — and bounded at `_COMPLEXION_RESIDUAL` LAB units, so it gives way entirely as the two complexions diverge. The cosine is blind to this one; judge it by eye and by `seam_excess`. Start at 0.4 |
 | `source_blend` | `weighted` | How several source photographs become one identity vector: `mean` / `weighted` / `norm` / `best` / `median`. Averaging is a low-pass filter on identity — the average is the most *typical* version of the person — and it is validated for *recognition*, which is not this pipeline's objective. Sweep it **only** with `identity_probe.py --holdout`: scored against the identity it builds, every strategy wins by construction |
 | `diffuse_strength` | `0.0` | Subsurface scatter — softens *shading* the way light under skin does, on LAB's L channel only, with eyes/nose/mouth cut out. Answers "the skin reads hard", which is a different complaint from "plastic" and a different band. **Off by default, never judged on footage.** 0.2-0.4 expected |
@@ -1442,6 +1456,101 @@ Full session record, with every table: docs/TEXTURE_PIPELINE.md §15.
 | `color_strength` | `1.0` | Scales that transfer |
 | `grain` | `True` | Matches sensor noise on the composited face |
 | `occluder` | `True` | XSeg mask so hands/mics are not overpainted |
+
+### Head shape — the axis the cosine cannot see
+
+`pipeline/services/shape.py`. Built 2026-09-09 from an observation off footage
+rather than off a number: **swaps read better when the source and target head
+shapes are similar, and badly when they differ.** Nothing measured that, and
+nothing could — `identity_probe` reports ArcFace cosines, and recognition models
+are *trained* to be invariant to much of the geometry involved. A swap can move
+the jawline visibly and shift `id_out` by almost nothing.
+
+The head's outline is also the strongest identity cue a viewer reads, and the
+one this pipeline structurally loses in three separate places:
+
+    alignment   a similarity fit has 4 DOF, so the crop the swapper is handed
+                is framed by the TARGET's five points and no amount of source
+                identity reshapes it
+    generator   most models repaint the interior and leave the contour; only
+                3D-supervised ones move it
+    mask        the silhouette is a hull of the TARGET's landmarks, so any
+                contour movement that survived is clipped back off
+
+Two readings, from 106-point landmarks on the source photograph, the target and
+the finished frame, each reduced to pure shape:
+
+| Reading | Means |
+|---|---|
+| `shape_mismatch` | How far apart the source's and target's head shapes are, as a fraction of face size. **A property of the pairing, not of any setting** — this is the quantity behind the observation. Under ~0.02 the heads are close and shape is not the problem |
+| `shape_shift` | How far the output moved off the target's shape toward the source's. **0 kept the target's, 1 took the source's**, negative moved away |
+| `outline_swap` | The same at the silhouette, measured on the **generated crop** — what the swap model actually produced |
+| `outline_final` | And after restoration and the aligned-space stages, before the mask |
+| `outline_shift` | And on the finished frame. **The number to act on** |
+
+**The three outline readings are an attribution, and without it the measurement
+is inert.** A final `outline_shift` near zero has two causes with opposite
+remedies, and they are indistinguishable from the finished frame alone:
+
+    generator produced +0.400, +0.050 survived   -> the mask ate it
+                                                    raise mask_shape_growth
+    generator produced +0.010, +0.010 survived   -> nothing to clip
+                                                    mask_shape_growth is inert;
+                                                    only a different model moves this
+
+The middle reading exists because restoration is the third candidate nobody
+would suspect — it regresses a face toward its training manifold at
+`enhance_strength`, which is a plausible way to lose a widened jaw. The report
+names whichever stage took the most rather than assuming the mask; pointing at
+the wrong knob is worse than pointing at none. Only the outline is recorded at
+the intermediate stages: the whole-face residual there is dominated by interior
+features every stage repaints, and no lever is attached to it.
+
+The generated contour exists **only** in the swapper's own crop — the frame
+holds the target's face — so `ShapeProbe.landmarks_aligned` reads it there.
+Nothing has to be re-derived to compare across spaces: each set is normalised
+independently before the fit, so an aligned crop and a frame are directly
+comparable, which is the property the invariance tests pin.
+
+Four properties carry it:
+
+- **Similarity-invariant by construction.** The three landmark sets come off
+  three different images at three different scales, so each is normalised to
+  unit radius *before* the fit rather than the residual being divided
+  afterwards. Dividing at the end was tried and ties the answer to whichever
+  frame supplied the denominator — an output whose face measures slightly larger
+  than the target's then reports a shape difference for that reason alone.
+  Pinned: scaling the output 3.7x and rotating it 23° must not move the reading.
+- **The outline subset is the convex hull, not an index range.** The 106-point
+  layout is a property of the model pack, so "0-32 is the jaw" would be right
+  for `buffalo_l` and silently wrong for the next one. Points are ranked by
+  distance to the hull of the landmarks — which is *literally* what `FaceMasker`
+  fills — and the nearest third taken. A radial ranking from the centroid was
+  tried first and is wrong: a face is taller than it is wide, so the outer brow
+  ends outrank the chin and the subset drifts off the jaw, which is the one part
+  a shape-aware model moves.
+- **The outline reading earns its place, measured.** On a fixture where only the
+  contour moved to the source against one where only the interior did, the
+  outline reading separates them by **0.821** against the whole-face reading's
+  0.535. Fitting that measurement on the interior alone reads better on paper
+  and measured worse on both halves — 0.841 vs 0.891 when the contour moved,
+  and 0.117 vs 0.069 of leakage when it did not — because an interior-anchored
+  fit is recomputed between the two residuals, so an interior change moves the
+  frame the outline is measured in.
+- **Source shape is one photograph, never the average.** The same pick
+  `select_texture_source` makes, for the same reason: identity is a distributed
+  representation and averages soundly, geometry is not. Landmarks from
+  photographs at different angles average into a face nobody has.
+
+**Read `shift`, not the absolutes.** Out-of-plane pose changes a face's apparent
+2D shape, so an angled source inflates `mismatch` for a reason that is not head
+shape — but it inflates the gap by nearly the same factor, and `shift` is their
+ratio. Same argument the identity probe makes for reading its drops.
+
+**Nothing has been measured on real footage yet.** What this unblocks first is
+the experiment queued since `mask_shape_growth` shipped and never run, because
+until now there was no instrument that could report its result: growth at 0
+against 0.08, under `hififace_unofficial_256`, read on `outline_shift`.
 
 ### Swap models
 `pipeline/services/swapper_models.py` is a registry of swap models, each
@@ -2613,6 +2722,7 @@ back to the other backend or off — rather than failing.
 - `pipeline/services/guards.py`: Source and runtime input guards, threshold validation
 - `pipeline/services/readings.py`: `Readings` — per-frame realism scalars, reported as distributions when a stream stops or a batch job finishes
 - `pipeline/services/identity.py`: `IdentityProbe` — ArcFace similarity between the source and the output, measured per compositing stage. Shares the detector's own recognition model rather than loading a second copy, and re-frames aligned crops from whichever swapper template made them into the `arcface_112` framing recognition needs
+- `pipeline/services/shape.py`: `ShapeProbe` — **the axis the cosine is blind to.** Whether the output took the source's head shape or kept the target's, from 106-point landmarks on three faces reduced to pure shape by fitting away the similarity transform. Borrows the detector's landmark model. See "Head shape" below
 
 ### Processing Pipeline
 - `pipeline/processing/pipeline.py`: `ProcessingPipeline` orchestrator (batch & stream modes)

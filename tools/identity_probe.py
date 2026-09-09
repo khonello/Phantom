@@ -17,12 +17,25 @@ frame goes through — and reports ArcFace cosine similarity at four points:
     id_out       re-detected from the finished frame   <- the one that counts
     id_target    the finished frame against the TARGET's identity
 
-Then it sweeps whatever you ask it to and prints the same five numbers per
+and two **shape** readings the cosines cannot give, because ArcFace is trained
+to be invariant to most of the geometry they measure:
+
+    shape        how far the output's head shape moved off the target's toward
+                 the source's. 0 kept the target's, 1 took the source's
+    outln        the same, measured only at the silhouette — the channel a
+                 viewer reads first and the one the mask clips
+
+Then it sweeps whatever you ask it to and prints the same numbers per
 configuration, so a lever is judged against one still rather than argued about.
 
 **Read the differences, not the absolutes.** A swap is not a photograph of the
 source and will not score like one. What is actionable is which step costs the
 most, because each step has a different knob behind it.
+
+**The two axes disagree, and that is the reason to have both.** A model can
+score well on identity while leaving the silhouette entirely the target's —
+which is what `inswapper` and `alphaface` do by construction, and what
+`mask_shape_growth` exists to recover.
 
 Why a still rather than a clip: a still needs no stream, no warm-up and no pod
 session, and identity is a per-frame property. Temporal behaviour is a separate
@@ -58,9 +71,18 @@ from pipeline.services.face_detection import FaceDetector         # noqa: E402
 from pipeline.services.face_swapping import FaceSwapper           # noqa: E402
 from pipeline.services.identity import IdentityProbe              # noqa: E402
 from pipeline.services.masking import FaceMasker                  # noqa: E402
+from pipeline.services.shape import ShapeProbe                    # noqa: E402
 
 # Reported in this order, because it is the order the losses happen in.
 _STAGES = ('id_swap', 'id_restore', 'id_final', 'id_out', 'id_target')
+
+# Shape, reported beside identity because the two measure different axes and
+# routinely disagree — ArcFace is trained to be invariant to much of the
+# geometry the shape metric exists to see. `shape_mismatch` is deliberately not
+# a column: it is a property of the source/target pairing rather than of any
+# configuration, so it cannot vary down a sweep and is printed once above the
+# table instead.
+_SHAPE = ('shape_shift', 'outline_swap', 'outline_shift')
 
 # What each step between two stages has a knob for. Printed with the attribution
 # so a reading arrives with its remedy attached.
@@ -144,6 +166,7 @@ class Rig:
         self.masker = FaceMasker(config, self.detector)
         self.compositor = FaceCompositor(config, Enhancer(config), self.masker)
         self.compositor.identity = IdentityProbe(self.detector)
+        self.compositor.shape = ShapeProbe(self.detector)
         self.probe = IdentityProbe(self.detector)
         self._announced = False
 
@@ -214,6 +237,20 @@ class Rig:
         self.compositor.source_identity = getattr(
             reference if reference is not None else face,
             'normed_embedding', None)
+
+        # Shape comes from one photograph, never the average � the same pick
+        # the texture layer uses, and for the same reason: landmarks taken at
+        # different angles average into a face nobody has. Unaffected by
+        # `--holdout`, which is about which identity vector grades the output
+        # and has nothing to say about geometry.
+        best = self.database.select_texture_source(accepted)
+        self.compositor.source_shape = (
+            None if best is None
+            else getattr(best[1], 'landmark_2d_106', None))
+        if announce and self.compositor.source_shape is None:
+            print('  no 106-point landmarks on the source; the shape readings '
+                  'will be absent\n')
+
         return face
 
     def run(self, source: Any, frame: np.ndarray) -> Tuple[
@@ -245,7 +282,9 @@ class Rig:
         output = self.compositor.composite(
             frame.copy(), detection.face, crop, matrix)
 
-        return output, dict(self.compositor.last_identity)
+        readings = dict(self.compositor.last_identity)
+        readings.update(self.compositor.last_shape)
+        return output, readings
 
 
 def _label(settings: Dict[str, Any]) -> str:
@@ -258,9 +297,16 @@ def _label(settings: Dict[str, Any]) -> str:
 def _print_row(label: str, readings: Dict[str, float], width: int) -> None:
     """Print one configuration's readings as a fixed-width row."""
     cells = []
-    for stage in _STAGES:
+    for stage in _STAGES + _SHAPE:
         value = readings.get(stage)
-        cells.append('   —  ' if value is None else '{:.3f}'.format(value))
+        if value is None:
+            cells.append('   —  ')
+        elif stage in _SHAPE:
+            # Signed, because a negative shift is a real and different finding:
+            # the output moved *away* from the source's shape.
+            cells.append('{:+.3f}'.format(value))
+        else:
+            cells.append('{:.3f}'.format(value))
     print('  {:<{}}  {}'.format(label, width, '  '.join(cells)))
 
 
@@ -295,6 +341,90 @@ def _attribute(readings: Dict[str, float]) -> List[str]:
         lines.append('    -> the compositor costs almost nothing here. The '
                      'swapper is the ceiling: try another model, or '
                      'identity_push.')
+
+    return lines
+
+
+def _shape_note(readings: Dict[str, float]) -> List[str]:
+    """
+    Say how far apart the two head shapes are, and how much of that was closed.
+
+    `shape_mismatch` is the quantity behind the observation that swaps read
+    better when the source and target heads are similar. It is a property of the
+    *pairing* — nothing in the config moves it — so it is stated as context for
+    the sweep rather than as a result of one.
+    """
+    mismatch = readings.get('shape_mismatch')
+    if mismatch is None:
+        return ['    (no shape reading — the pack has no 106-point landmark '
+                'model, or the source carried none)']
+
+    outline = readings.get('outline_mismatch', mismatch)
+    lines = [
+        '',
+        '    head-shape mismatch  {:.3f} of face size, {:.3f} at the outline'
+        .format(mismatch, outline),
+    ]
+
+    if mismatch < 0.02:
+        # And say nothing further. What follows recommends levers for
+        # recovering the source's contour, which is advice for a problem this
+        # pairing does not have.
+        lines.append('    -> these two heads are geometrically close. Shape is '
+                     'not what is costing this pairing, and a shift near zero '
+                     'is expected rather than a fault.')
+        return lines
+
+    shift = readings.get('outline_shift')
+    if shift is None:
+        return lines
+
+    lines.append(
+        '    outline shift        {:+.3f}   (0 = kept the target\'s head '
+        'shape, 1 = took the source\'s)'.format(shift))
+
+    produced = readings.get('outline_swap')
+    if produced is None:
+        if shift < 0.05:
+            lines.append('    -> the silhouette is entirely the target\'s. '
+                         'Sweep mask_shape_growth, and try '
+                         'hififace_unofficial_256 — the only registered model '
+                         'that moves the contour.')
+        return lines
+
+    # Where it went. The two causes of a low shift have opposite remedies and
+    # are indistinguishable from the finished frame alone.
+    lines.append('    the generator produced {:+.3f}, and {:+.3f} survived'
+                 .format(produced, shift))
+
+    steps: List[Tuple[str, float, str]] = []
+    final = readings.get('outline_final')
+    if final is not None:
+        steps.append(('restoration etc', produced - final, 'enhance_strength'))
+        steps.append(('mask and paste', final - shift, 'mask_shape_growth'))
+    else:
+        steps.append(('everything after', produced - shift,
+                      'mask_shape_growth, then enhance_strength'))
+
+    for name, cost, _lever in steps:
+        lines.append('      {:<20} {:+.3f}'.format(name, -cost))
+
+    if produced < 0.05:
+        lines.append('    -> the GENERATOR never moved the contour. Nothing '
+                     'for the mask to clip, so mask_shape_growth is not the '
+                     'lever here — only a different swap model is.')
+    elif shift >= produced * 0.5:
+        lines.append('    -> most of what the generator produced is reaching '
+                     'the output; the model is the ceiling, not anything '
+                     'downstream of it.')
+    else:
+        # Name the stage that took the most rather than assuming the mask.
+        # Restoration can eat a contour too, and pointing at the wrong knob is
+        # worse than pointing at none.
+        worst = max(steps, key=lambda item: item[1])
+        lines.append('    -> generated and then taken back ({:.0f}% lost), '
+                     'most of it by {}. Sweep {}.'.format(
+                         (1.0 - shift / produced) * 100.0, worst[0], worst[2]))
 
     return lines
 
@@ -357,9 +487,13 @@ def main() -> int:
     labels = [_label(settings) for settings in combinations]
     width = max(len(label) for label in labels)
 
+    columns = [stage.replace('id_', '') for stage in _STAGES]
+    # `gen` is what the swap model produced, `kept` is what survived the mask
+    # and the paste. Reading them left to right is the attribution.
+    columns += ['shape', 'gen', 'kept']
     print('  {:<{}}  {}'.format('configuration', width, '  '.join(
-        '{:<5}'.format(stage.replace('id_', '')) for stage in _STAGES)))
-    print('  ' + '-' * (width + 2 + len(_STAGES) * 7))
+        '{:<5}'.format(name[:5]) for name in columns)))
+    print('  ' + '-' * (width + 2 + len(columns) * 7))
 
     results: List[Dict[str, Any]] = []
     baseline: Optional[Dict[str, float]] = None
@@ -404,6 +538,8 @@ def main() -> int:
         print('\n  where it goes, for `{}`:'.format(labels[0]))
         for line in _attribute(baseline):
             print(line)
+        for line in _shape_note(baseline):
+            print(line)
 
     if len(results) > 1:
         best = max(
@@ -412,9 +548,21 @@ def main() -> int:
         if best is not None:
             print('\n  best id_out: {:.3f} at `{}`'.format(
                 best['readings']['id_out'], _label(best['settings'])))
-            print('  Now look at the frames. A higher cosine that reads as '
-                  'plastic or seamed is not a better swap — this measures one '
-                  'axis of three.')
+
+        shaped = [r for r in results if 'outline_shift' in r['readings']]
+        if shaped:
+            top = max(shaped, key=lambda r: r['readings']['outline_shift'])
+            print('  best outline_shift: {:+.3f} at `{}`'.format(
+                top['readings']['outline_shift'], _label(top['settings'])))
+            if top['settings'] != (best or {}).get('settings'):
+                print('  -> the two disagree, which is the point of measuring '
+                      'both: a cosine barely sees head shape, and head shape '
+                      'is what a viewer reads first.')
+
+        if best is not None or shaped:
+            print('  Now look at the frames. A higher number that reads as '
+                  'plastic or seamed is not a better swap — these measure two '
+                  'axes of several.')
 
     if args.json:
         with open(args.json, 'w', encoding='utf-8') as handle:

@@ -285,6 +285,15 @@ class SwappingProcessor(FrameProcessor):
         try:
             self.source_face.source_frame = frame
             self.source_face.source_kps = np.asarray(kps, dtype=np.float64)
+            # The same photograph's 106 landmarks, for the shape metric. Taken
+            # from this pick rather than averaged across every accepted image
+            # for the reason the texture map is: identity is a distributed
+            # representation and averages soundly, geometry is not — landmarks
+            # from photographs at different angles average into a face nobody
+            # has, and `select_texture_source` has already scored frontality.
+            marks = getattr(face, 'landmark_2d_106', None)
+            self.source_face.source_landmarks = (
+                None if marks is None else np.asarray(marks, dtype=np.float64))
         except (AttributeError, TypeError):
             # A Face implementation that refuses attributes. The embedding path
             # is unaffected, so this degrades rather than failing a session.

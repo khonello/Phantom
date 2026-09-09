@@ -34,8 +34,10 @@ from pipeline.services.enhancement import Enhancer
 from pipeline.services.masking import FaceMasker
 from pipeline.services import guards
 from pipeline.services import identity
+from pipeline.services import shape as shape_metric
 from pipeline.services import swapper_models
 from pipeline.services.identity import IdentityProbe
+from pipeline.services.shape import ShapeProbe
 from pipeline.logging import emit_warning
 from pipeline.processing import texture
 from pipeline.processing.texture import SourceTexture
@@ -392,10 +394,22 @@ class FaceCompositor:
         self.identity: Optional[IdentityProbe] = None
         self.source_identity: Optional[Any] = None
 
+        # Shape, and the two things needed to measure it. Set by the pipeline
+        # exactly as the identity pair is. The source landmarks are the *one
+        # best* photograph's rather than an average of all of them, for the
+        # reason the texture layer picks one: identity is distributed and
+        # averages soundly, geometry is not � averaging landmarks taken at
+        # different angles produces a face nobody has.
+        self.shape: Optional[ShapeProbe] = None
+        self.source_shape: Optional[Any] = None
+
         # Cosine similarities from the last measured frame, by stage name. Same
         # pattern as `last_detail_ratio`: the stage that measures a thing owns
         # the number and whoever needs it reads it afterwards.
         self.last_identity: Dict[str, float] = {}
+
+        # Shape readings from the last measured frame. Same ownership rule.
+        self.last_shape: Dict[str, float] = {}
 
         # Frames since the last identity measurement. Measuring is several
         # ArcFace inferences, so it runs every Nth frame rather than on all of
@@ -489,6 +503,86 @@ class FaceCompositor:
         if against is not None:
             self.last_identity['id_target'] = against
 
+    def _measure_shape(self, pasted: Optional[Frame], face: Face) -> None:
+        """
+        Record whether the output took the source's head shape or the target's.
+
+        The one thing `_measure_output` cannot see. ArcFace is trained to be
+        invariant to a great deal of geometry, so a swap can move the jawline
+        visibly and shift the cosine by almost nothing — and the head's outline
+        is among the strongest identity cues a viewer actually reads.
+
+        The target's landmarks come from the detection rather than from the
+        frame, which is both free and safer: they were computed before anything
+        was composited, so there is no question of reading them back off a frame
+        that has since been pasted into.
+
+        Args:
+            pasted: The finished frame
+            face: The target detection, for its landmarks and box
+        """
+        if self.shape is None or pasted is None or self.source_shape is None:
+            return
+
+        target = getattr(face, 'landmark_2d_106', None)
+        if target is None:
+            return
+
+        output = self.shape.landmarks(pasted, getattr(face, 'bbox', None))
+        if output is None:
+            return
+
+        reading = shape_metric.compare(self.source_shape, target, output)
+        if reading is not None:
+            # `update`, not assignment: the per-stage readings below are
+            # recorded earlier in the frame and assigning here would wipe them,
+            # leaving the attribution silently empty.
+            self.last_shape.update(reading.as_readings())
+
+    def _measure_shape_stage(
+        self,
+        name: str,
+        crop: Optional[Frame],
+        face: Face,
+        matrix: Matrix,
+    ) -> None:
+        """
+        Record the outline shift of an aligned crop, mid-chain.
+
+        This is what makes the shape reading *actionable* rather than merely
+        true. `outline_shift` on the finished frame says whether the source's
+        head shape survived; it cannot say where it was lost, and the two causes
+        have opposite fixes — a contour the generator moved and the mask then
+        clipped calls for `mask_shape_growth`, while a contour the generator
+        never moved calls for a different model and leaves the mask innocent.
+
+        Only the outline is recorded, not the whole-face figure. At an
+        intermediate stage the whole-face residual is dominated by the interior
+        features that every stage repaints, and no lever is attached to it; the
+        silhouette is the channel with `mask_shape_growth` behind it.
+
+        Args:
+            name: Reading name — `outline_swap`, `outline_final`
+            crop: The aligned crop as it stands at this stage
+            face: The target detection, for its landmarks and box
+            matrix: 2x3 affine, frame space -> aligned space
+        """
+        if self.shape is None or crop is None or self.source_shape is None:
+            return
+
+        target = getattr(face, 'landmark_2d_106', None)
+        if target is None:
+            return
+
+        points = self.shape.landmarks_aligned(
+            crop, getattr(face, 'bbox', None), matrix)
+        if points is None:
+            return
+
+        reading = shape_metric.compare(self.source_shape, target, points)
+        if reading is not None and reading.outline_shift is not None:
+            self.last_shape[name] = reading.outline_shift
+
     def clear_readings(self) -> None:
         """
         Drop what the last frame measured, without touching temporal state.
@@ -507,6 +601,7 @@ class FaceCompositor:
         """
         self.last_stage_ms.clear()
         self.last_identity.clear()
+        self.last_shape.clear()
         self.last_detail_ratio = None
         self.last_detail_reserve = None
         self.last_texture_headroom = None
@@ -611,6 +706,12 @@ class FaceCompositor:
         measure = self._identity_due()
         if measure:
             self._measure_identity('id_swap', fake, template)
+            # The contour the generator actually produced. It exists nowhere
+            # else — the frame holds the target's face — so if this is not read
+            # here, a contour the mask later clips off leaves no evidence that
+            # it was ever generated.
+            self._measure_shape_stage(
+                'outline_swap', fake, face, aligned_matrix)
 
         if self.config.enhance and self._restore_worthwhile(face):
             fake = self._enhance(fake, frame, face, aligned_matrix)
@@ -676,6 +777,14 @@ class FaceCompositor:
 
         if measure:
             self._measure_identity('id_final', fake, template)
+            # Still aligned space, so the difference from `outline_swap` is
+            # restoration and the aligned-space stages — and the difference
+            # from `outline_shift` is the mask and the paste. Restoration is
+            # the one nobody would suspect of moving a contour: it regresses a
+            # face toward its training manifold at `enhance_strength`, which is
+            # a plausible way to lose a widened jaw.
+            self._measure_shape_stage(
+                'outline_final', fake, face, aligned_matrix)
 
         pasted = self._paste(frame, fake, mask, aligned_matrix, face, extent)
         elapsed('paste')
@@ -687,6 +796,11 @@ class FaceCompositor:
             # which is where the silhouette, the paste and the frame-space
             # feather finally get a vote.
             self._measure_output(pasted, face)
+            # And the axis the cosine above is blind to, measured in the same
+            # place and for the same reason: the mask is the last stage that
+            # can take the source's outline away, so shape has to be read after
+            # it rather than on the aligned crop.
+            self._measure_shape(pasted, face)
 
         return pasted
 

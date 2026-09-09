@@ -54,6 +54,7 @@ from pipeline.services.enhancement import Enhancer
 from pipeline.services.database import FaceDatabase
 from pipeline.services.masking import FaceMasker
 from pipeline.services.identity import IdentityProbe
+from pipeline.services.shape import ShapeProbe
 from pipeline.services.face_tracking import LandmarkStabilizer
 from pipeline.services import guards
 from pipeline.services import identity_models
@@ -268,6 +269,7 @@ class ProcessingPipeline:
         # copy. Constructing it loads nothing — the model is resolved on first
         # use, and only while `identity_probe` is set.
         self._compositor.identity = IdentityProbe(detector)
+        self._compositor.shape = ShapeProbe(detector)
         self._stabilizer = LandmarkStabilizer(
             alpha=self.config.alpha,
             identity_sim=self.config.guard_identity_sim,
@@ -304,6 +306,11 @@ class ProcessingPipeline:
             source = self._swapping_proc.source_face if loaded else None
             self._compositor.source_identity = getattr(
                 source, 'normed_embedding', None)
+            # Carried by `_load_source_image`, from the single best photograph
+            # rather than the average — see there for why geometry does not
+            # average the way identity does.
+            self._compositor.source_shape = getattr(
+                source, 'source_landmarks', None)
             # A new identity is a new chance to say the layer has nothing to
             # work with. Without this, only the first failing source is ever
             # reported and the second looks like a working layer set too low.
@@ -1077,6 +1084,9 @@ class ProcessingPipeline:
         # of it survives, and only a per-stage distribution answers the first.
         for name, score in self._compositor.last_identity.items():
             self._readings.record(name, score)
+
+        for name, value in self._compositor.last_shape.items():
+            self._readings.record(name, value)
 
     @staticmethod
     def _unpack_timestamped_frame(

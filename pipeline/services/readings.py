@@ -27,6 +27,15 @@ knowing before tuning its strength. It was, and it did: the measured p50 was
 **0.78** of an 8-bit unit against a face carrying several, which is why the layer
 was invisible at every strength.
 
+**`shape_mismatch` / `outline_shift`** — whether the output took the source's
+head shape or kept the target's. Alone among the readings here, the first is a
+property of the *pairing* rather than of a setting: no knob moves it, and it is
+the quantity behind "swaps read better when the two heads are similar". It is
+reported beside the `id_*` cosines and is deliberately not folded into them —
+ArcFace is trained to be invariant to most of the geometry it describes, so the
+two can disagree completely and a good cosine does not cover head shape. See
+pipeline/services/shape.py.
+
 **`detail_reserve`** — the share of that budget `_match_detail` now holds back so
 the texture layer has something to fill. This is the reading that says whether
 the fix is engaged on a given clip, and it is the first thing to check when
@@ -39,7 +48,7 @@ rather than at debug level.
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -231,6 +240,145 @@ class Readings:
         return notes
 
     @staticmethod
+    def _shape_verdicts(data: Dict[str, Any]) -> List[str]:
+        """
+        Say whether the output took the source's head shape or the target's.
+
+        Reported apart from the identity verdicts on purpose. A cosine and a
+        shape residual can disagree completely — ArcFace is trained to be
+        invariant to much of the geometry this measures — and folding them into
+        one paragraph would invite reading a good cosine as covering both.
+
+        The number to act on is `outline_shift`, because the silhouette is the
+        channel that carries identity and the channel the mask clips.
+        """
+        notes: List[str] = []
+
+        mismatch = data.get('shape_mismatch')
+        if mismatch is None:
+            return notes
+
+        shift = data.get('outline_shift') or data.get('shape_shift')
+        outline = data.get('outline_mismatch') or mismatch
+
+        # How different the two heads are in the first place. This is the
+        # quantity behind "swaps read better when the shapes are close", and it
+        # is a property of the pairing rather than of any setting.
+        if mismatch['p50'] < 0.02:
+            # And stop here. Everything below recommends a lever for recovering
+            # the source's contour, which is advice for a problem this pairing
+            # does not have — there is almost no contour difference to recover,
+            # so a shift near zero is the correct outcome rather than a finding.
+            notes.append(
+                '  -> source and target head shapes are close (mismatch '
+                '{:.3f}). There is little geometric conflict to resolve here, '
+                'so shape is not what is costing this swap, and a shift near '
+                'zero is expected rather than a fault.'.format(
+                    mismatch['p50']))
+            return notes
+        else:
+            notes.append(
+                '  -> source and target head shapes differ by {:.3f} of face '
+                'size ({:.3f} at the outline). This is the geometric conflict '
+                'the swap has to resolve, and the larger it is the more the '
+                'output leans on the target\'s silhouette.'.format(
+                    mismatch['p50'], outline['p50']))
+
+        if shift is None:
+            return notes
+
+        moved = shift['p50']
+        notes.append(
+            '     the output carries {:+.1%} of the source\'s head shape '
+            '(0 = kept the target\'s, 1 = took the source\'s).'.format(moved))
+
+        notes.extend(Readings._shape_attribution(data, moved))
+        return notes
+
+    @staticmethod
+    def _shape_attribution(data: Dict[str, Any], survived: float) -> List[str]:
+        """
+        Say *where* the source's head shape was lost, not merely that it was.
+
+        The whole reason the intermediate readings exist. A final `outline_shift`
+        near zero has two causes with opposite remedies — the generator moved
+        the contour and something downstream clipped it, or the generator never
+        moved it at all — and they are indistinguishable from the finished frame.
+
+        Args:
+            data: The full reading summary
+            survived: `outline_shift` p50 on the finished frame
+
+        Returns:
+            Attribution lines, or a fallback recommendation when the
+            intermediate readings are absent
+        """
+        notes: List[str] = []
+
+        made = data.get('outline_swap')
+        if made is None:
+            # No attribution available, so recommend on the final number alone.
+            if survived < 0.05:
+                notes.append(
+                    '     -> the silhouette is entirely the target\'s. The '
+                    'levers are mask_shape_growth and a swap model that moves '
+                    'the contour at all — hififace_unofficial_256 is the only '
+                    'registered one.')
+            return notes
+
+        produced = made['p50']
+        notes.append(
+            '     the generator produced {:+.3f} and {:+.3f} survived:'.format(
+                produced, survived))
+
+        # Each step, with the lever attached to it. Same shape as the identity
+        # attribution above, and for the same reason: a loss nobody can act on
+        # is a number rather than a finding.
+        steps: List[Tuple[str, float, str]] = []
+        final = data.get('outline_final')
+        if final is not None:
+            steps.append((
+                'restoration etc', produced - final['p50'],
+                'enhance_strength — a restorer regresses a face toward its '
+                'training manifold, which is a plausible way to lose a jaw'))
+            steps.append((
+                'mask and paste', final['p50'] - survived, 'mask_shape_growth'))
+        else:
+            steps.append((
+                'everything after', produced - survived,
+                'mask_shape_growth first, then enhance_strength'))
+
+        for name, cost, _lever in steps:
+            notes.append('       {:<22} {:+.3f}'.format(name, -cost))
+
+        # The finding, and it is the one that decides which lever to reach for.
+        if produced < 0.05:
+            notes.append(
+                '     -> the GENERATOR never moved the contour, so there is '
+                'nothing for the mask to clip and mask_shape_growth is not '
+                'your lever. Expected for inswapper and alphaface. Changing '
+                'the swap model is the only thing that moves this.')
+            return notes
+
+        if survived >= produced * 0.5:
+            notes.append(
+                '     -> most of what the generator produced is reaching the '
+                'output, so the ceiling is the model rather than anything '
+                'downstream of it.')
+            return notes
+
+        # Something took it back. Name the stage that took the most, rather
+        # than assuming the mask — restoration can eat a contour too, and
+        # recommending the wrong knob is worse than recommending none.
+        worst = max(steps, key=lambda item: item[1])
+        notes.append(
+            '     -> the generator moved the contour and {:.0f}% of it was '
+            'taken back downstream, most of it by {}. Sweep {}.'.format(
+                (1.0 - survived / produced) * 100.0, worst[0], worst[2]))
+
+        return notes
+
+    @staticmethod
     def _verdicts(data: Dict[str, Any]) -> List[str]:
         """
         Say what the numbers mean, for the two that have a decision waiting.
@@ -301,6 +449,7 @@ class Readings:
                         kept['p50'], kept['limit']))
 
         notes.extend(Readings._identity_verdicts(data))
+        notes.extend(Readings._shape_verdicts(data))
 
         headroom = data.get('texture_headroom')
         if headroom is not None:
