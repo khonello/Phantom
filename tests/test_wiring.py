@@ -390,6 +390,36 @@ check('set_realism validates against the registry',
       'swapper_models.names()' in handlers_src)
 check('the CLI reads SWAPPER_MODEL from the environment',
       "os.environ.get('SWAPPER_MODEL')" in core_src)
+# ── .env.example is structured, and stays that way ─────────────────────
+#
+# A change to one env file is a change to all of them — see CLAUDE.md. Parity
+# with a local `.env` cannot be checked here (it is gitignored and absent in
+# CI), so this pins the half that can be: the example itself is well-formed.
+# A duplicate key is the one that actually bites, because dotenv keeps the LAST
+# occurrence and the reader's eye stops at the first.
+print()
+print('.env.example structure')
+
+_env_lines = read('.env.example').splitlines()
+_env_keys = [re.match(r'^([A-Z][A-Z0-9_]*)=', ln).group(1)
+             for ln in _env_lines if re.match(r'^([A-Z][A-Z0-9_]*)=', ln)]
+_env_dupes = sorted({k for k in _env_keys if _env_keys.count(k) > 1})
+check('no key is declared twice', not _env_dupes,
+      'dotenv keeps the LAST one; the reader stops at the first: {}'.format(
+          _env_dupes))
+
+_rules = [ln for ln in _env_lines if re.match(r'^# (─|═)+ ', ln)]
+_widths = {len(ln) for ln in _rules}
+check('every section rule is the same width', len(_widths) <= 1,
+      'widths {} across {} sections'.format(sorted(_widths), len(_rules)))
+check('the file is actually sectioned', len(_rules) >= 8,
+      '{} section headers'.format(len(_rules)))
+
+check('no stale env backups are left lying around',
+      not [n for n in _os.listdir(_REPO_ROOT) if n.startswith('.env.backup')],
+      'one still held the RunPod config a whole migration later; git is '
+      'the history')
+
 check('.env.example documents every registered model',
       all(name in read('.env.example') for name in swapper_models.names()),
       str([n for n in swapper_models.names() if n not in read('.env.example')]))

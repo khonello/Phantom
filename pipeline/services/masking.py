@@ -42,6 +42,7 @@ from pipeline.types import Frame, Face, Mask, Matrix
 from pipeline.processing import geometry
 from pipeline.services import guards
 from pipeline.logging import emit_status, emit_warning
+from pipeline.services import downloads
 
 # DFL XSeg, distributed by the facefusion project. Segments the face area
 # with obstructions removed; output is an *inclusion* mask (1 = swap here).
@@ -658,6 +659,11 @@ class FaceMasker:
 
         emit_status(f'Downloading {_OCCLUDER_MODEL_NAME} for occlusion masking...', scope='MASKER')
         try:
+            refusal = downloads.refuse_reason(_OCCLUDER_MODEL_NAME)
+            if refusal:
+                emit_warning(refusal, scope='MASK')
+                return False
+
             from pipeline.io.ffmpeg import conditional_download
 
             conditional_download(model_dir, [_OCCLUDER_MODEL_URL])

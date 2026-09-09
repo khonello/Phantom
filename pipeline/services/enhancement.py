@@ -40,6 +40,7 @@ import numpy as np
 from pipeline.config import FaceSwapConfig
 from pipeline.types import Frame
 from pipeline.logging import emit_status, emit_warning
+from pipeline.services import downloads
 from pipeline.services import enhancer_models
 
 # Both backends are trained on FFHQ-aligned 512x512 crops. This is the default
@@ -175,6 +176,11 @@ class _CodeFormerBackend:
         name = os.path.basename(model_path)
         emit_status(f'Downloading {name}...', scope='ENHANCER')
         try:
+            refusal = downloads.refuse_reason(os.path.basename(model_path))
+            if refusal:
+                emit_warning(refusal, scope='ENHANCER')
+                return False
+
             from pipeline.io.ffmpeg import conditional_download
 
             conditional_download(os.path.dirname(model_path), [url])

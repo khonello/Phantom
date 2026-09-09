@@ -553,12 +553,33 @@ echo "--- GFPGAN Model ---"
 _phase "gfpgan-download"
 GFPGAN_PATH="${MODELS_DIR}/GFPGANv1.4.pth"
 GFPGAN_URL="https://github.com/TencentARC/GFPGAN/releases/download/v1.3.4/GFPGANv1.4.pth"
+# Conditional, and it used to be unconditional. This is 340 MB for the
+# *alternate* restoration backend: the default is gpen_bfr_256, the gfpgan
+# backend additionally needs torch and the `gfpgan` package, and most sessions
+# never touch it. Every deploy paid for it anyway, which is the one place this
+# deployment genuinely did download something nobody asked for.
+#
+# Fetched only when this deployment actually selects it, or when MODEL_DOWNLOADS
+# names it. Mirrors pipeline/services/downloads.py; kept as shell rather than
+# calling into Python because this runs before the venv is guaranteed usable.
+_want_gfpgan="no"
+case ",${MODEL_DOWNLOADS:-selected}," in
+    *,all,*) _want_gfpgan="yes" ;;
+    *gfpgan*) _want_gfpgan="yes" ;;
+esac
+if [ "${ENHANCER_MODEL:-}" = "gfpgan" ]; then
+    _want_gfpgan="yes"
+fi
+
 if [ -f "${GFPGAN_PATH}" ]; then
     echo "Already downloaded: ${GFPGAN_PATH} ($(du -h "${GFPGAN_PATH}" | cut -f1))"
-else
+elif [ "${_want_gfpgan}" = "yes" ]; then
     echo "Downloading GFPGANv1.4.pth..."
     wget -q --show-progress -O "${GFPGAN_PATH}" "${GFPGAN_URL}"
     echo "Downloaded: ${GFPGAN_PATH} ($(du -h "${GFPGAN_PATH}" | cut -f1))"
+else
+    echo "Skipped: gfpgan is not the selected restorer (340 MB saved)."
+    echo "         Set ENHANCER_MODEL=gfpgan or MODEL_DOWNLOADS=all to fetch it."
 fi
 
 # ── 8. Model pre-warm ─────────────────────────────────────────────────────────

@@ -368,8 +368,12 @@ Judge `complexion_keep` by eye and by `seam_excess`, **not** by `id_out` — see
 §7 for why the cosine is blind to this one. And sweep `source_blend` only with
 `--holdout`; see §8 for why it is meaningless without.
 
-**3. Then the models.** `hyperswap_1a_256` has been registered and never judged
-on appearance. `hififace_unofficial_256` needs `mask_shape_growth` set to
+**3. Then the models.** `alphaface_256` is the one to put against the
+incumbent: it injects the source identity at every encoder stage rather than
+once at the bottleneck, which is a mechanism against target leakage rather
+than a claim about it. (`hyperswap_1a_256` held this slot and was removed on
+2026-09-09 — tuned to respect the target, 62.2ms against inswapper's 58.9,
+and worst of the three judged by eye.) `hififace_unofficial_256` needs `mask_shape_growth` set to
 0.06-0.08 to show what it is for — measure it with the growth at 0 *and* at
 0.08, because the difference between those two is the entire argument for
 §3 and §4.

@@ -241,6 +241,22 @@ _FORWARDED_ENV = (
     "LOG_LEVEL",
     # Batch scratch location, so a long video does not fill the disk
     "PHANTOM_TEMP_DIR",
+    # Studio swap backends, for RENDER and photo jobs. Forwarded because the
+    # GPU is here — a backend configured only on the operator's laptop is
+    # configured on the one machine that will never run it.
+    #
+    # The paths are deliberately included even though they are paths: unlike a
+    # local source file, these name checkouts and checkpoints that live on the
+    # INSTANCE, so the value that is meaningless locally is the meaningful one.
+    "STUDIO_SWAPPER", "MODEL_DOWNLOADS",
+    "IDENTITY_MODEL", "IDENTITY_MODEL_DIR", "IDENTITY_MORPH",
+    "REFACE_REPO", "REFACE_PYTHON", "REFACE_CONFIG", "REFACE_CKPT",
+    "REFACE_DDIM_STEPS", "REFACE_SCALE",
+    "GHOST2_REPO", "GHOST2_PYTHON",
+    "GHOST2_CKPT_ALIGNER", "GHOST2_CKPT_BLENDER",
+    "GHOST2_CONFIG_ALIGNER", "GHOST2_CONFIG_BLENDER", "GHOST2_USE_KANDI",
+    "DREAMIDV_REPO", "DREAMIDV_PYTHON", "DREAMIDV_CKPT", "DREAMIDV_WAN_DIR",
+    "DREAMIDV_SIZE", "DREAMIDV_STEPS", "DREAMIDV_SEED",
 )
 
 

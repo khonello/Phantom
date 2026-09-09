@@ -7,6 +7,15 @@ This is a runbook, not a backlog. [TODO.md](TODO.md) is the backlog and stays th
 source of truth for *what* is outstanding; this document is the sequence for
 getting through it, with the commands.
 
+
+> **2026-09-09 — `hyperswap_1a/1b/1c_256` is gone from the registry.** Every
+> command below that names it is superseded: substitute **`alphaface_256`**,
+> which now holds that slot as the 256-native candidate against the incumbent.
+> Hyperswap lost on all three axes — tuned to respect the target (the opposite
+> of low leakage), 62.2ms against inswapper's 58.9, and worst by eye on real
+> footage. The measurements it produced are kept as the evidence for that;
+> the commands are not.
+
 **Where things stand.** A large amount was built without ever running against a
 GPU, a model, or a real face. The build-out is finished for now, and the binding
 constraint has moved: nothing further should be built on top of the recent work
@@ -102,9 +111,9 @@ clone. Present locally:
 | Weight | Size | Why it is kept locally |
 |---|---|---|
 | `inswapper_128.onnx` | 529 MB | The incumbent swapper |
-| `hyperswap_1a_256.onnx` | 384 MB | The candidate Phase 2 compares against it |
+| `alphaface_256.onnx` | 530 MB | The candidate Phase 2 compares against it |
 
-Keeping hyperswap on disk is **archival, not a speed optimisation**. The pod
+Keeping a second swap model on disk is **archival, not a speed optimisation**. The pod
 downloads it straight from GitHub, and uploading a local copy from here would be
 slower than letting it do that. The reason to hold it is supply chain: the
 release tag is load-bearing and demonstrably mutable — `models-3.0.0` and
@@ -116,7 +125,6 @@ those weights has no way to obtain them.
 until there is a reason to compare all three:
 
 ```bash
-curl -L -o pipeline/models/hyperswap_1b_256.onnx   https://github.com/facefusion/facefusion-assets/releases/download/models-3.3.0/hyperswap_1b_256.onnx
 ```
 
 ### 0.4 Have a source face ready
@@ -175,7 +183,7 @@ python vast/orchestrator.py offers        # what is rentable, and what start wou
 |---|---|
 | venv (torch, tensorflow, onnxruntime) | ~6–8 GB |
 | Models (inswapper, CodeFormer, XSeg, GFPGAN, buffalo_l) | ~1.6 GB |
-| hyperswap_1a_256, if measured | 0.4 GB |
+| alphaface_256, if measured | 0.5 GB |
 | Debug frames at stride 3, limit 1500 | ~2 GB |
 | Batch scratch, if a video is processed | 4 MB per 1080p frame |
 
@@ -235,7 +243,7 @@ that describes what a returning customer actually waits for, and it is free.
 
 Revisit when **both** are true:
 
-- The pipeline is confirmed working end to end on a GPU — hyperswap produces a
+- The pipeline is confirmed working end to end on a GPU — the swapper produces a
   face, guards behave, latency holds
 - You are either taking real sessions, or the search has actually failed to
   find anything in the preferred countries and the fallback is no longer
@@ -302,7 +310,7 @@ configured. Without that, configuring a run means SSHing in and restarting the
 pipeline by hand, which is most of a session.
 
 ```env
-SWAPPER_MODEL=hyperswap_1a_256
+SWAPPER_MODEL=alphaface_256
 GUARD_OBSERVE=true
 GUARD_REPORT=/workspace/guards.json
 DEBUG_FRAMES_DIR=/workspace/clip
@@ -413,23 +421,23 @@ inswapper and then switching would throw the calibration away.
 # Same clip, one model per run. --debug-frames into separate directories.
 /workspace/venv/bin/python pipeline.py --stream --execution-provider cuda     --swapper-model inswapper_128 --debug-frames /workspace/clip-inswapper
 
-/workspace/venv/bin/python pipeline.py --stream --execution-provider cuda     --swapper-model hyperswap_1a_256 --debug-frames /workspace/clip-hyperswap
+/workspace/venv/bin/python pipeline.py --stream --execution-provider cuda     --swapper-model alphaface_256 --debug-frames /workspace/clip-alphaface
 ```
 
 Then locally:
 
 ```bash
-python tools/compare_frames.py clip-inswapper/ --against clip-hyperswap/
+python tools/compare_frames.py clip-inswapper/ --against clip-alphaface/
 ```
 
 Judge on `hf_ratio` and `noise_ratio` landing **nearer 1.0**, not on which crop
 looks crisper zoomed in — a 256 model will always look sharper in a still, and
 sharper than the frame is one of the three failure modes.
 
-Note the download cost: **384 MB per model**, so pulling all three hyperswap
+Note the download cost: **200-1600 MB per model**, so pulling several
 variants is ~1.2 GB before a frame is served. Pull the one under test.
 
-Expect hyperswap to need its knobs re-swept afterwards. The profile
+Expect a 256-native model to need its knobs re-swept afterwards. The profile
 (`enhance_strength` 0.5, `enhancer_weight` 0.8) is a mechanically-reasoned
 starting point, not a measured one.
 
@@ -630,7 +638,7 @@ See CLAUDE.md for the tables; the short version:
 - **Restoration off is 17.7ms and HOLDS** — the first `[HOLDS]` this project
   has produced. `restore_min_face=200` reaches the same floor (18.0ms), which
   is the shippable version of the same saving.
-- `aligned_size` does nothing. **hyperswap is slightly worse**, not better.
+- `aligned_size` does nothing. **hyperswap was slightly worse**, not better (and is now removed).
 - CodeFormer is **fixed at 512x512** in the graph, so `restore_size` cannot
   shrink it — that needs a different model, not a config change.
 - **fp16 has never actually run.** The conversion fails its own load check on a
@@ -1039,7 +1047,7 @@ than lingering.
 
 Both deploy paths load all four models during setup rather than on the first
 frame. Model weights live on the network volume by design, not in the image, so
-they are the one thing still fetched at run time — and hyperswap is a 384 MB
+they are the one thing still fetched at run time — and a swap model is a 200-1600 MB
 download that would otherwise land on a customer.
 
 `vast/prewarm.py` is shared by `startup.sh` (SSH) and `entrypoint.sh` (Docker).

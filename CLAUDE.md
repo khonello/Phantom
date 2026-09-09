@@ -164,7 +164,7 @@ sweeps taken before the fix have to be read this way.
 lands on the same number, which is the cross-check it was built for: the
 shippable config-level lever reaches the same floor as switching the stage off.
 Two questions closed, both negative. **`aligned_size` is not the cost.**
-**hyperswap is slightly worse, not better** — the 256px swap costs 2-3ms and buys
+**hyperswap was slightly worse, not better** — the 256px swap costs 2-3ms and buys
 back nothing in restoration time. Its appearance remains unjudged. Full working
 in [docs/PERFORMANCE_AUDIT.md](docs/PERFORMANCE_AUDIT.md) §11.
 
@@ -961,7 +961,7 @@ operator and "balanced" does, and because a support question has an answer.
 **`auto` is the default and is what makes the control safe.** It means "follow
 this swap model's profile", which is the behaviour that existed before the
 dropdown. It exists because `apply_model_profile` sets `enhance_strength` per
-model — 0.7 for inswapper_128, 0.5 for hyperswap — and the desktop applies a
+model — 0.7 for inswapper_128, 0.5 for the 256-native ones — and the desktop applies a
 profile on start, so without `auto` an operator's choice would be silently
 reverted by a model change. That is exactly the `set_enhance` mistake recorded
 below, and `config.apply_model_profile` now skips the restoration fields when
@@ -1114,14 +1114,14 @@ Geometry uses a closed-form Umeyama similarity fit (`estimate_similarity`), not
 that varies frame to frame feeds straight back into shimmer.
 
 **Restoration is not tied to the swapper, deliberately.** It would be easy to
-put `enhance: False` in hyperswap's look profile and call the pairing settled —
+put `enhance: False` in a 256-native model's look profile and call it settled —
 a 256-native swap needs less repair than a 128 one, which is the belief the
 profile's `enhance_strength` 0.5 already encodes. Two reasons not to. It is an
 axis, not a switch, which is the same argument that removed the ENHANCE toggle
-from the header; and it is unmeasured — hyperswap's output has never been
+from the header; and it is unmeasured — no 256-native model's output has been
 looked at with restoration or without. Encoding an untested belief as a hard
 rule also removes the ability to test it, since three of the four cells in
-{inswapper, hyperswap} x {restore, don't} would become unreachable. The graded
+{inswapper, alphaface} x {restore, don't} would become unreachable. The graded
 version already exists in `enhance_strength`; leave the binary to the footage.
 
 ### Source skin texture
@@ -1445,7 +1445,7 @@ carrying both a **spec** (kind, alignment template, native size, normalisation,
 URL) and a **look profile** (`enhancer_weight`, `enhance_strength`,
 `aligned_min`).
 
-| | inswapper_128 | hyperswap_1a/1b/1c_256 | hififace_unofficial_256 |
+| | inswapper_128 | alphaface_256 | hififace_unofficial_256 |
 |---|---|---|---|
 | Source input | ArcFace embedding via `emap` | ArcFace embedding, direct | ArcFace embedding through a **converter** |
 | Template | `arcface_128` | `arcface_128` (identical) | **`mtcnn_512`** |
@@ -1502,6 +1502,337 @@ code reads `normed_embedding` deliberately.
 
 Weights: 384 MB each, pinned to release tag `models-3.3.0` (verified; `3.0.0`
 and `3.4.0` both 404 for these files).
+
+### The rest of the registry, and what each was added to answer
+
+Six more models were registered on 2026-09-08, all faithful to facefusion's
+reference integration — templates, normalisation, embedding contract and output
+denormalisation were each diffed against it rather than assumed.
+
+| | native | template | source form | notes |
+|---|---|---|---|---|
+| **`alphaface_256`** | 256 | arcface_128 | **raw** | 98.77 ID retrieval, 24.1ms |
+| `ghost_1_256` | 256 | arcface_112_v1 | raw | **Apache-2.0**, the only one |
+| `simswap_256` | 256 | arcface_112_v1 | raw | ImageNet input, `[0,1]` output |
+| `simswap_unofficial_512` | **512** | arcface_112_v1 | raw | forces 512 compositing |
+
+**alphaface is the one to measure against inswapper.** Its conditioning injects
+the source code at *every encoder stage* rather than once at the bottleneck,
+which is a mechanism against target leakage rather than a claim about it — and
+leakage is the quantity the identity work exists to move. It reports 0.471 CSIM
+on pose-hard MPIE against FaceDancer 0.401 and SimSwap 0.180.
+
+**Every convention differs per family and none of them raises when wrong**,
+which is why `source_form`, `normalise_source` and `denormalize_output` are
+registry fields pinned by `tests/test_swapper_models.py`. ghost reads its
+converter's output **un-normalised** while hififace and simswap read it
+normalised — same converter architecture, opposite convention. simswap is fed
+ImageNet mean and deviation but emits `[0,1]`, so undoing it would tint a
+correct crop. alphaface wants the raw vector, whose magnitude is part of the
+signal. Each of these produces a blander identity or a tinted face, never an
+error, so none would be caught while judging a model on footage.
+
+**The source contract is now per model, not per architecture.** `blendswap_256`
+and `uniface_256` were previously excluded on the grounds that an image source
+"would break multi-photo averaging, `.npy` embeddings and the identity-outlier
+guard" — that was the pipeline deciding which models were allowed to exist. None
+of the three survives contact: the guards run at **upload** over every
+photograph and are untouched by what the swapper is later handed; averaging is
+*inapplicable*, not broken; and an all-`.npy` source is told once rather than
+swapping badly. `source_kind` carries it, and an image model gets
+`select_texture_source`'s single best photograph — the same pick the texture
+layer uses, so pores and identity come from one face. Note `identity_push` is
+inapplicable to them: there is no identity space to extrapolate in. Note also
+each wants a **different** framing for its source than for its target
+(blendswap: arcface_112_v2 at 112 against an FFHQ target), which is why
+`source_template`/`source_size` are separate fields rather than reused ones.
+
+**The averaged raw embedding lost its magnitude, and that is fixed.** Averaging
+vectors that disagree yields a resultant shorter than any input, so the mean of
+raw ArcFace vectors came out **5-20% under** a real embedding's norm — further
+under the more photographs were added, and the more the person varied between
+them. Uploading a fourth photograph made the conditioning vector *weaker*.
+Invisible under inswapper, which divides by the norm and is scale-invariant; a
+**different input** to `alphaface` and to the `crossface` converters, which were
+fitted on ArcFace's own output scale. The raw vector is now pointed along the
+normalised one and rescaled to the weighted mean of the input magnitudes, so the
+two cannot disagree about direction. Pinned in `tests/test_identity.py`.
+
+**simswap is registered to be falsified.** The 2026 survey puts it at 0.61 ID
+similarity against inswapper's 0.73 and its documented failure is exactly target
+leakage — it does not carry the source's face shape. It is here because
+`simswap_unofficial_512` is the only 512-native swapper, which is a different
+axis from the one it is expected to lose on.
+
+hififace's converter moved to `crossface_hififace` (`models-3.4.0`), which is
+what facefusion moved to. Different map, so a hififace result from before is not
+comparable with one from after — worth knowing when re-testing it with
+`mask_shape_growth` on, which is the experiment that has never actually been run.
+
+Pulling every model is **~3.4 GB**. Pre-seed the one being measured.
+
+**Removed 2026-09-09: `hyperswap_1a/1b/1c_256`**, and it is worth recording
+why rather than quietly dropping three entries. It was facefusion's own
+default and it lost on all three axes that matter here: tuned to blend well
+and *respect the target*, which is the opposite of low leakage; **62.2ms**
+against inswapper's 58.9 on a 4090, so slower as well; and judged worst by
+eye on real footage. Three 384 MB entries nobody should reach for is a trap,
+not an option. The measurements above are kept — they are the evidence.
+
+### Studio swap backends — the non-live path
+`pipeline/services/studio_swappers.py` and `pipeline/processing/offline.py`.
+A **second registry**, deliberately not a `kind` on the first one. Everything in
+`swapper_models.py` returns an aligned crop for `FaceCompositor` to finish;
+these return a finished picture and must not be composited at all.
+
+| | media | native | swaps | licence |
+|---|---|---|---|---|
+| `reface` | image | 512 | **head** | research |
+| `ghost_2` | image | 512 | **head** | Apache-2.0 |
+| `dreamid_v` | **video** | 480 | face | Apache-2.0 |
+
+Four properties carry it:
+
+- **They bypass the compositor entirely.** Colour matching, detail matching and
+  a hull of the *target's* landmarks would put back the target information these
+  exist to remove — and a hull mask would clip a head swap back to a face swap.
+  **That head swap is the point:** it is the only route past the ceiling every
+  ONNX model here shares, since our silhouette is always the target's.
+- **They are refused on a stream, before the models warm.** The fastest is
+  ~0.6s per image against a 50ms deadline, so a live session would emit nothing
+  while the connection, the virtual camera and every badge read healthy.
+  `is_live_safe()` is False for all three and `_run_stream_impl` reads it.
+- **Subprocess, not import.** Each is a checkout rather than a package and each
+  vendors its own diffusion stack — REFace an old latent-diffusion tree,
+  DreamID-V a Wan fork needing torch >= 2.4. No single environment satisfies all
+  three, so each names its own interpreter and checkout, and only the *command
+  line* is depended on, which is the part their own docs pin.
+- **A failure writes no file.** Crash, timeout, no output, wrong media kind, or
+  an unconfigured backend all return False and leave the destination absent —
+  the same rule photo mode already keeps, and deliberately **not** a silent
+  fallback to the ONNX path, which would be a result from a model nobody chose.
+
+The source handed over is `select_texture_source`'s pick rather than the
+averaged embedding: these take an image, and that picker already scores
+sharpness, size, frontality and clipping.
+
+**Nothing here is bundled or verified.** Every path comes from the environment,
+all of it is forwarded to the pod (the GPU is there, so a backend configured
+only on the operator's laptop is configured on the machine that will never run
+it), and no integration has been run against real weights.
+
+### Source contracts — what each model is conditioned on
+
+Declared, never inferred. Seven fields on `SwapperModel` carry it, the values
+were diffed against facefusion's reference integration, and
+`tests/test_swapper_models.py` pins them against a hard-coded table so they
+cannot drift. **Every one of them fails silently when wrong** — a blander
+identity or a tinted crop, never an exception — which is the whole reason they
+are declared rather than assumed.
+
+The one thing introspected at runtime rather than declared is ONNX **input
+names**: exports disagree about what they call things, and a wrong key is a
+`KeyError` on every frame. Same for a TRAINED model's crop size, read from its
+declared input shape.
+
+**LIVE tier — source side**
+
+| model | source | framing / form | normalise | converter | `identity_push` |
+|---|---|---|---|---|---|
+| `inswapper_128` | embedding | normed | yes | — | yes |
+| `hififace_unofficial_256` | embedding | **raw** | yes | `crossface_hififace` | yes |
+| `alphaface_256` | embedding | **raw** | **no** | — | yes |
+| `ghost_1_256` | embedding | **raw** | **no** | `crossface_ghost` | yes |
+| `simswap_256` | embedding | **raw** | yes | `crossface_simswap` | yes |
+| `simswap_unofficial_512` | embedding | **raw** | yes | `crossface_simswap` | yes |
+| `blendswap_256` | **image** | `arcface_112_v2` @112 | — | — | **no** |
+| `uniface_256` | **image** | `ffhq_512` @256 | — | — | **no** |
+
+**LIVE tier — target side**
+
+| model | target framing | size | mean | deviation | undo on output |
+|---|---|---|---|---|---|
+| `inswapper_128` | `arcface_128` | 128 | 0 | 1 | yes |
+| `hififace_unofficial_256` | `mtcnn_512` | 256 | 0.5 | 0.5 | yes |
+| `alphaface_256` | `arcface_128` | 256 | 0 | 1 | **no** |
+| `ghost_1_256` | `arcface_112_v1` | 256 | 0.5 | 0.5 | yes |
+| `simswap_256` | `arcface_112_v1` | 256 | **ImageNet** | **ImageNet** | **no** |
+| `simswap_unofficial_512` | `arcface_112_v1` | **512** | 0 | 1 | **no** |
+| `blendswap_256` | `ffhq_512` | 256 | 0 | 1 | **no** |
+| `uniface_256` | `ffhq_512` | 256 | 0.5 | 0.5 | yes |
+
+**STUDIO tier** — one contract for all three: a source image **file path** plus a
+target file, returning a finished picture. No crop, no framing, no
+normalisation; they do their own. `reface` and `ghost_2` take an image target,
+`dreamid_v` a video.
+
+**TRAINED tier** — **no source at all.** Target warped to `dfl_whole_face` at
+the size read from the export; NHWC, BGR, unsharp-masked first.
+
+Four things the tables make visible:
+
+- **Source framing is not target framing.** `blendswap_256` reads its source in
+  `arcface_112_v2` at 112 and its target in `ffhq_512` at 256. `uniface_256`
+  happens to use one space for both — which is exactly why they cannot be
+  generalised from each other.
+- **`identity_push` is inapplicable to image models**, not ignored. There is no
+  identity space to extrapolate in; `source_image_blob` never touches `_push`.
+- **Image models get one photograph** — `select_texture_source`'s pick, the same
+  one the texture layer uses, so pores and identity come from one face.
+- **The source guards and `identity_probe` are unaffected by any of this.**
+  Guards run at *upload*, over every photograph. The averaged embedding is still
+  built for every model, so `id_swap`/`id_restore`/`id_final`/`id_out`/`id_target`
+  measure against the same reference regardless of what conditions the model.
+
+### Which models to trust, and on what evidence
+
+Ranked on the stated objective — **low target leakage, high source
+preservation** — with the *kind* of evidence named, because "measured
+elsewhere" and "measured here" are not the same claim and only one model has
+both.
+
+**Read this second, not first.** The audit found the two dominant leak paths are
+the **mask** (the silhouette is a hull of the *target's* landmarks, so hair, jaw
+outline, ears and neck are never swapped) and **restoration** (`enhance_strength`
+0.7, plus a global encode that sees the target's border). Both cost more than
+the spread between any two models below. A model ranking is a ranking inside a
+constraint that beats it.
+
+**LIVE tier**
+
+| confidence | model | evidence |
+|---|---|---|
+| **High** | `inswapper_128` | 0.73 ID sim / 96.9% retrieval — top of the open field in the 2026 survey — **and** confirmed by eye on our own footage. The only model with two independent lines agreeing. Its weakness is resolution, not identity |
+| **High on mechanism** | `alphaface_256` | Identity injected at *every* encoder stage rather than only the bottleneck — a mechanism against leakage, not a claim about it. 98.77 ID retrieval FF++; best CSIM on pose-hard MPIE (0.471 against FaceDancer 0.401, SimSwap 0.180, HifiFace 0.092). Unjudged here. **The one to try against inswapper** |
+| **Moves a channel nothing else does** | `hififace_unofficial_256` | The only model that moves the face *contour*, which is a leakage channel no other model touches. But 0.62 ID sim, below inswapper, and **half of it is clipped unless `mask_shape_growth` > 0**. Test it; do not trust it yet |
+| **Low** | `ghost_1_256` | Kept **only** for its Apache-2.0 licence — the one permissively licensed model here, and every other is non-commercial, ResearchRAIL or unlicensed. Not an identity argument. Variants 2 and 3 were dropped: 1.5 GB of untested siblings of a model nothing here rates |
+| **Low** | `simswap_256`, `simswap_unofficial_512` | 0.61 ID sim, and its documented failure is precisely face-shape leakage. The 512 is here for resolution, not identity |
+| **Unknown** | `blendswap_256`, `uniface_256` | No benchmark worth quoting. Conditioned on one photograph, which could cut either way. `blendswap_256` is 1.6 GB and unmeasured for speed, so its LIVE declaration is an assumption rather than a measurement |
+
+**STUDIO tier**
+
+| confidence | model | evidence |
+|---|---|---|
+| **High** | `reface` | 98.8% ID retrieval top-1 on CelebA, the strongest identity figure in the open literature, **and** it swaps the head — the only thing that raises the mask ceiling |
+| **High on quality, thin on identity numbers** | `dreamid_v` | Best-in-class claims and video-native, so temporal coherence is by construction rather than by smoothing. No independent identity number extracted |
+| **Moderate** | `ghost_2` | Head transfer with explicit background inpainting. Least direct evidence on identity of the three |
+
+**TRAINED tier** — structurally the strongest thing here and the least evidenced
+in our chain. No generic-face manifold to regress toward, and a wider crop that
+moves the silhouette at frame rate. Zero measurements on our footage, and gated
+on training that happens elsewhere.
+
+### One rule for every environment file
+**A change to one `.env` is a change to all of them.** Keys, section headers and
+the order they appear in are kept identical across `.env.example` and every
+local `.env`; only the *values* differ. Adding a setting to the example and not
+to the machine that runs it is how a lever ends up existing in the code, being
+documented, and doing nothing on the one box anybody uses — the same class of
+silent gap as a model registry that drifted from the CLI.
+
+Two things follow, and neither is optional:
+
+- **Add the key everywhere, empty, in the same section.** An unset key that is
+  present reads as "this exists and I have not set it". An absent key reads as
+  nothing at all, and the difference is what someone scanning the file sees.
+- **`.env.backup-*` is not a thing.** Backups were kept and went stale — one
+  still held the RunPod configuration a whole migration ago — so they were
+  deleted and `.gitignore` keeps them out. Git is the history; a file that looks
+  like a config and is a fossil is worse than no file.
+
+`tests/test_wiring.py` checks what can be checked from a clean checkout: the
+example parses, holds no duplicate keys, and documents every variable the
+pipeline reads. Parity with a local `.env` cannot be tested — it is gitignored
+and absent in CI — so that half is a discipline, which is why it is written down
+here rather than assumed.
+
+### The three tiers, and why they are forced
+`pipeline/services/tiers.py`. "Which models can be used on a call" had been three
+implicit answers in three places — a speed comment in one registry, a refusal in
+the stream loop, and a paragraph here — and an implicit rule drifts.
+
+A tier is **derived from two declared facts**, never written down:
+
+    live_capable    can it hold a frame deadline?
+    needs_training  does it need a per-identity artifact before it runs?
+
+| tier | live | training | registry | what it is |
+|---|---|---|---|---|
+| **LIVE** | yes | no | `swapper_models.py` | 8 general models, usable on a call today |
+| **STUDIO** | no | no | `studio_swappers.py` | whole pipelines; RENDER and photo only |
+| **TRAINED** | **yes** | **yes** | `identity_models.py` | one model per person, trained elsewhere |
+
+**Two facts, not one enum, because the interesting tier is where they
+disagree.** A DeepFaceLab model is *fast* — a small GAN at frame rate — and
+unusable until someone has spent hours training it on one face. A speed ladder
+would file it beside a diffusion model it has nothing in common with, and hide
+the only question that matters about it: not "how fast" but "trained on whom".
+`tiers.classify` **raises** for slow-and-trained, so a registry entry declaring
+the one meaningless combination is caught at import rather than given a fourth
+tier by accident.
+
+**One registry per tier**, so the distinction is structural rather than a field
+someone has to remember to check. Enforcement is a single point —
+`ProcessingPipeline._clear_for_live`, called **before any model is warmed**, so
+a session that cannot work is refused before the pod bills for loading weights.
+All three registries answer it, so a model cannot reach a call by being added to
+the wrong list, by having a speed comment edited, or through an environment
+variable nobody checked. There is no default that lets an undeclared model
+through: an unknown tier is refused.
+
+The two refusals are worded differently on purpose, because they call for
+opposite fixes — a STUDIO model is **the wrong tool for this job**, a TRAINED
+model is **the right tool that does not exist yet for this person**.
+
+### The TRAINED tier
+The only registry that is **scanned rather than declared**: the others list
+models that exist for everyone, this one lists whatever has been trained for
+*these* people, which is a property of a directory. It is rescanned on every
+call, because a `.dfm` arrives by being copied in and there is no restart
+between training one and wanting it.
+
+`IDENTITY_MODEL` **replaces** the swap model, and **no source photograph is
+used at all** — the identity is in the weights, so embeddings, `source_blend`,
+`identity_push` and the source guards are *inapplicable* rather than merely
+unused. That is the whole reason it is a tier and not another name in
+`swapper_models.py`. `guards.NO_SOURCE` correctly stands down for it; nothing
+is missing.
+
+It is the only thing here that moves the **silhouette at frame rate**: its
+`dfl_whole_face` template is a wider crop than arcface, taking in jaw and
+forehead, which every general model leaves at the target's. And it has no
+generic-face manifold to regress toward — there is nothing for it to average
+into but the one person.
+
+Three runtime conventions differ from every other model here, and each produces
+a plausible-looking bad face rather than an error: the tensor is **NHWC**, not
+NCHW; it is **BGR**, not RGB; and the crop is **sharpened first** with the
+unsharp mask DeepFaceLive trained against. The export returns three arrays and
+the **middle** one is the face — reading the first gives a greyscale mask pasted
+over the frame, which looks like a catastrophic model rather than a wiring
+mistake. The crop size is read from the declared input shape, since these are
+trained at 224 to 384 depending on who made them.
+
+Unresolved by design: training is hours to days of GPU time per face, done
+elsewhere. That is a product decision about onboarding, not a setting.
+
+### Downloads are a stated policy now
+`pipeline/services/downloads.py`, `MODEL_DOWNLOADS` — `selected` (default) /
+`all` / `none` / an explicit list.
+
+State the true position first, because it is less bad than it sounds: **nothing
+bulk-downloads.** Weights fetch on first use, so a session pulls what its
+configuration selects. The one real exception was `vast/startup.sh` fetching
+**GFPGANv1.4.pth, 340 MB, on every deploy** — for the alternate restoration
+backend, which is not the default and which most sessions never touch. That is
+now conditional on it actually being selected.
+
+What was missing is control, not throttling: a way to say "never download, this
+volume is seeded" for a metered pod, and a way to pre-seed a chosen set rather
+than discovering the cost mid-session. `.env.example` now lists **every model
+with its exact size** — all eleven swap models is ~4.6 GB, and `blendswap_256`
+alone is 1.6 GB. A refusal is never fatal: it lands on the same degradation path
+a missing file already took, and names the variable that would allow it.
 
 ### Input guards
 `pipeline/services/guards.py` refuses inputs that would produce a wrong swap

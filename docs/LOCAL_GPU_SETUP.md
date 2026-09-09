@@ -149,7 +149,7 @@ Once running, `tools/stats.py` reports the same from the outside.
 
 - **FFmpeg** on `PATH` — RENDER mode decodes and encodes with it.
 - **Model weights** download on first use into `pipeline/models/` (~1.6 GB:
-  inswapper or hyperswap, the restorer, XSeg, buffalo_l). No action needed,
+  the swap model, the restorer, XSeg, buffalo_l). No action needed,
   but the first run is slow and needs the network.
 
 ## Then
