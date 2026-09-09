@@ -247,9 +247,22 @@ class Rig:
         self.compositor.source_shape = (
             None if best is None
             else getattr(best[1], 'landmark_2d_106', None))
-        if announce and self.compositor.source_shape is None:
-            print('  no 106-point landmarks on the source; the shape readings '
-                  'will be absent\n')
+
+        if announce:
+            if self.compositor.source_shape is None:
+                print('  no 106-point landmarks on the source; the shape '
+                      'readings will be absent\n')
+            elif len(accepted) > 1:
+                # Which photograph became the shape reference is not a detail
+                # when several were given: `shape_mismatch` is inflated by
+                # out-of-plane pose, so a reader seeing an implausibly large
+                # one needs to know whether the picker had a frontal photo to
+                # choose from. The identity is still the average of them all.
+                pose = getattr(best[1], 'pose', None)
+                yaw = ('' if pose is None or len(pose) < 2
+                       else '  (yaw {:+.0f} degrees)'.format(float(pose[1])))
+                print('  shape reference: {} of {} accepted{}\n'.format(
+                    os.path.basename(best[0]), len(accepted), yaw))
 
         return face
 
