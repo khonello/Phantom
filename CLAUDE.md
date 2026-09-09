@@ -1537,10 +1537,19 @@ Four properties carry it:
   and 0.117 vs 0.069 of leakage when it did not — because an interior-anchored
   fit is recomputed between the two residuals, so an interior change moves the
   frame the outline is measured in.
-- **Source shape is one photograph, never the average.** The same pick
-  `select_texture_source` makes, for the same reason: identity is a distributed
-  representation and averages soundly, geometry is not. Landmarks from
-  photographs at different angles average into a face nobody has.
+- **Source shape is one photograph, never the average** — but **not the same
+  one the texture layer takes.** One pick was tried for both and measured
+  wrong: on a real 21-image source set `select_texture_source` returned a photo
+  at **-28° of yaw**, because sharpness carries twice the weight of frontality
+  there. Right for pores, wrong for a silhouette — yaw foreshortens the face's
+  horizontal extent by `1 - cos(yaw)`, 12% at 28°, and `shape_mismatch` reports
+  that as head-shape difference because it cannot tell the two apart.
+  `select_shape_source` weights frontality 0.65 against sharpness 0.10 and
+  scores **yaw and pitch together** (`off_axis`), since a lowered chin
+  foreshortens vertically exactly as a turned head does horizontally. Roll is
+  excluded — the metric fits rotation away before measuring. Still one
+  photograph either way: identity is a distributed representation and averages
+  soundly, geometry does not.
 
 **Read `shift`, not the absolutes.** Out-of-plane pose changes a face's apparent
 2D shape, so an angled source inflates `mismatch` for a reason that is not head

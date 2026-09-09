@@ -56,6 +56,7 @@ import itertools
 import json
 import os
 import sys
+import types
 from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
@@ -69,7 +70,10 @@ from pipeline.core import (                                        # noqa: E402
     suggest_default_execution_providers,
 )
 from pipeline.processing.compositor import FaceCompositor         # noqa: E402
-from pipeline.services.database import FaceDatabase               # noqa: E402
+from pipeline.services.database import (                          # noqa: E402
+    FaceDatabase,
+    off_axis,
+)
 from pipeline.services.enhancement import Enhancer                # noqa: E402
 from pipeline.services.face_detection import FaceDetector         # noqa: E402
 from pipeline.services.face_swapping import FaceSwapper           # noqa: E402
@@ -247,7 +251,7 @@ class Rig:
         # different angles average into a face nobody has. Unaffected by
         # `--holdout`, which is about which identity vector grades the output
         # and has nothing to say about geometry.
-        best = self.database.select_texture_source(accepted)
+        best = self.database.select_shape_source(accepted)
         self.compositor.source_shape = (
             None if best is None
             else getattr(best[1], 'landmark_2d_106', None))
@@ -260,13 +264,15 @@ class Rig:
                 # Which photograph became the shape reference is not a detail
                 # when several were given: `shape_mismatch` is inflated by
                 # out-of-plane pose, so a reader seeing an implausibly large
-                # one needs to know whether the picker had a frontal photo to
-                # choose from. The identity is still the average of them all.
-                pose = getattr(best[1], 'pose', None)
-                yaw = ('' if pose is None or len(pose) < 2
-                       else '  (yaw {:+.0f} degrees)'.format(float(pose[1])))
+                # one needs to know how frontal the reference was. The identity
+                # is still the average of all of them, and the texture donor is
+                # still chosen separately on sharpness.
+                angle = off_axis(types.SimpleNamespace(
+                    face=best[1], kps=getattr(best[1], 'kps', None)))
+                off = ('' if angle is None
+                       else '  ({:.0f} degrees off axis)'.format(angle))
                 print('  shape reference: {} of {} accepted{}\n'.format(
-                    os.path.basename(best[0]), len(accepted), yaw))
+                    os.path.basename(best[0]), len(accepted), off))
 
         return face
 

@@ -1991,25 +1991,88 @@ def cmd_push(instance_id: str, local: str, remote: Optional[str] = None) -> bool
         client.close()
 
 
+def _sftp_get_tree(sftp: Any, remote: str, local: str) -> Tuple[int, int]:
+    """
+    Fetch a remote directory recursively.
+
+    Args:
+        sftp: An open SFTP client
+        remote: Remote directory, no trailing slash
+        local: Local directory, created if absent
+
+    Returns:
+        (files, bytes) copied
+    """
+    os.makedirs(local, exist_ok=True)
+    files = 0
+    total = 0
+
+    for entry in sftp.listdir_attr(remote):
+        source = "{}/{}".format(remote, entry.filename)
+        destination = os.path.join(local, entry.filename)
+        # `stat` module semantics without importing it: the directory bit.
+        if (entry.st_mode or 0) & 0o040000:
+            sub_files, sub_bytes = _sftp_get_tree(sftp, source, destination)
+            files += sub_files
+            total += sub_bytes
+        else:
+            sftp.get(source, destination)
+            files += 1
+            total += int(entry.st_size or 0)
+
+    return files, total
+
+
 def cmd_pull(instance_id: str, remote: str, local: Optional[str] = None) -> bool:
     """
-    Copy a file off the instance.
+    Copy a file or directory off the instance.
 
     This did not exist on RunPod and could not: its SSH proxy carries no SFTP,
     so a 45 KB montage of comparison frames could not be brought home and
     visual review was impossible rather than merely awkward. `ssh_direct` is a
     real sshd, so this is four lines.
+
+    **Directories are the normal case, not the exception**, which the first
+    version missed: `--debug-frames` and `--save-frames` both write a folder,
+    so the one workflow this command exists for — bringing frames home to look
+    at — was the one it could not do. A bare `sftp.get` against a directory
+    fails with `Errno 22 Invalid argument` on Windows, which reads as a bad
+    path rather than an unsupported operation.
+
+    A trailing slash was the second half of the same failure. `pull
+    /workspace/shape/` took `os.path.basename` of a path ending in `/`, got
+    the empty string, and tried to open `''` for writing.
     """
     instance = _get_instance(instance_id)
     if not instance or _instance_status(instance) != "running":
         print("ERROR: instance is not running.")
         return False
 
-    target = local or os.path.basename(remote)
+    # Normalise before deriving anything from it, or a trailing slash makes
+    # `basename` empty and the destination unopenable.
+    remote = remote.rstrip("/") or "/"
+    target = (local or "").rstrip("/\\") or os.path.basename(remote) or "pulled"
+
     client = _connect_ssh(instance)
     try:
         sftp = client.open_sftp()
         print("  {} -> {}".format(remote, target))
+
+        info = sftp.stat(remote)
+        if (info.st_mode or 0) & 0o040000:
+            files, total = _sftp_get_tree(sftp, remote, target)
+            sftp.close()
+            print("  Done ({} files, {:.1f} KB).".format(files, total / 1e3))
+            return True
+
+        # A file into an existing directory keeps its own name, which is what
+        # `pull /workspace/report.json shape/` obviously means.
+        if os.path.isdir(target):
+            target = os.path.join(target, os.path.basename(remote))
+
+        parent = os.path.dirname(os.path.abspath(target))
+        os.makedirs(parent, exist_ok=True)
+
         sftp.get(remote, target)
         sftp.close()
         print("  Done ({:.1f} KB).".format(os.path.getsize(target) / 1e3))

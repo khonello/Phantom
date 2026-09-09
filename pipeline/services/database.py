@@ -36,6 +36,36 @@ _TEXTURE_WEIGHTS = {
     'exposure': 0.10,
 }
 
+# The same merits, weighted for **geometry** instead of for pores.
+#
+# Texture and shape want different photographs out of the same set, and reusing
+# one pick for both was measured to be wrong: on a real source set of 21
+# accepted images the texture pick came back at **-28 degrees of yaw**, because
+# sharpness carries twice the weight of frontality there and a sharp angled
+# photo beats a softer frontal one. That is the right trade for pores and the
+# wrong one for a silhouette — yaw foreshortens the face's horizontal extent by
+# `1 - cos(yaw)`, which is 12% at 28 degrees, and `shape_mismatch` reports that
+# as head-shape difference because it cannot tell the two apart.
+#
+# So frontality dominates, size follows it because landmark accuracy degrades on
+# a small face, and sharpness is nearly irrelevant: locating a jawline does not
+# need pore-level detail. Exposure is dropped entirely — clipping destroys
+# texture, but it barely moves a landmark.
+_SHAPE_WEIGHTS = {
+    'frontality': 0.65,
+    'size': 0.25,
+    'sharpness': 0.10,
+    'exposure': 0.0,
+}
+
+# Off-axis angle at which the shape frontality term reaches zero.
+#
+# Wider than `guard_max_yaw`'s 35 degrees on purpose: every accepted photograph
+# is already inside that limit, so a ramp ending exactly there would push the
+# worst of them to 0.0 and compress the rest. Ending at 45 spans the accepted
+# range from 1.00 down to about 0.22, which discriminates across the whole of it.
+_SHAPE_FRONTAL_LIMIT = 45.0
+
 # Laplacian variance at which the sharpness term is worth half its weight. Ten
 # times `guard_min_sharpness`'s default floor of 40 — the guard asks "is this
 # photo usable at all", and this asks "which of these usable photos is best",
@@ -138,6 +168,79 @@ def _texture_score(frame: Frame, detection: Detection) -> float:
         + _TEXTURE_WEIGHTS['size'] * size
         + _TEXTURE_WEIGHTS['frontality'] * frontality
         + _TEXTURE_WEIGHTS['exposure'] * _exposure_score(frame, bbox)
+    )
+
+
+def off_axis(detection: Detection) -> Optional[float]:
+    """
+    Total angle away from facing the camera, in degrees.
+
+    Yaw *and* pitch, combined in quadrature. The texture picker reads yaw alone,
+    which is enough for it — a foreshortened cheek is a foreshortened cheek. For
+    geometry it is not: a lowered chin compresses the face vertically exactly as
+    a turned head compresses it horizontally, and a source photographed looking
+    down is as bad a shape reference as one looking sideways.
+
+    Roll is deliberately excluded. It is a rotation in the image plane, and the
+    shape metric fits away rotation before measuring anything, so a tilted head
+    costs nothing there.
+
+    Args:
+        detection: Detection to measure
+
+    Returns:
+        Degrees off axis, or None if pose cannot be determined
+    """
+    yaw = guards.estimate_yaw(detection)
+    if yaw is None:
+        return None
+
+    pose = getattr(getattr(detection, 'face', None), 'pose', None)
+    pitch = None
+    if pose is not None and len(pose) >= 1:
+        try:
+            pitch = float(pose[0])
+        except (TypeError, ValueError):
+            pitch = None
+
+    if pitch is None:
+        return abs(float(yaw))
+
+    return float(math.hypot(float(yaw), pitch))
+
+
+def _shape_score(frame: Frame, detection: Detection) -> float:
+    """
+    How suitable one source image is as the **shape** reference, in [0, 1].
+
+    The sibling of `_texture_score`, over the same measurements and with the
+    weights reversed — see `_SHAPE_WEIGHTS` for the measurement that made this a
+    second scorer rather than a shared one.
+
+    Args:
+        frame: The source image, BGR
+        detection: Its primary detection
+
+    Returns:
+        Weighted score in [0, 1]; higher is a better shape reference
+    """
+    bbox = detection.bbox
+
+    variance = guards.sharpness(frame, bbox)
+    sharpness = variance / (variance + _SHARPNESS_HALF)
+    size = min(1.0, min(bbox.w, bbox.h) / _SIZE_FULL)
+
+    deviation = off_axis(detection)
+    # Neutral rather than frontal when pose is unreadable, for the reason
+    # `_texture_score` gives: a pack without `pose` must not silently promote
+    # every photograph to the top of the term that now dominates the choice.
+    frontality = (0.5 if deviation is None else
+                  max(0.0, 1.0 - deviation / _SHAPE_FRONTAL_LIMIT))
+
+    return float(
+        _SHAPE_WEIGHTS['frontality'] * frontality
+        + _SHAPE_WEIGHTS['size'] * size
+        + _SHAPE_WEIGHTS['sharpness'] * sharpness
     )
 
 
@@ -250,6 +353,7 @@ class FaceDatabase:
         # photos to ask a question the review could have answered is work for
         # nothing. Keyed by path, cleared with the cache.
         self._texture_scores: Dict[str, float] = {}
+        self._shape_scores: Dict[str, float] = {}
 
     @staticmethod
     def _cache_key(image_path: str) -> str:
@@ -371,6 +475,47 @@ class FaceDatabase:
 
         return best
 
+    def select_shape_source(
+        self,
+        paths: List[str],
+    ) -> Optional[Tuple[str, Face]]:
+        """
+        Pick the single image to take the source's **head shape** from.
+
+        Separate from `select_texture_source` because the two want different
+        photographs out of the same set, which was found by measurement rather
+        than by argument: on a real 21-image source set the texture pick came
+        back at -28 degrees of yaw, and a foreshortened reference inflates
+        `shape_mismatch` with pose that is not head shape at all.
+
+        One image rather than an average for the reason texture uses one:
+        identity is a distributed representation and averages soundly, geometry
+        is not — landmarks from photographs at different angles average into a
+        face nobody has.
+
+        Args:
+            paths: Accepted source paths, from `SourceReview.accepted`
+
+        Returns:
+            (path, face) for the most frontal usable image, or None when none of
+            them is an image this can score
+        """
+        best: Optional[Tuple[str, Face]] = None
+        best_score = -1.0
+
+        for path in paths:
+            score = self._shape_scores.get(path)
+            if score is None:
+                continue
+            face = self._cache.get(self._cache_key(path))
+            if face is None:
+                continue
+            if score > best_score:
+                best_score = score
+                best = (path, face)
+
+        return best
+
     def review_sources(self, paths: List[str]) -> SourceReview:
         """
         Validate source images against every source guard.
@@ -459,6 +604,7 @@ class FaceDatabase:
         # Cache it so `get_source_face` does not detect the same file twice.
         self._cache[self._cache_key(image_path)] = primary.face
         self._texture_scores[image_path] = _texture_score(frame, primary)
+        self._shape_scores[image_path] = _shape_score(frame, primary)
         return guards.GuardResult.passed(), primary.face
 
     def _review_identity(
@@ -847,3 +993,4 @@ class FaceDatabase:
         """Clear all cached embeddings."""
         self._cache.clear()
         self._texture_scores.clear()
+        self._shape_scores.clear()

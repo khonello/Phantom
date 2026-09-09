@@ -61,9 +61,11 @@ import cv2
 import numpy as np
 
 from pipeline.config import FaceSwapConfig
+from pipeline.types import Bbox
 from pipeline.processing import geometry
 from pipeline.services import identity, swapper_models
 from pipeline.processing.compositor import FaceCompositor
+from pipeline.services import database as db
 from pipeline.services.database import SOURCE_BLENDS, FaceDatabase
 from pipeline.services.face_swapping import FaceSwapper, PUSH_MAX
 from pipeline.services.masking import FaceMasker
@@ -880,6 +882,101 @@ for _ in range(12):
     _close.record('outline_shift', 0.01)
 check('heads that already match recommend no lever',
       'mask_shape_growth' not in _close.format_report())
+
+
+# ── 6. The shape reference is chosen for geometry, not for pores ───────────
+print('\nThe shape reference prefers a frontal photograph')
+
+# Measured on a real source set: the texture pick came back at -28 degrees of
+# yaw, because sharpness carries twice the weight of frontality there. That is
+# correct for pores and wrong for a silhouette, so the two picks are separate.
+
+
+def _shot(sharpness: float, yaw: float, pitch: float = 0.0,
+          extent: float = 300.0) -> tuple:
+    """A frame and detection with the given sharpness, pose and face size."""
+    rng = np.random.default_rng(int(abs(yaw) * 7 + sharpness))
+    frame = np.full((640, 640, 3), 120, dtype=np.uint8)
+    box = (170.0, 170.0, 170.0 + extent, 170.0 + extent)
+    # Laplacian variance follows the amplitude of the noise painted into the
+    # face, which is what `guards.sharpness` actually measures.
+    patch = rng.normal(120, sharpness, (int(extent), int(extent), 3))
+    frame[170:170 + int(extent), 170:170 + int(extent)] = np.clip(
+        patch, 0, 255).astype(np.uint8)
+
+    face = types.SimpleNamespace(
+        pose=np.array([pitch, yaw, 0.0], dtype=np.float32),
+        kps=np.array([[220.0, 250.0], [400.0, 250.0], [310.0, 330.0],
+                      [240.0, 400.0], [380.0, 400.0]], dtype=np.float32),
+        landmark_2d_106=_SRC.copy(),
+    )
+    # A real Bbox rather than a stand-in: `guards.sharpness` and
+    # `_exposure_score` both read it, and a namespace that satisfied one would
+    # quietly fail the other.
+    detection = types.SimpleNamespace(
+        face=face, kps=face.kps,
+        bbox=Bbox(x=int(box[0]), y=int(box[1]),
+                  w=int(extent), h=int(extent)))
+    return frame, detection
+
+
+# Off-axis combines yaw and pitch, and ignores roll — the shape metric fits
+# rotation away before measuring, so a tilted head costs nothing.
+check('off_axis combines yaw and pitch in quadrature',
+      abs(db.off_axis(_shot(20.0, 30.0, 40.0)[1]) - 50.0) < 1e-6,
+      '{:.2f}'.format(db.off_axis(_shot(20.0, 30.0, 40.0)[1])))
+check('off_axis ignores roll',
+      abs(db.off_axis(_shot(20.0, 12.0, 0.0)[1]) - 12.0) < 1e-6)
+check('off_axis is None when pose cannot be read',
+      db.off_axis(types.SimpleNamespace(
+          face=types.SimpleNamespace(pose=None), kps=None)) is None)
+
+# The decisive case: a sharp angled photograph against a softer frontal one.
+# The texture picker must keep preferring the sharp one, and the shape picker
+# must not — that divergence is the entire reason for a second scorer.
+_sharp_angled = _shot(sharpness=60.0, yaw=28.0)
+_soft_frontal = _shot(sharpness=14.0, yaw=2.0)
+
+_t_angled = db._texture_score(*_sharp_angled)
+_t_frontal = db._texture_score(*_soft_frontal)
+_s_angled = db._shape_score(*_sharp_angled)
+_s_frontal = db._shape_score(*_soft_frontal)
+
+check('the texture score still prefers the sharp angled photograph',
+      _t_angled > _t_frontal,
+      'angled {:.3f} vs frontal {:.3f}'.format(_t_angled, _t_frontal))
+check('the shape score prefers the frontal one instead',
+      _s_frontal > _s_angled,
+      'frontal {:.3f} vs angled {:.3f}'.format(_s_frontal, _s_angled))
+check('and the two therefore disagree, which is why there are two',
+      (_t_angled > _t_frontal) != (_s_frontal < _s_angled))
+
+# Frontality has to dominate the shape score, or the fix does not hold when a
+# very sharp angled photograph is in the set.
+_very_sharp_angled = _shot(sharpness=200.0, yaw=28.0)
+check('frontality outweighs sharpness in the shape score',
+      db._shape_score(*_soft_frontal)
+      > db._shape_score(*_very_sharp_angled),
+      'frontal {:.3f} vs very sharp angled {:.3f}'.format(
+          db._shape_score(*_soft_frontal),
+          db._shape_score(*_very_sharp_angled)))
+
+# A pitched-down photograph is as bad a shape reference as a turned one, and
+# the texture picker cannot see that at all — it reads yaw only.
+_pitched = _shot(sharpness=60.0, yaw=0.0, pitch=30.0)
+check('a pitched-down photograph is penalised by the shape score',
+      db._shape_score(*_soft_frontal) > db._shape_score(*_pitched),
+      'frontal {:.3f} vs pitched {:.3f}'.format(
+          db._shape_score(*_soft_frontal),
+          db._shape_score(*_pitched)))
+
+# An unreadable pose scores neutral, never frontal: a trimmed pack must not
+# silently promote every photograph to the top of the dominant term.
+_no_pose = _shot(sharpness=60.0, yaw=0.0)
+_no_pose[1].face.pose = None
+_no_pose[1].kps = None
+check('an unreadable pose scores neutral rather than frontal',
+      db._shape_score(*_no_pose) < db._shape_score(*_soft_frontal))
 
 
 print('\n' + '=' * 70)
