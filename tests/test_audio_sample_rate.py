@@ -314,7 +314,6 @@ check('and the aggregate endpoints are skipped',
       'under suspicion')
 
 
-
 # The other half of the same mis-setup, found on the same machine: both ends of
 # the cable were the system defaults at once. This one the app does not route
 # around -- its own audio reaches the cable either way -- but it silences the

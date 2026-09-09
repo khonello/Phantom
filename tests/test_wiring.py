@@ -175,7 +175,7 @@ _NOT_A_DEPENDENCY = {
     'argparse', 'base64', 'collections', 'dataclasses', 'desktop', 'gc',
     'hashlib', 'json', 'math', 'os', 'pathlib', 'pipeline', 'platform',
     'queue', 'secrets', 'struct', 'subprocess', 'sys', 'threading', 'time',
-    'two', 'typing', 'urllib', 'uuid', 'winreg',
+    'typing', 'urllib', 'uuid', 'winreg',
 }
 
 _desktop_src = ''
@@ -184,8 +184,16 @@ for _name in _os.listdir(_os.path.join(_REPO_ROOT, 'desktop')):
         _desktop_src += read('desktop', _name)
 _desktop_src += read('desktop.py')
 
-_imported = set(re.findall(r'^\s*(?:import|from) ([a-zA-Z_][a-zA-Z0-9_]*)',
-                           _desktop_src, re.M))
+# Matches an import STATEMENT, not a word after "from". Prose in a docstring
+# regularly begins a line "from the pod..." or "from that placement...", and a
+# looser pattern demanded those be declared dependencies — which is how `two`
+# came to sit in the exempt list above, hiding the real bug and exempting any
+# future package that happened to share the name.
+_imported = set(
+    re.findall(r'^\s*import\s+([a-zA-Z_][a-zA-Z0-9_]*)(?=[\s.,]|$)',
+               _desktop_src, re.M)
+    + re.findall(r'^\s*from\s+([a-zA-Z_][a-zA-Z0-9_]*)[\w.]*\s+import\s',
+                 _desktop_src, re.M))
 _undeclared = [m for m in sorted(_imported - _NOT_A_DEPENDENCY)
                if _DIST.get(m, m).lower() not in _DESKTOP_REQS]
 check('requirements-desktop.txt covers every third-party import',

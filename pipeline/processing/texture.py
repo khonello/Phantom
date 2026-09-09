@@ -319,7 +319,6 @@ class SourceTexture:
         if not levels:
             return None
 
-
         combined = levels[0][0] * levels[0][1]
         for field_, weight in levels[1:]:
             combined = combined + field_ * weight

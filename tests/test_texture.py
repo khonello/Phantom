@@ -396,6 +396,8 @@ check('a strength past parity does not reserve past the ceiling',
       'the overshoot is spent on top of a full reservation, not through it')
 
 config.texture_strength = 0.5
+
+
 def _posed(yaw):
     """A target face at a given yaw. Defined here because the pose section
     below runs later and this check must not depend on ordering."""
@@ -614,6 +616,8 @@ check('every variant still normalises to unit deviation',
 
 # Shaping moves energy from the filler into the marks, at constant total energy.
 # That is the whole argument: RMS is the wrong statistic for a sparse field.
+
+
 def peak_ratio(m):
     """Peak amplitude against RMS, inside the skin mask."""
     inside = m[cv2.resize(extracted.skin, (128, 128)) > 0.5]

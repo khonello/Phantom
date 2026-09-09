@@ -41,6 +41,7 @@ import numpy as np                                     # noqa: E402
 
 from desktop import bridge as bridge_module            # noqa: E402
 from desktop.bridge import Bridge                      # noqa: E402
+from desktop.uplink import UplinkGovernor            # noqa: E402
 
 
 class _Capture:
@@ -81,7 +82,24 @@ def _make_bridge(monkeypatch, capture, decorate):
     self._quality = 'optimal'
     self._client = MagicMock()
     self._status: list = []
-    self._decorate = decorate
+    # Three things this fixture had fallen behind on, each of which made the
+    # loop raise on EVERY frame — and because the loop is built to survive
+    # exceptions, that presented as a hang or as "the product died", never as
+    # "the fixture is stale":
+    #
+    #   _governor    `_capture_settings` reads the gear to encode at
+    #   _bg_webcam   the background layer's per-stream renderer
+    #   _decorate    which grew a second argument when that layer landed
+    #
+    # The real UplinkGovernor rather than a mock, because these tests assert
+    # what the thread survives: a mock gear would let a wrong attribute name
+    # pass here and fail in production.
+    self._governor = UplinkGovernor(self._quality)
+    self._bg_webcam = None
+    # Adapted in one place rather than changing every test's stub, so each test
+    # still says what it is about — one bad frame, a released handle, a
+    # sustained failure — without restating the decorate signature.
+    self._decorate = lambda frame, renderer=None: decorate(frame)
 
     monkeypatch.setattr(Bridge, '_set_status',
                         lambda s, msg, error=False: s._status.append(msg))
