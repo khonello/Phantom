@@ -1057,6 +1057,48 @@ check('headroom without delivered produces no budget verdict',
       'budget' not in _alone.format_report())
 
 
+# ── The warp gain ──────────────────────────────────────────────────────────
+# `detail_for` normalises the map in canonical space and `warpAffine` then
+# resamples it bilinearly, which is a low-pass filter — so the map arrives
+# attenuated and `amount` was being spent as though it had not. Measured
+# retention was 0.431, hence a spend of 41% of budget at coverage 0.920.
+print('\nThe texture warp gain restores what resampling took out')
+
+_GAIN_MAX = FaceCompositor._WARP_GAIN_MAX
+
+
+def _gain(realised: float) -> float:
+    """The correction `_add_texture` applies for a given post-warp deviation."""
+    return float(np.clip(
+        1.0 / realised if realised > 1e-6 else 1.0, 1.0, _GAIN_MAX))
+
+
+check('a map that survived intact is not touched',
+      abs(_gain(1.0) - 1.0) < 1e-9)
+check('the measured 0.431 retention is corrected to parity',
+      abs(_gain(0.431) * 0.431 - 1.0) < 1e-9,
+      'gain {:.3f}'.format(_gain(0.431)))
+check('and that gain is inside the ceiling',
+      _gain(0.431) < _GAIN_MAX, '{:.2f} < {:.1f}'.format(_gain(0.431), _GAIN_MAX))
+
+# Never *reduce*: interpolation cannot add deviation, so a realised value above
+# 1 is estimator noise and scaling down on it would introduce a new error.
+check('a realised deviation above 1 does not scale the map down',
+      abs(_gain(1.4) - 1.0) < 1e-9)
+
+# A destroyed map is left short rather than multiplied up — past the ceiling
+# what survived is interpolation artefact, not pores, and the shortfall must
+# stay visible in texture_delivered instead of being silently "corrected".
+check('a destroyed map is capped rather than amplified',
+      abs(_gain(0.01) - _GAIN_MAX) < 1e-9)
+check('and it is left short, which is what keeps the shortfall reportable',
+      _gain(0.01) * 0.01 < 0.1, '{:.3f} of parity'.format(_gain(0.01) * 0.01))
+
+# Degenerate input must not divide by zero.
+check('a zero-deviation map falls back to no correction',
+      abs(_gain(0.0) - 1.0) < 1e-9)
+
+
 # The value below the floor is the one this is protecting against: it must be
 # visibly worse on that same test, or the floor is not where it is claimed.
 _below = [_erode_px(s, 0.0075) for s in _SIZES]

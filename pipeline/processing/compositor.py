@@ -256,6 +256,16 @@ class FaceCompositor:
     # of an 8-bit unit costs a warp and changes nothing anyone can see.
     _TEXTURE_FLOOR = 0.25
 
+    # Ceiling on the correction for what the warp's bilinear resampling took
+    # out of the texture map. Measured retention was 0.431, needing a gain of
+    # 2.3, so 4.0 leaves room for a harder warp — a small face, a turned head —
+    # without letting a degenerate one through. Past this the map has been
+    # destroyed rather than attenuated, and multiplying up what survived would
+    # amplify interpolation artefacts instead of restoring pores. The shortfall
+    # is then visible in `texture_delivered` against `texture_headroom` rather
+    # than silently corrected.
+    _WARP_GAIN_MAX = 4.0
+
     # Ceiling on the share of the target's high band `_match_detail` will hold
     # back for the texture layer. See `_texture_reserve` — this is the fix for
     # the two stages competing over one budget, where the one that ran first
@@ -2096,52 +2106,74 @@ class FaceCompositor:
         #
         # Above 1.0 is the diagnostic overshoot and keeps multiplying, since
         # past parity there is no reservation left to be the control.
+        # **The map is normalised before the warp and spent after it.**
+        #
+        # `detail_for` returns unit deviation in *canonical* space. `warpAffine`
+        # then resamples it bilinearly, and bilinear interpolation is a low-pass
+        # filter whose response falls to zero at Nyquist — while this map's
+        # finest octave sits at the resolution limit by construction, since
+        # `DETAIL_SIGMA` is 1.5. Any rotation, non-unit scale or sub-pixel
+        # offset therefore attenuates exactly the content the layer exists to
+        # add, and `amount` was being spent as though it had not.
+        #
+        # Measured 2026-09-10: the map retained **0.431** of its deviation, so
+        # the layer delivered 41% of a budget `_match_detail` had already stood
+        # down to make room for. Coverage was 0.920, which ruled out the area
+        # explanation — this is amplitude, and it is recoverable because it is
+        # measurable.
+        #
+        # So measure what survived and scale by it, rather than assuming. Same
+        # principle as the headroom itself: the arithmetic that decides how much
+        # to add is only sound if every term in it is measured in the space it
+        # is spent in.
+        inside = mask > 0.5
+        committed = int(np.count_nonzero(inside))
+        support = np.abs(warped) > 1e-6
+        landed = inside & support
+        realised = (float(warped[landed].std())
+                    if int(np.count_nonzero(landed)) > 64 else 0.0)
+
+        # `amount` stays what it always was — the deviation this layer intends
+        # to *deliver*, bounded by `TEXTURE_MAX`. The gain is what the map has
+        # to be multiplied by for that to arrive, so the cap keeps meaning what
+        # it says rather than silently becoming a bound on the pre-warp scale.
         amount = min(
             max(strength, 1.0) * headroom * confidence, texture.TEXTURE_MAX,
         )
-        added = (warped * amount) * mask
+        gain = float(np.clip(
+            1.0 / realised if realised > 1e-6 else 1.0,
+            1.0, self._WARP_GAIN_MAX,
+        ))
+        added = (warped * (amount * gain)) * mask
 
         # **What actually reached the picture, against what was budgeted.**
         #
-        # `amount` is the deviation this layer intends to deliver, and it is
-        # correct only if `warped` still carries unit deviation *after* the warp
-        # and inside the compositing alpha. Nothing checked that, and the gap
-        # between intent and delivery is the whole of "the reservation was made
-        # and never filled" — a state that leaves the face softer than with the
-        # layer switched off, because `_match_detail` has already stood down by
-        # `reserve` to make the room.
+        # With the gain applied this is a *check* rather than an estimate: it
+        # should now land on `amount`, and a shortfall that survives the
+        # correction means the gain hit `_WARP_GAIN_MAX` — which is the case
+        # that ceiling exists for, and the one worth seeing rather than
+        # silently correcting.
         #
         # Measured on the field itself rather than by differencing the picture,
         # so it is exactly this layer's contribution and not the sum of
         # everything else that touched the ROI. Over the pixels the alpha
         # actually commits, since the deviation of a field that is mostly zeros
         # outside the mask says nothing about what landed on the face.
-        inside = mask > 0.5
-        committed = int(np.count_nonzero(inside))
         if committed > 64:
             self.last_texture_delivered = float(added[inside].std())
 
-            # **Why the spend can fall short without the map being weak.**
-            #
-            # The map carries unit deviation inside *its own* skin support and
-            # zero outside it — eyes, nostrils and mouth are cut at extraction,
-            # and everything beyond the canonical oval is zero by the warp's
-            # border. `delivered` is measured over the *compositing* alpha,
-            # which is the whole face hull. Those are different regions, and a
-            # field that is unit-deviation on a fraction `c` of the region it is
-            # measured over reads `sqrt(c)`, not 1.
-            #
-            # So this is the term that says whether a low spend means "the map
-            # is not arriving at amplitude" or "the map is arriving exactly as
-            # intended over less of the face than the reserve assumed". They
-            # have opposite fixes, and the ratio alone cannot tell them apart.
-            #
-            # The second is a real defect either way: `_match_detail` stands
-            # down uniformly across the whole face, while the fill is skin-only
-            # by construction, so the excluded features lose detail with nothing
+            # And the area term, which is what separated the two possible
+            # causes of a short spend before the gain existed: a field that is
+            # unit-deviation on a fraction `c` of the region it is measured over
+            # reads `sqrt(c)`, not 1. Kept because it still distinguishes
+            # "attenuated by the warp" — now corrected — from "arriving over
+            # less of the face than the reserve assumed", which is a separate
+            # defect the gain does not touch: `_match_detail` stands down
+            # uniformly across the whole face while the fill is skin-only by
+            # construction, so the excluded features lose detail with nothing
             # replacing it.
-            support = int(np.count_nonzero(np.abs(warped)[inside] > 1e-6))
-            self.last_texture_coverage = float(support) / float(committed)
+            self.last_texture_coverage = (
+                float(int(np.count_nonzero(landed))) / float(committed))
         else:
             self.last_texture_delivered = None
             self.last_texture_coverage = None

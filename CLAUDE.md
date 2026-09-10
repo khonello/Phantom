@@ -1401,7 +1401,32 @@ commits, in the same 8-bit units as `texture_headroom`. Budget against spend:
                            warp, the skin mask's coverage, and where the
                            normalisation is measured
 
-**Measured 2026-09-10, and the ratio is the finding.**
+**The cause was found and fixed 2026-09-10: the map is normalised before the
+warp and was spent after it.** `detail_for` returns unit deviation in canonical
+space; `warpAffine` then resamples it **bilinearly**, and bilinear interpolation
+is a low-pass filter whose response falls to zero at Nyquist — while this map's
+finest octave sits at the resolution limit by construction, `DETAIL_SIGMA` being
+1.5. Any rotation, non-unit scale or sub-pixel offset attenuates exactly the
+content the layer exists to add, and `amount` was spent as though it had not.
+
+`_add_texture` now measures what survived the warp inside its own support and
+scales by it, capped at `_WARP_GAIN_MAX` (4.0). Past that cap the map has been
+destroyed rather than attenuated and multiplying up what is left would amplify
+interpolation artefacts, so the shortfall stays visible in `texture_delivered`
+instead of being silently corrected. Same principle as the headroom: the
+arithmetic is only sound if every term is measured in the space it is spent in.
+
+**Not the same thing as the similarity-transform limit.** That one is
+*placement* — `canonical_from_frame` has 4 degrees of freedom, so a donor
+proportioned differently from the target puts marks in the wrong spots. This is
+*resampling*, and it is the one that was costing amplitude. Both are real; only
+this one is fixed.
+
+**Unverified on footage.** The gain is arithmetic pinned by tests; whether the
+layer now reads as skin rather than as smoothing is a separate question and the
+default stays 0 until someone looks.
+
+**The evidence that found it:**
 
 | `texture_strength` | headroom | delivered | spend |
 |---|---|---|---|
@@ -1424,13 +1449,22 @@ tests exactly that, and the report now says which cause it is:
     coverage does not explain it      amplitude is being lost too — look at the
                                       warp and the normalisation
 
-If it is area, the defect is **not the map**: `_match_detail` stands down
-*uniformly* across the whole face while the fill is *skin-only* by construction,
-so the excluded features lose detail with nothing replacing it. The fix is then
-to reserve against the region the fill actually covers, not against the hull.
+**Coverage came back 0.920**, so area explained almost nothing: the map arrives
+over 92% of the mask and √0.920 predicts a 96% spend against the 41% measured.
+Amplitude retained was **0.431** — the map keeps 43% of its deviation — which is
+what the warp gain above now corrects.
 
-Until that is settled, `texture_strength` above 0 is a net loss and the default
-stays 0.
+One defect the gain does **not** touch, and it is separate: `_match_detail`
+stands down *uniformly* across the whole face while the fill is *skin-only* by
+construction, so eyes, nostrils and mouth lose detail with nothing replacing it.
+`texture_coverage` is retained to keep that visible.
+
+**The layer is global, and always was.** `texture_strength` is one field on
+`FaceSwapConfig`, read by `FaceCompositor._add_texture`, and every job shape —
+LIVE, RENDER and photo — reaches it through the same `_swap_frame_detail` →
+`composite` path with `source_texture` loaded by the same `set_source`. There is
+no per-mode switch and never was; the layer is off *everywhere* because the
+value is 0, and it applies *everywhere* the moment it is not.
 
 Read `texture headroom` alongside `detail` in `tools/identity_probe.py`: a
 falling `detail_ratio` with no corresponding gain is this defect.
