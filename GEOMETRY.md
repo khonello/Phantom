@@ -7,22 +7,42 @@ existed — ArcFace cosine — is trained to be invariant to most of the geometr
 involved, so a swap can move the jawline visibly and shift `id_out` by almost
 nothing.
 
-Status: **instrument built and corrected twice; one lever measured; the outline
-lever untested.**
+Status: **instrument built, corrected twice, and then found not to measure the
+thing that matters.** One lever measured and shipped; the outline lever
+untested. Read §3 before quoting any number from here.
 
 ---
 
-## 1. The central finding: there are two channels, not one
+## 1. The central finding: the head reads as the source's, and no landmark moves
 
-A viewer reads "head shape" from two separate things, and this pipeline treats
-them completely differently.
+This section was written twice. The first version claimed the swap moves the
+*interior* landmark geometry while leaving the outline — that is **wrong** and
+the corrected metric refuted it. The real finding is simpler and more awkward.
 
-| | What it is | Does the swap move it? |
+Measured with each subset fitted on itself, `alphaface_256`, three erode
+settings:
+
+| `mask_erode` | `interior_shift` | `outline_shift` |
 |---|---|---|
-| **Interior contours** | Where the cheekbone sits, how the jaw shadow falls, the width between the cheek lines, nose and mouth structure | **Yes, substantially** |
-| **Outline** | The literal silhouette — skin against background, jaw edge, hairline | **No. Not by one pixel.** |
+| 0.0 | **+0.001** | −0.041 |
+| 0.015 | −0.018 | −0.053 |
+| 0.03 | −0.025 | −0.059 |
 
-Both were verified independently of the shape metric, on
+**Both channels read zero.** The 106-point landmark geometry does not move —
+not at the silhouette, not in the interior, at any mask setting.
+
+And yet the output plainly reads as a differently-shaped head, and 32,281 pixels
+change by a mean of 22.7/255 inside the swap. So:
+
+> **The perceived head shape changes entirely through *appearance* — shading,
+> contour edges, how features are rendered — at fixed landmark positions.**
+
+That is why `outline_shift ≈ 0` was so misleading. It is a true statement about
+landmarks, the interior reading is an equally true statement about landmarks, and
+**neither measures the thing a viewer responds to.**
+
+The silhouette result is separately solid, and was verified independently of the
+metric on
 `mask/swapper_model-alphaface_256_mask_erode-0.0_mask_feather-0.02.png`:
 
 - A Canny edge overlay (target in red, output in green) shows the **entire outer
@@ -33,16 +53,16 @@ Both were verified independently of the shape metric, on
 - Measuring the skin-to-background boundary per scanline gives a shift of
   **0.00px, max 0.0px** on both sides.
 
-The outline cannot move, and the reason is structural rather than a tuning
-failure:
+The outline in particular cannot move, and the reason is structural rather than
+a tuning failure:
 
     the swap model generates into a crop framed by the TARGET's five keypoints
     the mask is a convex hull of the TARGET's 106 landmarks
     the mask stops short of the silhouette, so those pixels are never touched
 
-**So the head does read as the source's — via the interior — while the
-silhouette stays the target's.** Both statements are true at once, and confusing
-them cost this project several rounds of work.
+**So the head does read as the source's, while every landmark stays where the
+target's was.** The change is in what is painted between the landmarks, not in
+where they sit.
 
 ---
 
@@ -56,7 +76,7 @@ by fitting away the similarity transform between them.
 |---|---|
 | `shape_mismatch` | How far apart the source's and target's head shapes are. **A property of the pairing** — no setting moves it. This is the quantity behind the original observation |
 | `shape_shift` | Whole-face movement off the target's shape toward the source's. 0 kept the target's, 1 took the source's |
-| `interior_shift` | The same, interior features only — **the channel that actually moves** |
+| `interior_shift` | The same, interior features only |
 | `outline_shift` | The same, silhouette only — the channel the mask clips |
 | `outline_swap` / `outline_final` | The silhouette measured on the generated crop and after restoration, for attribution |
 
@@ -82,18 +102,30 @@ Gated on `identity_probe=N`, reported in the `REALISM` block and in
 
 ## 3. Known limitations of the instrument
 
-Recorded because two of them cost real time.
+Read this before quoting any number above. The first limitation is severe enough
+that it changes what the instrument is for.
 
-- **It measures landmark positions, not appearance.** A swap changes the
-  *appearance* of features at roughly fixed landmark positions, and much of what
-  a viewer reads as head shape lives there. `outline_shift` reading ~0 is a true
-  statement about landmarks and was mistaken for "the head shape did not change".
-  **Read `interior_shift` and the frames together; neither alone answers the
-  question.**
-- **`interior_shift` is the weaker half, knowingly.** A similarity fitted on the
-  interior alone can absorb a uniform scaling of the features, so a scale-like
-  change is partly fitted away. It points the right way; it is not a calibrated
-  fraction.
+- **It measures landmark POSITIONS, not appearance — and on this pipeline the
+  positions never move.** Both `interior_shift` and `outline_shift` read ~0 at
+  every setting tested, on a swap that visibly changes the head. So the metric
+  **cannot answer "does the head read as the source's"**, which is the question
+  it was built for. What it *can* do is stated below; do not stretch it further.
+
+  **What it is still good for:**
+  - `shape_mismatch` — how geometrically far apart the two people are. Measured
+    on two real photographs, unaffected by this limitation, and the quantity
+    behind the original observation.
+  - **A control.** It correctly reports that no LIVE model moves landmark
+    geometry, and it *would* detect one that did — which is how `hififace`'s
+    3D-shape claim was falsified here rather than taken on trust.
+
+  **What it cannot do:** grade how much a swap looks like the source's head. Use
+  the frames for that. There is currently no instrument for it.
+- **`interior_shift` is the weaker half even within its own terms.** A
+  similarity fitted on the interior alone can absorb a uniform scaling of the
+  features, so a scale-like change is partly fitted away. On the fixture it
+  separates a contour-only change from an interior-only one by only 0.148,
+  against the outline reading's 0.983.
 - **`shape_shift` came back consistently negative** (−0.03 to −0.08) across every
   run. If the true answer were "no change" it should sit at zero ± noise. A
   consistent negative bias suggests something systematic — possibly the landmark

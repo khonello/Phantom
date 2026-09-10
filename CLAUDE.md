@@ -1728,11 +1728,13 @@ covered, what was measured, what is knowingly broken, and where to restart.
 
 The headline from each, so this file is not silent on them:
 
-- **Geometry.** There are *two* channels and they behave oppositely. The swap
-  moves the **interior** contours substantially — which is what a viewer reads
-  as head shape — and moves the **outline** by exactly zero pixels, because the
-  mask stops short of it. Confusing the two cost several rounds. No LIVE model
-  moves the contour, so `mask_shape_growth` is inert.
+- **Geometry.** The head *does* read as the source's, and **no landmark moves
+  to make that happen** — interior and outline both measure ~0 at every setting.
+  The change is entirely appearance at fixed landmark positions. So the shape
+  metric cannot grade how much a swap looks like the source's head; it is good
+  for `shape_mismatch` (how far apart two people are) and as a control that
+  falsified hififace's 3D-shape claim. No LIVE model moves the contour, so
+  `mask_shape_growth` is inert.
 - **Texture.** The layer makes the face *smoother*, not more detailed, and
   paints the donor's expression creases on. Two bugs were found and fixed; a
   third — the map's content — remains. `texture_strength` stays 0.
