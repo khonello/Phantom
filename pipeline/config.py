@@ -304,6 +304,23 @@ class FaceSwapConfig:
     # for why each of those is load-bearing. A model that does not move the
     # contour produces a hull that already matches, so this does nothing at all
     # and is safe to leave on.
+    # Deform the finished frame so the head's outline moves toward the
+    # source's, as a fraction of the measured difference. **The only thing here
+    # that can move the silhouette at all** — every swap model generates into a
+    # crop framed by the target's keypoints and the mask is a hull of the
+    # target's landmarks, so `outline_shift` measures ~0 on every LIVE model at
+    # every mask setting.
+    #
+    # A deformation, not identity transfer: it moves where the boundary sits,
+    # it does not generate the source's head. Bounded at `reshape.MAX_SHIFT`
+    # of face radius on top of this, because past a few percent it stops
+    # reading as a different head and starts reading as a beauty filter.
+    #
+    # Off by default and never judged on footage. 0.3-0.5 expected; a
+    # measured full-strength correction recovers about a third of the
+    # difference, not all of it.
+    shape_warp: float = 0.0
+
     mask_shape_growth: float = 0.0
 
     # Extrapolate the source identity away from the target's, in ArcFace space,

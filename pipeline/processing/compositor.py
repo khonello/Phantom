@@ -39,6 +39,7 @@ from pipeline.services import swapper_models
 from pipeline.services.identity import IdentityProbe
 from pipeline.services.shape import ShapeProbe
 from pipeline.logging import emit_warning
+from pipeline.processing import reshape
 from pipeline.processing import texture
 from pipeline.processing.texture import SourceTexture
 # `alignment_template` imported by name rather than through the module, because
@@ -430,6 +431,13 @@ class FaceCompositor:
         self.shape: Optional[ShapeProbe] = None
         self.source_shape: Optional[Any] = None
 
+        # The head-shape deformation, measured once for this source and target
+        # and then only placed — see `pipeline/processing/reshape.py` for why it
+        # is not recomputed per frame. Dropped by `reset()`, which is what a new
+        # source identity already triggers.
+        self._reshape: Optional[reshape.ShapeWarp] = None
+        self._reshape_failed = False
+
         # Cosine similarities from the last measured frame, by stage name. Same
         # pattern as `last_detail_ratio`: the stage that measures a thing owns
         # the number and whoever needs it reads it afterwards.
@@ -529,6 +537,53 @@ class FaceCompositor:
             getattr(face, 'normed_embedding', None), embedding)
         if against is not None:
             self.last_identity['id_target'] = against
+
+    def _reshape_head(self, frame: Optional[Frame], face: Face) -> Optional[Frame]:
+        """
+        Move the head's outline toward the source's, if asked to.
+
+        Built once per source/target pair and cached, because the shape
+        difference between two people does not change frame to frame — only
+        pose does, and `ShapeWarp.apply` re-places the same vectors through the
+        current landmarks. Recomputing it per frame would track expression and
+        would shimmer.
+
+        Silent and non-fatal, like every other optional layer here: a frame
+        without it is the output this project shipped before it existed.
+
+        Args:
+            frame: The finished frame
+            face: The target detection, for its landmarks
+
+        Returns:
+            The deformed frame, or `frame` unchanged
+        """
+        strength = float(np.clip(
+            getattr(self.config, 'shape_warp', 0.0) or 0.0, 0.0, 1.0))
+        if strength <= 0.0 or frame is None or self.source_shape is None:
+            return frame
+
+        current = getattr(face, 'landmark_2d_106', None)
+        if current is None:
+            return frame
+
+        if self._reshape is None:
+            if self._reshape_failed:
+                return frame
+            self._reshape = reshape.ShapeWarp.between(self.source_shape, current)
+            if self._reshape is None:
+                # Remembered, so a pairing that cannot produce a field is not
+                # retried on every frame of the call.
+                self._reshape_failed = True
+                emit_warning(
+                    'shape_warp is {:.2f} but no deformation could be measured '
+                    'between the source and this target, so the head shape is '
+                    'unchanged.'.format(strength),
+                    scope='RESHAPE',
+                )
+                return frame
+
+        return self._reshape.apply(frame, current, strength)
 
     def _measure_shape(self, pasted: Optional[Frame], face: Face) -> None:
         """
@@ -644,6 +699,8 @@ class FaceCompositor:
 
     def reset(self) -> None:
         """Drop temporal state (face lost, source changed, pipeline restart)."""
+        self._reshape = None
+        self._reshape_failed = False
         self._prev_fake = None
         self._prev_real = None
         self._working_size = None
@@ -822,6 +879,14 @@ class FaceCompositor:
 
         pasted = self._paste(frame, fake, mask, aligned_matrix, face, extent)
         elapsed('paste')
+
+        # **After the paste, deliberately.** Everything above is bounded by the
+        # mask and the silhouette is outside it, which is precisely why no swap
+        # model moves the outline. Deforming the finished frame is the only
+        # thing that reaches it, and doing it here carries the surrounding
+        # pixels along so a narrowed jaw leaves no hole.
+        pasted = self._reshape_head(pasted, face)
+        elapsed('reshape')
 
         if measure:
             # The one that counts. Everything before it is measured in aligned

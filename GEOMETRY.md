@@ -273,9 +273,8 @@ CelebA). **~0.6s per image, so RENDER, photo and templates only.** Registered,
 never run against real weights. This is the fastest route to head shape on the
 non-live paths.
 
-**4. Frame-space warp.** Deform the picture toward the source's proportions,
-dragging surrounding pixels so there is no hole. Live-capable but **cosmetic** —
-face-slimming, not identity transfer.
+**4. Frame-space warp — BUILT.** `pipeline/processing/reshape.py`, knob
+`shape_warp`, off by default. See §8.
 Design notes from the session that scoped it: post-warp rather than pre-warp
 (geometrically equivalent, and pre-warp additionally takes the generator
 off-distribution); a hard magnitude bound as a fraction of face extent; validity
@@ -294,7 +293,71 @@ models. Structural, not tunable.
 
 ---
 
-## 7. A note on the alignment itself
+## 7. The frame-space warp, as built
+
+`pipeline/processing/reshape.py`. `shape_warp` (0-1), off by default, reachable
+from CLI, env and `set_realism`.
+
+**Where it runs and why.** After `_paste`, on the finished frame. Everything
+inside the compositor is bounded by the mask and the silhouette is *outside* the
+mask — which is the whole reason no swap model moves it. Deforming the frame is
+the only thing that reaches it, and doing it there carries the surrounding
+pixels along, so a narrowed jaw leaves no hole to inpaint and no torn edge.
+
+**The delta is measured once per pairing, not per frame.** The shape difference
+between two people is a property of the two people; only pose and expression
+change frame to frame. Recomputing it per frame would track expression —
+correcting a smile toward the source's neutral mouth — and would shimmer,
+because a landmark-driven field inherits every landmark wobble on the longest
+boundary in the picture. Each frame fits the reference landmarks onto the
+current ones with a similarity, which carries rotation and scale, and rotates the
+stored vectors by the same fit. **That removes the jitter structurally rather
+than with an EMA.**
+
+### Measured on synthetic fixtures
+
+Face radius 59px, fixture mismatch 0.140 against the real pairing's 0.142:
+
+| `shape_warp` | 0.25 | 0.5 | 1.0 |
+|---|---|---|---|
+| `outline_shift` | +0.106 | +0.206 | **+0.376** |
+
+- **It moves the silhouette** — the only lever here that does.
+- **Full strength recovers about a third of the difference**, not all of it. The
+  field is a smoothed interpolation, so individual landmarks do not reach their
+  full target; `_SPREAD` trades that against smoothness.
+- **Strength is a live control.** `MAX_SHIFT` was 0.08 and clipped the top of
+  the range; measured at 0.15 and 0.30 the readings are identical, so the field
+  itself is the limit rather than the cap. Set to **0.15** — 8.8px on a 59px
+  radius, about 7% of face width.
+- **Rotation-invariant**: a head tilted 29° reshapes along its own axis,
+  +0.376 against +0.376 upright.
+- **It does not fold.** Jacobian determinant stays in 0.57–1.34, never negative.
+  A fold is invisible in any single displacement and would tear the picture.
+- **The background does not come with it**: 0.0000px at 250px from the face.
+
+### What it is not, and what is untested
+
+**A deformation, not identity transfer.** It moves where the boundary sits; it
+does not generate the source's head. Past a few percent of face width it stops
+reading as a different head and starts reading as a beauty filter — which is why
+`MAX_SHIFT` bounds it on top of the strength knob.
+
+**Never run on a real frame.** Everything above is synthetic fixtures and a
+distortion grid. Not measured: what it costs per frame, whether the deformation
+is visible against straight lines behind the head, whether it holds under motion,
+and whether it reads as a better likeness or as a filter. The last one is the
+only question that matters and no number will answer it.
+
+**The validity check discussed during design is not built.** The landmark
+round-trip — did the landmarks land where the warp put them — was scoped and
+skipped: the magnitude bound and the fold check cover the failure it was meant
+to catch, and it would cost an inference per frame. Revisit if a real frame
+shows the field misbehaving.
+
+---
+
+## 8. A note on the alignment itself
 
 `canonical_from_frame` and every other fit here is `estimate_similarity` — **4
 degrees of freedom**: one uniform scale, rotation, translation. There is no

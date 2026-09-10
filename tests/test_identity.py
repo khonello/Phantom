@@ -69,6 +69,7 @@ from pipeline.services import database as db
 from pipeline.services.database import SOURCE_BLENDS, FaceDatabase
 from pipeline.services.face_swapping import FaceSwapper, PUSH_MAX
 from pipeline.services.masking import FaceMasker
+from pipeline.processing import reshape
 from pipeline.services import shape as shape_metric
 from pipeline.services.readings import Readings
 
@@ -1011,7 +1012,85 @@ check('an unreadable pose scores neutral rather than frontal',
       db._shape_score(*_no_pose) < db._shape_score(*_soft_frontal))
 
 
-# ── 7. mask_erode has a quantisation floor ─────────────────────────────────
+# ── 7. The frame-space head reshape ────────────────────────────────────────
+print('\nThe shape warp moves the outline, and only where it should')
+
+
+def _warp_head(jaw: float, cx: float = 300.0, cy: float = 300.0,
+               rot: float = 0.0) -> np.ndarray:
+    """The same face fixture, positioned and rotated in frame coordinates."""
+    pts = head(jaw=jaw) * 200.0
+    c, s = np.cos(rot), np.sin(rot)
+    return pts @ np.array([[c, -s], [s, c]]) + np.array([cx, cy])
+
+
+def _shift(field, pts):
+    """Sample a dense field at a set of points."""
+    dx, dy = field
+    ix = np.clip(pts[:, 0].astype(int), 0, dx.shape[1] - 1)
+    iy = np.clip(pts[:, 1].astype(int), 0, dx.shape[0] - 1)
+    return pts + np.stack([dx[iy, ix], dy[iy, ix]], 1)
+
+
+_narrow, _broad = _warp_head(0.86), _warp_head(1.14)
+_warp = reshape.ShapeWarp.between(_narrow, _broad)
+check('a warp is measurable between two different head shapes',
+      _warp is not None and _warp.magnitude > 0.01,
+      'magnitude {:.3f} of face radius'.format(_warp.magnitude))
+
+# The whole point: it must move the OUTLINE, which nothing else here can.
+_before = shape_metric.compare(_narrow, _broad, _broad)
+_after = shape_metric.compare(
+    _narrow, _broad, _shift(_warp.field(_broad, (600, 600), 1.0), _broad))
+check('it moves the silhouette toward the source',
+      _after.outline_shift > 0.25,
+      '{:+.3f} from {:+.3f}'.format(_after.outline_shift, _before.outline_shift))
+
+# Strength has to be a live control, not saturated by the safety ceiling.
+_quarter = shape_metric.compare(
+    _narrow, _broad, _shift(_warp.field(_broad, (600, 600), 0.25), _broad))
+_half = shape_metric.compare(
+    _narrow, _broad, _shift(_warp.field(_broad, (600, 600), 0.5), _broad))
+check('and strength scales it rather than saturating at the cap',
+      _quarter.outline_shift < _half.outline_shift < _after.outline_shift,
+      '{:+.3f} < {:+.3f} < {:+.3f}'.format(
+          _quarter.outline_shift, _half.outline_shift, _after.outline_shift))
+check('zero strength is exactly a no-op',
+      float(np.abs(np.stack(_warp.field(_broad, (600, 600), 0.0))).max()) == 0.0)
+
+# Rotation: a tilted head must reshape along its own axis, not the image's.
+_tilted = _warp_head(1.14, rot=0.5)
+_tilt_after = shape_metric.compare(
+    _narrow, _tilted, _shift(_warp.field(_tilted, (600, 600), 1.0), _tilted))
+check('a tilted head is reshaped along its own axis',
+      abs(_tilt_after.outline_shift - _after.outline_shift) < 0.02,
+      'upright {:+.3f} vs tilted {:+.3f}'.format(
+          _after.outline_shift, _tilt_after.outline_shift))
+
+# The background must not come with it, or the whole picture swims.
+_dx, _dy = _warp.field(_broad, (600, 600), 1.0)
+check('the deformation dies away from the head',
+      float(np.hypot(_dx[50, 50], _dy[50, 50])) < 0.01,
+      '{:.4f}px 250px away'.format(float(np.hypot(_dx[50, 50], _dy[50, 50]))))
+
+# A fold would tear the picture. The Jacobian determinant going negative is
+# exactly that, and it is not visible in any single displacement.
+_jxx = 1.0 - np.gradient(_dx, axis=1)
+_jxy = -np.gradient(_dx, axis=0)
+_jyx = -np.gradient(_dy, axis=1)
+_jyy = 1.0 - np.gradient(_dy, axis=0)
+_det = _jxx * _jyy - _jxy * _jyx
+check('the warp never folds the picture over itself',
+      float(_det.min()) > 0.1, 'min Jacobian {:.3f}'.format(float(_det.min())))
+
+# Degenerate inputs decline rather than raise — this is an optional layer.
+check('mismatched point counts produce no warp',
+      reshape.ShapeWarp.between(_narrow, _broad[:-4]) is None)
+check('and applying to a frame with the wrong landmark count is a no-op',
+      _warp.apply(np.zeros((64, 64, 3), np.uint8), _broad[:-4], 1.0).max() == 0)
+
+
+# ── 8. mask_erode has a quantisation floor ─────────────────────────────────
 print('\nmask_erode survives rounding at every working size')
 
 # `_build` computes `erode_px = int(round(size * mask_erode))`, a constant

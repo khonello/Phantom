@@ -156,6 +156,12 @@ def parse_args() -> None:
     program.add_argument('--texture-contrast',
                         help='amplitude shaping on the mark octave (1.0-3.0); 1.0 is none',
                         dest='texture_contrast', type=float, default=_env_float('TEXTURE_CONTRAST'))
+    program.add_argument('--shape-warp',
+                        help='deform the finished frame so the head outline moves toward '
+                             'the source\'s, as a fraction of the measured difference '
+                             '(0.0-1.0, 0 disables). The only lever that moves the '
+                             'silhouette at all',
+                        dest='shape_warp', type=float, default=_env_float('SHAPE_WARP'))
     program.add_argument('--mask-shape-growth',
                         help='how far the mask may follow the generated face outline rather '
                              'than the target\'s, as a fraction of face extent (0.0-0.15, '
@@ -295,6 +301,7 @@ def parse_args() -> None:
         ('enhance_strength', args.enhance_strength),
         ('mask_feather', args.mask_feather),
         ('mask_erode', args.mask_erode),
+        ('shape_warp', args.shape_warp),
         ('mask_shape_growth', args.mask_shape_growth),
         ('identity_push', args.identity_push),
         ('studio_swapper', args.studio_swapper),
