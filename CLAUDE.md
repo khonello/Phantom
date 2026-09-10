@@ -1720,6 +1720,23 @@ confirmed inert on alphaface. Note also that the *frontal* shape reference
 raised `shape_mismatch` from 0.099 to **0.142** — the 28° reference had been
 understating the true head-shape difference, not inflating it.
 
+### Two topics have their own documents now
+
+**[GEOMETRY.md](GEOMETRY.md)** and **[TEXTURE.md](TEXTURE.md)** in the root.
+Read the relevant one before touching either area — each carries what is
+covered, what was measured, what is knowingly broken, and where to restart.
+
+The headline from each, so this file is not silent on them:
+
+- **Geometry.** There are *two* channels and they behave oppositely. The swap
+  moves the **interior** contours substantially — which is what a viewer reads
+  as head shape — and moves the **outline** by exactly zero pixels, because the
+  mask stops short of it. Confusing the two cost several rounds. No LIVE model
+  moves the contour, so `mask_shape_growth` is inert.
+- **Texture.** The layer makes the face *smoother*, not more detailed, and
+  paints the donor's expression creases on. Two bugs were found and fixed; a
+  third — the map's content — remains. `texture_strength` stays 0.
+
 ### Head shape — the axis the cosine cannot see
 
 `pipeline/services/shape.py`. Built 2026-09-09 from an observation off footage

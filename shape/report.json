@@ -1,0 +1,122 @@
+{
+  "source": [
+    "source/one/face-1.jpeg",
+    "source/one/face-10.jpeg",
+    "source/one/face-11.jpeg",
+    "source/one/face-12.jpeg",
+    "source/one/face-13.jpeg",
+    "source/one/face-14.jpeg",
+    "source/one/face-15.jpeg",
+    "source/one/face-16.jpeg",
+    "source/one/face-17.jpeg",
+    "source/one/face-18.jpeg",
+    "source/one/face-19.jpeg",
+    "source/one/face-2.jpeg",
+    "source/one/face-20.jpeg",
+    "source/one/face-21.jpeg",
+    "source/one/face-22.jpeg",
+    "source/one/face-23.jpeg",
+    "source/one/face-24.jpeg",
+    "source/one/face-25.jpeg",
+    "source/one/face-26.jpeg",
+    "source/one/face-27.jpeg",
+    "source/one/face-28.jpeg",
+    "source/one/face-29.jpeg",
+    "source/one/face-3.jpeg",
+    "source/one/face-30.jpeg",
+    "source/one/face-4.jpeg",
+    "source/one/face-5.jpeg",
+    "source/one/face-6.jpeg",
+    "source/one/face-7.jpeg",
+    "source/one/face-8.jpeg",
+    "source/one/face-9.jpeg"
+  ],
+  "target": "source/two/IMG_3623.jpg",
+  "swapper_model": "hififace_unofficial_256",
+  "results": [
+    {
+      "settings": {
+        "swapper_model": "alphaface_256",
+        "mask_shape_growth": 0.0
+      },
+      "readings": {
+        "id_swap": 0.9065556145147312,
+        "id_restore": 0.9066271411601414,
+        "id_final": 0.9047154083686786,
+        "id_out": 0.7170367550472341,
+        "id_target": 0.2891484592209118,
+        "outline_swap": -0.0309407800002377,
+        "outline_final": -0.059871934113710834,
+        "shape_mismatch": 0.09935254956388413,
+        "shape_gap": 0.09394630887234283,
+        "shape_shift": 0.05441471522645791,
+        "outline_mismatch": 0.1105955919925216,
+        "outline_shift": 0.00656137989566119
+      },
+      "swapped": true
+    },
+    {
+      "settings": {
+        "swapper_model": "alphaface_256",
+        "mask_shape_growth": 0.08
+      },
+      "readings": {
+        "id_swap": 0.9065556145147312,
+        "id_restore": 0.9066271411601414,
+        "id_final": 0.9047154083686786,
+        "id_out": 0.7155590858136449,
+        "id_target": 0.2899782833754525,
+        "outline_swap": -0.0309407800002377,
+        "outline_final": -0.059871934113710834,
+        "shape_mismatch": 0.09935254956388413,
+        "shape_gap": 0.09358872765842888,
+        "shape_shift": 0.0580138298489169,
+        "outline_mismatch": 0.1105955919925216,
+        "outline_shift": 0.008157686818345944
+      },
+      "swapped": true
+    },
+    {
+      "settings": {
+        "swapper_model": "hififace_unofficial_256",
+        "mask_shape_growth": 0.0
+      },
+      "readings": {
+        "id_swap": 0.5648862142111967,
+        "id_restore": 0.5575820193562468,
+        "id_final": 0.5507781032800682,
+        "id_out": 0.5225949723429227,
+        "id_target": 0.3735811708125221,
+        "outline_swap": -0.04935188509362298,
+        "outline_final": -0.03431087090046936,
+        "shape_mismatch": 0.09935254956388413,
+        "shape_gap": 0.09703270795643439,
+        "shape_shift": 0.023349593116964495,
+        "outline_mismatch": 0.1105955919925216,
+        "outline_shift": -0.05826533343968521
+      },
+      "swapped": true
+    },
+    {
+      "settings": {
+        "swapper_model": "hififace_unofficial_256",
+        "mask_shape_growth": 0.08
+      },
+      "readings": {
+        "id_swap": 0.5648862142111967,
+        "id_restore": 0.5575820193562468,
+        "id_final": 0.5507781032800682,
+        "id_out": 0.5241462969062526,
+        "id_target": 0.37154100020884434,
+        "outline_swap": -0.04935188509362298,
+        "outline_final": -0.03431087090046936,
+        "shape_mismatch": 0.09935254956388413,
+        "shape_gap": 0.09676817967210945,
+        "shape_shift": 0.026012114466301917,
+        "outline_mismatch": 0.1105955919925216,
+        "outline_shift": -0.05320482325109732
+      },
+      "swapped": true
+    }
+  ]
+}
