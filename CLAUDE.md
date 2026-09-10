@@ -802,14 +802,26 @@ of the one leg that is asymmetric. It was never a usable live preset.
 `production` is now what `optimal` used to be, for a connection that can carry
 it.
 
-**`fast` keeps occlusion masking OFF, and that was tried and reverted.** The
-argument for turning it on is sound on paper - at 15fps the deadline is 66.7ms
-against a measured 38.8ms *with* occlusion, and the mask costs nothing on the
-uplink. It was switched on and put back within the hour, for a reason worth
-recording: `fast` is the gear an operator drops to when the link is failing, and
-it is the one configuration measured to hold on theirs. A fallback that has
-drifted from what was tested is not a fallback. Revisit it on a good link, as a
-deliberate A/B, rather than folding it in alongside other changes.
+**`fast` now has occlusion masking ON (2026-09-10), reversing a reversal.** It
+had been switched on and put back within the hour, on the grounds that `fast` is
+the gear an operator drops to when the link is failing and should stay
+byte-identical to the configuration measured to hold on theirs.
+
+That argument does not survive inspection. What was measured about `fast` is
+**uplink delivery** — 91% of frames against `optimal`'s 84% — and occlusion
+masking is a pipeline-side ONNX pass that never touches the uplink. Turning it
+on cannot invalidate the measurement that makes `fast` the fallback. The compute
+was never the objection either: 66.7ms deadline at 15fps against 38.8ms measured
+at `optimal` *with* occlusion, and `fast` runs a smaller detector than that.
+
+What it costs is identity — 0.012 to 0.046 of `id_out`, growing with
+`mask_erode`, measured on a clean frontal frame with nothing to occlude. That is
+the price of not overpainting a hand or a microphone, which is the failure it
+exists to prevent and the one an operator cannot undo after the call.
+
+**Occlusion masking no longer varies by preset at all**, which also downgrades
+the RENDER-inherits-`fast` problem below from a correctness regression to a
+quality trade.
 
 So `fast` gives up resolution, detector input and occlusion; `production` spends
 frame rate and JPEG quality. Nothing that decides whether the output reads as

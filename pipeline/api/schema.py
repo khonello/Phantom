@@ -55,14 +55,31 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         'det_size': 320,          # detector input; runs every frame, so this
                                   # is the single largest cost in the loop
         'aligned_size': 192,      # cheaper compositing
-        # OFF, and put back after being switched on. `fast` is the gear an
-        # operator drops to when the link is failing, and the one configuration
-        # measured to hold on theirs - so it stays byte-identical to what was
-        # tested rather than carrying an untested change, however cheap that
-        # change looked. Occlusion costs nothing on the uplink and the pipeline
-        # has the headroom for it; that is an argument for revisiting this on a
-        # good link, not for altering the fallback gear.
-        'occluder': False,        # skips an ONNX pass per frame
+        # **ON since 2026-09-10**, reversing a decision that had reverted it.
+        #
+        # The argument for keeping it off was that `fast` is the gear an
+        # operator drops to when the link is failing, is the one configuration
+        # measured to hold on theirs, and should therefore stay byte-identical
+        # to what was tested. That is weaker than it reads: what was measured
+        # about `fast` is **uplink delivery** — 91% of frames against
+        # `optimal`'s 84% — and occlusion masking is a pipeline-side ONNX pass
+        # that never touches the uplink. Turning it on does not invalidate the
+        # measurement that makes `fast` the fallback.
+        #
+        # The compute is affordable with a wide margin: 66.7ms deadline at
+        # 15fps against 38.8ms measured at `optimal` *with* occlusion, and
+        # `fast` runs a smaller detector than that.
+        #
+        # What it costs is a little identity — measured 0.012 to 0.046 of
+        # `id_out`, growing with `mask_erode`, on a *clean frontal frame with
+        # nothing to occlude*. That is the price of not overpainting a hand or
+        # a microphone, which is the failure it exists to prevent and the one
+        # an operator cannot undo after the call.
+        #
+        # It also means occlusion masking no longer varies by preset at all, so
+        # a RENDER inheriting `fast` from the last live session is a quality
+        # trade rather than a correctness regression.
+        'occluder': True,
         # Smoothing, scaled to frame rate
         'alpha': 0.7,
         'temporal_alpha': 0.7,
