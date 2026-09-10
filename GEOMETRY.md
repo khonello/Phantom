@@ -336,6 +336,42 @@ Face radius 59px, fixture mismatch 0.140 against the real pairing's 0.142:
   A fold is invisible in any single displacement and would tear the picture.
 - **The background does not come with it**: 0.0000px at 250px from the face.
 
+### The one-sided warp, found on live footage (2026-09-10)
+
+First live run warped **only one side of the face**, worsening with strength.
+Cause and fix, both in the implementation rather than the frame:
+
+**The delta is `fitted_source - target`, and a similarity fit cannot correct
+pose.** If either face is turned, one side is foreshortened and the residual is
+one-sided — a single cheek pulled in, and it scales with the knob. Two guards
+were missing, and the texture layer next door has the equivalent of both:
+
+- **Symmetrised across the face's own midline.** Head-shape difference worth
+  transferring — face width, jaw width, face length — is very nearly symmetric;
+  pose contamination is antisymmetric. Each landmark is paired with whichever
+  lands nearest its own reflection, and the pair's displacements averaged after
+  reflecting the partner's — pairing by geometry rather than index, so it does
+  not depend on the pack's layout. The midline comes from the landmark cloud's
+  principal direction, a face being markedly taller than wide.
+
+  Verified on a clean mirror-symmetric fixture: a constant sideways push, which
+  is what pose contamination looks like, is removed **entirely**; an outward
+  push from the midline, a genuine width difference, survives at **4.83 of 5**.
+
+  `_ASYMMETRY_KEEP` is **0.0** for now. Real faces are genuinely a little
+  asymmetric and that is part of a likeness, but nothing here can separate that
+  from pose, this is a deformation rather than identity transfer, and the
+  artefact it risks is worse than the correction it adds. Raise it once the
+  symmetric version has been seen working.
+
+- **The delta is only measured from a near-frontal frame.** It is built once and
+  used for the rest of the call, so a turned build frame bakes that pose into
+  every frame after it — permanent rather than momentary. `_RESHAPE_MAX_POSE` is
+  12 degrees off axis, yaw and pitch in quadrature, tighter than the source
+  guard's 35 because this is a reference and not a sample. Waiting costs
+  nothing: the operator faces the camera within seconds, and until then the
+  layer is off rather than wrong.
+
 ### What it is not, and what is untested
 
 **A deformation, not identity transfer.** It moves where the boundary sits; it

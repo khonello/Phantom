@@ -267,6 +267,15 @@ class FaceCompositor:
     # than silently corrected.
     _WARP_GAIN_MAX = 4.0
 
+    # How far off axis the target may be, in degrees, on the frame the head
+    # reshape measures its delta from. Yaw and pitch in quadrature.
+    #
+    # Tighter than the source guard's 35, because this is a *reference* rather
+    # than a sample: it is measured once and applied to every frame afterwards,
+    # so an error here is permanent rather than momentary. 12 degrees is where
+    # `_pose_confidence` already puts full confidence for the texture layer.
+    _RESHAPE_MAX_POSE = 12.0
+
     # Ceiling on the share of the target's high band `_match_detail` will hold
     # back for the texture layer. See `_texture_reserve` — this is the fix for
     # the two stages competing over one budget, where the one that ran first
@@ -570,6 +579,27 @@ class FaceCompositor:
         if self._reshape is None:
             if self._reshape_failed:
                 return frame
+
+            # **Build from a frontal frame or not at all.** The delta is
+            # measured once and used for the rest of the call, so a build frame
+            # with the head turned bakes that pose into every frame after it —
+            # a similarity fit cannot correct yaw, so the residual is one-sided
+            # and reads as a single cheek being pulled in. Symmetrising the
+            # delta rejects most of that; refusing to measure it from a turned
+            # frame stops it arriving in the first place.
+            #
+            # Waiting costs nothing: the operator faces the camera within a
+            # second or two of a call starting, and until then the layer is
+            # simply off rather than wrong.
+            pose = getattr(face, 'pose', None)
+            if pose is not None and len(pose) >= 2:
+                try:
+                    off = float(np.hypot(float(pose[0]), float(pose[1])))
+                except (TypeError, ValueError):
+                    off = 0.0
+                if off > self._RESHAPE_MAX_POSE:
+                    return frame
+
             self._reshape = reshape.ShapeWarp.between(self.source_shape, current)
             if self._reshape is None:
                 # Remembered, so a pairing that cannot produce a field is not

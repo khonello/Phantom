@@ -89,6 +89,99 @@ MAX_SHIFT = 0.15
 # Below this many landmarks there is not enough to interpolate a field from.
 _MIN_POINTS = 8
 
+# How much of the delta's *antisymmetric* part to keep, across the face's own
+# midline.
+#
+# **This is the fix for a one-sided warp, and it was found on footage.** The
+# delta is `fitted_source - target`, and a similarity fit cannot correct pose —
+# so if either face is turned, one side is foreshortened and the residual is
+# one-sided. Applied, that pulls a single cheek in and gets visibly worse with
+# strength, which is not a head-shape correction at all.
+#
+# The head-shape difference actually worth transferring — face width, jaw
+# width, face length — is very nearly symmetric. Pose contamination is
+# antisymmetric. Dropping the antisymmetric part therefore keeps the signal and
+# rejects the artefact, and it does so whatever the cause: a turned source, a
+# turned build frame, or landmark noise on one side.
+#
+# **Zero for now**, deliberately. Real faces are genuinely a little asymmetric
+# and that is part of a likeness, so there is a case for keeping a share — but
+# the observed failure was a badly one-sided warp, nothing here can distinguish
+# genuine asymmetry from pose contamination, and this is a deformation rather
+# than identity transfer. Raise it once the symmetric version has been seen
+# working on footage; the correction it would add is subtle and the artefact it
+# risks is not.
+#
+# Verified on a clean mirror-symmetric fixture: a constant sideways push — what
+# pose contamination looks like — is removed entirely, while an outward push
+# from the midline, which is a genuine width difference, survives at 4.83 of 5.
+_ASYMMETRY_KEEP = 0.0
+
+
+def _midline(points: Points) -> npt.NDArray[Any]:
+    """
+    The horizontal normal of the face's own vertical axis.
+
+    From the landmark cloud's principal direction rather than from named
+    points, so it does not depend on the pack's index layout — the same reason
+    the shape metric ranks by hull distance instead of assuming "0-32 is the
+    jaw". A face is markedly taller than it is wide, so the first principal
+    component is its vertical.
+
+    Args:
+        points: (N, 2) landmarks
+
+    Returns:
+        (2,) unit vector perpendicular to the face's vertical axis
+    """
+    centred = np.asarray(points, dtype=np.float64)
+    centred = centred - centred.mean(axis=0)
+    _, _, right = np.linalg.svd(centred, full_matrices=False)
+    axis = right[0]
+    return np.array([-axis[1], axis[0]], dtype=np.float64)
+
+
+def _symmetrise(
+    reference: Points,
+    delta: Points,
+    keep: float = _ASYMMETRY_KEEP,
+) -> Points:
+    """
+    Drop the part of the delta that is not mirrored across the face's midline.
+
+    Each landmark is paired with whichever landmark lands nearest its own
+    reflection, and the pair's displacements are averaged after reflecting the
+    partner's. Pairing by geometry rather than by index keeps this independent
+    of the model pack.
+
+    Args:
+        reference: (N, 2) the landmarks the delta was measured on
+        delta: (N, 2) the displacements
+        keep: Share of the antisymmetric part to retain, [0, 1]
+
+    Returns:
+        (N, 2) displacements with the antisymmetric part attenuated
+    """
+    points = np.asarray(reference, dtype=np.float64)
+    shift = np.asarray(delta, dtype=np.float64)
+
+    normal = _midline(points)
+    centre = points.mean(axis=0)
+    centred = points - centre
+
+    # Reflect the positions and pair each landmark with its nearest mirror.
+    mirrored = centred - 2.0 * (centred @ normal)[:, None] * normal[None, :]
+    distance = ((mirrored[:, None, :] - centred[None, :, :]) ** 2).sum(axis=2)
+    partner = np.argmin(distance, axis=1)
+
+    # Reflect the partner's *vector* too — a displacement pointing left on one
+    # cheek corresponds to one pointing right on the other.
+    flipped = shift - 2.0 * (shift @ normal)[:, None] * normal[None, :]
+    symmetric = 0.5 * (shift + flipped[partner])
+
+    share = float(np.clip(keep, 0.0, 1.0))
+    return symmetric + (shift - symmetric) * share
+
 
 def _radius(points: Points) -> float:
     """RMS distance of a point set from its own centroid."""
@@ -147,7 +240,11 @@ class ShapeWarp:
             return None
 
         fitted = first @ matrix[:, :2].T + matrix[:, 2]
-        return cls(reference=second, delta=fitted - second)
+        # Symmetrised before it is stored, so every frame afterwards uses the
+        # cleaned field — see `_ASYMMETRY_KEEP` for why a raw delta warps one
+        # side of the face.
+        return cls(reference=second,
+                   delta=_symmetrise(second, fitted - second))
 
     @property
     def magnitude(self) -> float:

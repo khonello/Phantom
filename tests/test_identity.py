@@ -1083,6 +1083,49 @@ _det = _jxx * _jyy - _jxy * _jyx
 check('the warp never folds the picture over itself',
       float(_det.min()) > 0.1, 'min Jacobian {:.3f}'.format(float(_det.min())))
 
+# **The one-sided warp, found on live footage.** The delta is
+# `fitted_source - target` and a similarity fit cannot correct pose, so if
+# either face is turned the residual is one-sided and pulls a single cheek in,
+# visibly worse with strength. Symmetrising across the face's own midline
+# rejects that, because head-shape difference worth transferring is very nearly
+# symmetric while pose contamination is antisymmetric.
+_ellipse = np.stack([
+    np.cos(np.linspace(0, 2*np.pi, 60, endpoint=False)) * 40.0,
+    np.sin(np.linspace(0, 2*np.pi, 60, endpoint=False)) * 70.0,
+], 1) + np.array([300.0, 300.0])
+
+_normal = reshape._midline(_ellipse)
+check('the midline is found from the cloud, not from an index layout',
+      abs(abs(_normal[0]) - 1.0) < 1e-6 and abs(_normal[1]) < 1e-6,
+      'normal {}'.format(np.round(_normal, 3)))
+
+_centred = _ellipse - _ellipse.mean(0)
+_mir = _centred - 2.0 * (_centred @ _normal)[:, None] * _normal[None, :]
+_partner = np.argmin(
+    ((_mir[:, None, :] - _centred[None, :, :]) ** 2).sum(2), axis=1)
+check('and every landmark pairs with its own reflection',
+      bool(np.all(_partner[_partner] == np.arange(len(_ellipse)))))
+
+# Pose contamination: a constant sideways push. Must go.
+_anti = np.zeros_like(_centred)
+_anti[:, 0] = 5.0
+check('a one-sided push is rejected entirely',
+      float(np.abs(reshape._symmetrise(_ellipse, _anti, keep=0.0)).max()) < 1e-9)
+
+# Genuine width difference: an outward push from the midline. Must survive.
+_sym = np.zeros_like(_centred)
+_sym[:, 0] = np.sign(_centred[:, 0]) * 5.0
+_kept = float(np.abs(
+    reshape._symmetrise(_ellipse, _sym, keep=0.0)[:, 0]).mean())
+check('while a symmetric width change survives it',
+      _kept > 4.5, '{:.2f} of 5.0 retained'.format(_kept))
+
+# And the knob does what it says at the other end.
+check('keeping the asymmetry is a no-op at 1.0',
+      float(np.abs(
+          reshape._symmetrise(_ellipse, _anti, keep=1.0) - _anti).max()) < 1e-9)
+
+
 # Degenerate inputs decline rather than raise — this is an optional layer.
 check('mismatched point counts produce no warp',
       reshape.ShapeWarp.between(_narrow, _broad[:-4]) is None)
