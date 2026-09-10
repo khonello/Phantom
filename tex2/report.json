@@ -1,0 +1,136 @@
+{
+  "source": [
+    "source/one/face-1.jpeg",
+    "source/one/face-10.jpeg",
+    "source/one/face-11.jpeg",
+    "source/one/face-12.jpeg",
+    "source/one/face-13.jpeg",
+    "source/one/face-14.jpeg",
+    "source/one/face-15.jpeg",
+    "source/one/face-16.jpeg",
+    "source/one/face-17.jpeg",
+    "source/one/face-18.jpeg",
+    "source/one/face-19.jpeg",
+    "source/one/face-2.jpeg",
+    "source/one/face-20.jpeg",
+    "source/one/face-21.jpeg",
+    "source/one/face-22.jpeg",
+    "source/one/face-23.jpeg",
+    "source/one/face-24.jpeg",
+    "source/one/face-25.jpeg",
+    "source/one/face-26.jpeg",
+    "source/one/face-27.jpeg",
+    "source/one/face-28.jpeg",
+    "source/one/face-29.jpeg",
+    "source/one/face-3.jpeg",
+    "source/one/face-30.jpeg",
+    "source/one/face-4.jpeg",
+    "source/one/face-5.jpeg",
+    "source/one/face-6.jpeg",
+    "source/one/face-7.jpeg",
+    "source/one/face-8.jpeg",
+    "source/one/face-9.jpeg"
+  ],
+  "target": "source/two/IMG_3745.png",
+  "swapper_model": "alphaface_256",
+  "results": [
+    {
+      "settings": {
+        "swapper_model": "alphaface_256",
+        "texture_strength": 0.0
+      },
+      "readings": {
+        "id_swap": 0.8987498089565178,
+        "id_restore": 0.8972507269849527,
+        "id_final": 0.8921297085893324,
+        "id_out": 0.7386496982096092,
+        "id_target": 0.30323524398909213,
+        "outline_swap": 0.019245823404802853,
+        "outline_final": 0.02430241419318291,
+        "shape_mismatch": 0.15679155232128772,
+        "shape_gap": 0.15507555906582465,
+        "shape_shift": 0.01094442417373842,
+        "outline_mismatch": 0.20733270497303377,
+        "outline_shift": 0.006930106405758973,
+        "detail_reserve": 0.0,
+        "detail_ratio": 1.3048557372979912
+      },
+      "swapped": true
+    },
+    {
+      "settings": {
+        "swapper_model": "alphaface_256",
+        "texture_strength": 0.5
+      },
+      "readings": {
+        "id_swap": 0.8987498089565178,
+        "id_restore": 0.8972635479732592,
+        "id_final": 0.893259273243889,
+        "id_out": 0.7349528815070815,
+        "id_target": 0.28386874211627267,
+        "outline_swap": 0.019245823404802853,
+        "outline_final": 0.022018775004904567,
+        "shape_mismatch": 0.15679155232128772,
+        "shape_gap": 0.15552330581224139,
+        "shape_shift": 0.00808874260296577,
+        "outline_mismatch": 0.20733270497303377,
+        "outline_shift": 0.011021649180846804,
+        "texture_headroom": 4.127075963021066,
+        "texture_confidence": 1.0,
+        "detail_reserve": 0.5,
+        "detail_ratio": 0.9348184497083014
+      },
+      "swapped": true
+    },
+    {
+      "settings": {
+        "swapper_model": "alphaface_256",
+        "texture_strength": 1.0
+      },
+      "readings": {
+        "id_swap": 0.8987498089565178,
+        "id_restore": 0.8972635479732592,
+        "id_final": 0.8958555416333264,
+        "id_out": 0.7348973032726643,
+        "id_target": 0.2762690031936147,
+        "outline_swap": 0.019245823404802853,
+        "outline_final": 0.020167166253532764,
+        "shape_mismatch": 0.15679155232128772,
+        "shape_gap": 0.15602187888639005,
+        "shape_shift": 0.004908896069352631,
+        "outline_mismatch": 0.20733270497303377,
+        "outline_shift": 0.012481398365311036,
+        "texture_headroom": 4.768838688362078,
+        "texture_confidence": 1.0,
+        "detail_reserve": 0.8,
+        "detail_ratio": 0.6476612202990196
+      },
+      "swapped": true
+    },
+    {
+      "settings": {
+        "swapper_model": "alphaface_256",
+        "texture_strength": 2.0
+      },
+      "readings": {
+        "id_swap": 0.8987498089565178,
+        "id_restore": 0.8972635479732592,
+        "id_final": 0.8958555416333264,
+        "id_out": 0.711869459383643,
+        "id_target": 0.27717005855285637,
+        "outline_swap": 0.019245823404802853,
+        "outline_final": 0.020167166253532764,
+        "shape_mismatch": 0.15679155232128772,
+        "shape_gap": 0.15718669624286213,
+        "shape_shift": -0.0025201862965469335,
+        "outline_mismatch": 0.20733270497303377,
+        "outline_shift": 0.018738793158033062,
+        "texture_headroom": 4.768838688362078,
+        "texture_confidence": 1.0,
+        "detail_reserve": 0.8,
+        "detail_ratio": 0.6476612202990196
+      },
+      "swapped": true
+    }
+  ]
+}

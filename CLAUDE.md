@@ -1338,8 +1338,46 @@ The colour half was measured and **closed** — redness is excluded because it i
 carrying it would mean a low-frequency colour stage fighting `_match_color` over
 the one thing the eye reads as skin tone. docs/TEXTURE_PIPELINE.md §6.7 and §6.8.
 
-**Off by default, and still never judged on footage — but the knob now means what
-it says.** 0.5 is the place to start; A/B `texture_band`, `texture_relief` and
+### Judged on footage at last, and it is net-negative (2026-09-10)
+
+**`texture_strength` currently makes the face smoother, not more textured.**
+Swept 0.0 / 0.5 / 1.0 / 2.0 on two stills, alphaface, RTX 5880 Ada. High-pass
+deviation on a flat cheek patch, `IMG_3623`:
+
+| `texture_strength` | 0.0 | 0.5 | 1.0 | 2.0 |
+|---|---|---|---|---|
+| high-frequency sigma | **4.46** | 3.67 | 2.98 | 3.16 |
+| `detail_ratio` | 1.181 | 0.863 | 0.598 | 0.598 |
+| `id_out` | 0.761 | 0.755 | 0.738 | 0.723 |
+
+Monotonic **down**, and by eye the face gets waxier at 1.0 and grows painted-on
+crease lines at 2.0. The mechanism is visible in the pipeline's own reading:
+`_match_detail` stands back exactly as designed (`detail_ratio` 1.181 → 0.598)
+and `_add_texture` **does not fill what it gave up**. Even at 2.0 — deliberate
+overshoot past parity — it does not recover the strength-0 level.
+
+So this is the failure docs/TEXTURE_PIPELINE.md §15 records as fixed, recurring
+by a different route. The 2026-09-07 fix stopped the layer *declining* after a
+reservation; it does not stop the layer **delivering less than it promised**.
+
+The cause is named in the tool's own output: the donor is a **369px face,
+upsampled** into the 512 canonical crop, so its fine octave is interpolated
+rather than photographed — "the band is thinner than it looks". `_SIZE_FULL` is
+400px, so this donor is below the size at which the texture term even
+saturates. Headroom was **not** the problem: it measured 5.3–6.5 here against
+the 0.78 recorded on the live clip, so the budget existed and the map could not
+spend it.
+
+**The fix is not a knob.** `_texture_reserve` gates on whether the layer will
+*run*; it needs to gate on whether the map can *deliver at the working size* —
+an upsampled donor, or one whose native face is smaller than the target's,
+should reserve proportionally less or not at all. Until that exists,
+`texture_strength` above 0 is a net loss and the default stays 0.
+
+Read `texture headroom` alongside `detail` in `tools/identity_probe.py`: a
+falling `detail_ratio` with no corresponding gain is this defect.
+
+**Off by default, and the knob still does not mean what it says.** 0.5 is the place to start; A/B `texture_band`, `texture_relief` and
 `texture_contrast` one at a time, since they are separately switchable precisely
 so one cannot be blamed for another's artefact. **`texture_strength` reaches 2.0
 over the API and the desktop slider stops at 1.0** — above 1.0 deliberately
@@ -1521,6 +1559,28 @@ temples. There is **no colour seam at the jaw at any setting** — the colour
 stages are doing their job. That still is the *easy* case for the hairline
 question, since the subject's hair is tied back; a target with loose hair across
 the temple is what would decide between 0.015 and 0.0, and has not been run.
+
+**XSeg costs identity, and compounds with the erode.** Measured the next day on
+the same still, `mask_erode` against `occluder`:
+
+| erode | `occluder` | `id_out` | `id_target` |
+|---|---|---|---|
+| 0.0 | on | 0.791 | 0.215 |
+| 0.0 | **off** | **0.803** | **0.184** |
+| 0.015 | on | 0.764 | 0.249 |
+| 0.015 | off | 0.792 | 0.205 |
+| 0.03 | on | 0.719 | 0.295 |
+| 0.03 | off | 0.765 | 0.228 |
+
+XSeg costs 0.012 / 0.028 / 0.046 as the erode grows — the two both shrink the
+mask and the losses compound. With the occluder off, erode spans only 0.038
+against 0.072 with it on.
+
+**But this still cannot price XSeg's benefit**, only its cost: the subject's
+hair is tied back, so there is nothing over the face for it to exclude. Read
+the table as "what occlusion masking costs on a clean frontal frame", never as
+an argument for turning it off. The frame that would answer the other half —
+loose hair across the temple, or a hand — has not been run.
 
 **What the frames say that no number did.** The visible defect is not a seam —
 it is that the swap is conspicuously *smoother* than the target, which carries
