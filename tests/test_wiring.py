@@ -984,6 +984,20 @@ for path in (('vast', 'orchestrator.py'), ('vast', 'prewarm.py'),
     check('{} parses'.format(name), ok, detail)
 
 
+# Realism readings must be cleared on EVERY job shape, not just the stream.
+# They are written on a *measured* frame — `identity_probe` samples one in N —
+# and recorded on every swapped one, so a path that records without clearing
+# re-reports the last measurement until the next one arrives. That was true of
+# RENDER and photo, which is the job shape those readings are most likely to be
+# trusted on, because it is the one a still can be studied from.
+_pipeline_src = read('pipeline', 'processing', 'pipeline.py')
+for _fn in ('_process_and_emit', '_swap_frame_detail'):
+    _at = _pipeline_src.index('def {}('.format(_fn))
+    check('{} clears the compositor readings'.format(_fn),
+          'clear_readings()' in _pipeline_src[_at:_at + 4000],
+          'without it, unmeasured frames re-record the last measured values')
+
+
 def test_everything_passed() -> None:
     """Surface the checks above to pytest as one assertion."""
     assert not FAIL, '{} of {} checks failed: {}'.format(

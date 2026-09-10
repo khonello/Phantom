@@ -1126,6 +1126,27 @@ check('keeping the asymmetry is a no-op at 1.0',
           reshape._symmetrise(_ellipse, _anti, keep=1.0) - _anti).max()) < 1e-9)
 
 
+# **Readings must not carry across frames.** `last_identity` and `last_shape`
+# are written only on a *measured* frame — `identity_probe` samples one in N —
+# while the batch path records on every swapped one. Nothing but
+# `clear_readings` empties them, so a missing call means each real reading is
+# recorded N times and the distribution is a fraction as independent as its
+# `n` claims.
+_comp = FaceCompositor(FaceSwapConfig(), MagicMock(), MagicMock())
+_comp.last_identity['id_out'] = 0.8
+_comp.last_shape['outline_shift'] = 0.4
+_comp.last_texture_headroom = 5.0
+_comp.reset()
+check('reset() deliberately does NOT drop the readings',
+      _comp.last_identity.get('id_out') == 0.8
+      and _comp.last_shape.get('outline_shift') == 0.4,
+      'it drops temporal state, which is a different job')
+_comp.clear_readings()
+check('but clear_readings() drops every one of them',
+      not _comp.last_identity and not _comp.last_shape
+      and _comp.last_texture_headroom is None)
+
+
 # Degenerate inputs decline rather than raise — this is an optional layer.
 check('mismatched point counts produce no warp',
       reshape.ShapeWarp.between(_narrow, _broad[:-4]) is None)

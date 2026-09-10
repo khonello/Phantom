@@ -1720,6 +1720,28 @@ confirmed inert on alphaface. Note also that the *frontal* shape reference
 raised `shape_mismatch` from 0.099 to **0.142** — the 28° reference had been
 understating the true head-shape difference, not inflating it.
 
+### One preset governs a job shape it was never designed for
+
+`set_quality` is fired from **`startPipeline` only** — the live start path.
+`startBatch` and `startPhotos` push nothing. So a RENDER or a photo job runs
+with whatever preset the last *live* session left behind.
+
+That is mostly harmless, because two of the three presets differ only in things
+an offline job does not care about. It is not harmless at `fast`, which sets
+`det_size` 320 against 448, `aligned_size` 192 against 256, and **`occluder`
+off**. Occlusion masking off is not a speed/quality trade — it is hands and
+microphones getting overpainted, on a job with no latency budget at all.
+
+The sequence is ordinary: drop to `fast` because the link is failing, end the
+call, render a video. Nothing says the render is now using the degraded
+configuration.
+
+**Deliberately not "fixed" by having the desktop push a preset before a
+render** — that is the `set_enhance` mistake, where the desktop asserts a
+default and silently reverts a pipeline started with `--no-enhance`. The
+question is a product one: should an offline job inherit a live latency preset
+at all? Recorded here rather than decided.
+
 ### Two topics have their own documents now
 
 **[GEOMETRY.md](GEOMETRY.md)** and **[TEXTURE.md](TEXTURE.md)** in the root.

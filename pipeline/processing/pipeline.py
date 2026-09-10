@@ -1342,6 +1342,21 @@ class ProcessingPipeline:
             FrameSwap. On failure the frame is the input, unmodified apart
             from preprocessing.
         """
+        # Same reason the stream path clears at the top of every frame, and it
+        # was missing here: `last_identity` and `last_shape` are only written
+        # on a *measured* frame — `identity_probe` samples one in N — while
+        # `_record_readings` below runs on every swapped one. Without this,
+        # every unmeasured frame records the last measured frame's numbers
+        # again, so a render at `identity_probe=5` reports each real reading
+        # five times and every identity and shape distribution is a fifth as
+        # independent as its `n` claims.
+        #
+        # Harmless on a photo job, which is one frame. Wrong on a video render,
+        # which is the job shape those readings were most likely to be trusted
+        # on, because it is the one a still can be studied from.
+        if self._compositor is not None:
+            self._compositor.clear_readings()
+
         frame = self._preprocessing_proc.process(frame)
         self._detection_proc.face_point = face_point
         frame = self._detection_proc.process(frame)
