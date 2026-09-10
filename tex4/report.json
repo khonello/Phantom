@@ -1,0 +1,154 @@
+{
+  "source": [
+    "source/one/face-1.jpeg",
+    "source/one/face-10.jpeg",
+    "source/one/face-11.jpeg",
+    "source/one/face-12.jpeg",
+    "source/one/face-13.jpeg",
+    "source/one/face-14.jpeg",
+    "source/one/face-15.jpeg",
+    "source/one/face-16.jpeg",
+    "source/one/face-17.jpeg",
+    "source/one/face-18.jpeg",
+    "source/one/face-19.jpeg",
+    "source/one/face-2.jpeg",
+    "source/one/face-20.jpeg",
+    "source/one/face-21.jpeg",
+    "source/one/face-22.jpeg",
+    "source/one/face-23.jpeg",
+    "source/one/face-24.jpeg",
+    "source/one/face-25.jpeg",
+    "source/one/face-26.jpeg",
+    "source/one/face-27.jpeg",
+    "source/one/face-28.jpeg",
+    "source/one/face-29.jpeg",
+    "source/one/face-3.jpeg",
+    "source/one/face-30.jpeg",
+    "source/one/face-4.jpeg",
+    "source/one/face-5.jpeg",
+    "source/one/face-6.jpeg",
+    "source/one/face-7.jpeg",
+    "source/one/face-8.jpeg",
+    "source/one/face-9.jpeg"
+  ],
+  "target": "source/two/IMG_3623.jpg",
+  "swapper_model": "alphaface_256",
+  "results": [
+    {
+      "settings": {
+        "swapper_model": "alphaface_256",
+        "texture_strength": 0.5,
+        "texture_band": 1.0,
+        "texture_relief": 0.0
+      },
+      "readings": {
+        "id_swap": 0.9057236995742259,
+        "id_restore": 0.9069001614782207,
+        "id_final": 0.9026346799588879,
+        "id_out": 0.7472841625498864,
+        "id_target": 0.2434163768017087,
+        "outline_swap": 0.0011820640407125271,
+        "outline_final": 0.025580217408892048,
+        "shape_mismatch": 0.14189834043739974,
+        "shape_gap": 0.14596280915719445,
+        "shape_shift": -0.028643525408867054,
+        "outline_mismatch": 0.19238287159037687,
+        "outline_shift": -0.02891988335306772,
+        "texture_headroom": 3.612402275291482,
+        "texture_delivered": 3.3213894367218018,
+        "texture_coverage": 0.9209605226872574,
+        "texture_confidence": 1.0,
+        "detail_reserve": 0.5,
+        "detail_ratio": 0.9598885264055973
+      },
+      "swapped": true
+    },
+    {
+      "settings": {
+        "swapper_model": "alphaface_256",
+        "texture_strength": 0.5,
+        "texture_band": 1.0,
+        "texture_relief": 0.65
+      },
+      "readings": {
+        "id_swap": 0.9057236995742259,
+        "id_restore": 0.9069001614782207,
+        "id_final": 0.9026346799588879,
+        "id_out": 0.7502771704563098,
+        "id_target": 0.23879061789022535,
+        "outline_swap": 0.0011820640407125271,
+        "outline_final": 0.025580217408892048,
+        "shape_mismatch": 0.14189834043739974,
+        "shape_gap": 0.14576808390382898,
+        "shape_shift": -0.027271238370377038,
+        "outline_mismatch": 0.19238287159037687,
+        "outline_shift": -0.02663321766772553,
+        "texture_headroom": 3.612402275291482,
+        "texture_delivered": 3.3213894367218018,
+        "texture_coverage": 0.9209605226872574,
+        "texture_confidence": 1.0,
+        "detail_reserve": 0.5,
+        "detail_ratio": 0.9598885264055973
+      },
+      "swapped": true
+    },
+    {
+      "settings": {
+        "swapper_model": "alphaface_256",
+        "texture_strength": 0.5,
+        "texture_band": 2.0,
+        "texture_relief": 0.0
+      },
+      "readings": {
+        "id_swap": 0.9057236995742259,
+        "id_restore": 0.9069001614782207,
+        "id_final": 0.9031155438474318,
+        "id_out": 0.7362219651122436,
+        "id_target": 0.24402570820068178,
+        "outline_swap": 0.0011820640407125271,
+        "outline_final": 0.024316281674140683,
+        "shape_mismatch": 0.14189834043739974,
+        "shape_gap": 0.1467732549736083,
+        "shape_shift": -0.034354979213863324,
+        "outline_mismatch": 0.19238287159037687,
+        "outline_shift": -0.025736099302746007,
+        "texture_headroom": 5.303533360835391,
+        "texture_delivered": 4.876284122467041,
+        "texture_coverage": 0.9209605226872574,
+        "texture_confidence": 1.0,
+        "detail_reserve": 0.5,
+        "detail_ratio": 0.8625336541793869
+      },
+      "swapped": true
+    },
+    {
+      "settings": {
+        "swapper_model": "alphaface_256",
+        "texture_strength": 0.5,
+        "texture_band": 2.0,
+        "texture_relief": 0.65
+      },
+      "readings": {
+        "id_swap": 0.9057236995742259,
+        "id_restore": 0.9069001614782207,
+        "id_final": 0.9031155438474318,
+        "id_out": 0.7343507000232454,
+        "id_target": 0.24590002019661109,
+        "outline_swap": 0.0011820640407125271,
+        "outline_final": 0.024206504225153136,
+        "shape_mismatch": 0.14189834043739974,
+        "shape_gap": 0.14991818992784278,
+        "shape_shift": -0.056518275447915434,
+        "outline_mismatch": 0.19238287159037687,
+        "outline_shift": -0.05270690015826052,
+        "texture_headroom": 5.303533360835391,
+        "texture_delivered": 4.865793228149414,
+        "texture_coverage": 0.9195392545766955,
+        "texture_confidence": 1.0,
+        "detail_reserve": 0.5,
+        "detail_ratio": 0.8625336541793869
+      },
+      "swapped": true
+    }
+  ]
+}

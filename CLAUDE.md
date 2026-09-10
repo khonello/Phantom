@@ -1422,9 +1422,41 @@ proportioned differently from the target puts marks in the wrong spots. This is
 *resampling*, and it is the one that was costing amplitude. Both are real; only
 this one is fixed.
 
-**Unverified on footage.** The gain is arithmetic pinned by tests; whether the
-layer now reads as skin rather than as smoothing is a separate question and the
-default stays 0 until someone looks.
+**Verified on footage the same day, and the verdict is split.** The gain works
+exactly as intended — delivery went **41.4% -> 91.8%** of budget at both
+strengths, the remaining 8% being the feathered alpha. And the layer is *still
+wrong*, because delivering more of this map makes it worse rather than better:
+
+| flat cheek patch | off | strength 0.5 | strength 1.0 | target |
+|---|---|---|---|---|
+| before the fix | 5.947 | — | 4.114 | 7.741 |
+| **after the fix** | 5.947 | 5.235 | **4.456** | 7.741 |
+
+Still falling. What the frames show is why: **the layer paints the donor's
+creases on.** At 0.5 a dark line appears under the eye and across the cheek; at
+1.0 the face reads as aged, with pronounced folds that are not in the target and
+not in any photograph of this person at this expression.
+
+`texture_relief` is the dial on that, measured as energy added coarser than
+sigma 3.0 — which a high-pass capped at sigma 3.0 should not produce at all:
+
+| | band 1.0 | band 2.0, relief 0.0 | band 2.0, relief 0.65 (**default**) |
+|---|---|---|---|
+| coarse energy added | 1.253 | 1.907 | **3.160** |
+
+**So the shipped default is the worst of the settings tested.** The mark octave
+is not carrying marks, it is carrying the donor's expression lines and shading.
+
+**The remaining blocker is the map's content, not its amplitude**, and the
+likely root is the donor: `select_texture_source` chose a **369px, upsampled,
+28-degrees-off-axis** photograph, weighting sharpness 0.40 against frontality
+0.20. That is the same mis-weighting already corrected for the shape reference
+in `select_shape_source`, and `_pose_confidence` does not catch it — it measures
+source-to-*target* pose *agreement*, so two faces angled the same way score
+1.000 while the map is still foreshortened. Try a large, frontal,
+neutral-expression, non-upsampled donor before tuning anything else.
+
+`texture_strength` stays **0**.
 
 **The evidence that found it:**
 

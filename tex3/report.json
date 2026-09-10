@@ -1,0 +1,115 @@
+{
+  "source": [
+    "source/one/face-1.jpeg",
+    "source/one/face-10.jpeg",
+    "source/one/face-11.jpeg",
+    "source/one/face-12.jpeg",
+    "source/one/face-13.jpeg",
+    "source/one/face-14.jpeg",
+    "source/one/face-15.jpeg",
+    "source/one/face-16.jpeg",
+    "source/one/face-17.jpeg",
+    "source/one/face-18.jpeg",
+    "source/one/face-19.jpeg",
+    "source/one/face-2.jpeg",
+    "source/one/face-20.jpeg",
+    "source/one/face-21.jpeg",
+    "source/one/face-22.jpeg",
+    "source/one/face-23.jpeg",
+    "source/one/face-24.jpeg",
+    "source/one/face-25.jpeg",
+    "source/one/face-26.jpeg",
+    "source/one/face-27.jpeg",
+    "source/one/face-28.jpeg",
+    "source/one/face-29.jpeg",
+    "source/one/face-3.jpeg",
+    "source/one/face-30.jpeg",
+    "source/one/face-4.jpeg",
+    "source/one/face-5.jpeg",
+    "source/one/face-6.jpeg",
+    "source/one/face-7.jpeg",
+    "source/one/face-8.jpeg",
+    "source/one/face-9.jpeg"
+  ],
+  "target": "source/two/IMG_3623.jpg",
+  "swapper_model": "alphaface_256",
+  "results": [
+    {
+      "settings": {
+        "swapper_model": "alphaface_256",
+        "texture_strength": 0.0
+      },
+      "readings": {
+        "id_swap": 0.9057236995742259,
+        "id_restore": 0.9069001614782207,
+        "id_final": 0.9025427222031678,
+        "id_out": 0.7633621401137279,
+        "id_target": 0.25173935692831373,
+        "outline_swap": 0.0011820640407125271,
+        "outline_final": 0.025940827446206294,
+        "shape_mismatch": 0.14189834043739974,
+        "shape_gap": 0.14719627696881066,
+        "shape_shift": -0.037336141600247785,
+        "outline_mismatch": 0.19238287159037687,
+        "outline_shift": -0.04558970042134747,
+        "detail_reserve": 0.0,
+        "detail_ratio": 1.180618122189581
+      },
+      "swapped": true
+    },
+    {
+      "settings": {
+        "swapper_model": "alphaface_256",
+        "texture_strength": 0.5
+      },
+      "readings": {
+        "id_swap": 0.9057236995742259,
+        "id_restore": 0.9069025135883261,
+        "id_final": 0.9031222965571682,
+        "id_out": 0.7336510887394696,
+        "id_target": 0.24543590234623003,
+        "outline_swap": 0.0011820640407125271,
+        "outline_final": 0.024155915305332454,
+        "shape_mismatch": 0.14189834043739974,
+        "shape_gap": 0.14969799849155496,
+        "shape_shift": -0.054966520609845526,
+        "outline_mismatch": 0.19238287159037687,
+        "outline_shift": -0.05041212888087365,
+        "texture_headroom": 5.3033837559579915,
+        "texture_delivered": 4.865655899047852,
+        "texture_coverage": 0.9195392545766955,
+        "texture_confidence": 1.0,
+        "detail_reserve": 0.5,
+        "detail_ratio": 0.8625336612305691
+      },
+      "swapped": true
+    },
+    {
+      "settings": {
+        "swapper_model": "alphaface_256",
+        "texture_strength": 1.0
+      },
+      "readings": {
+        "id_swap": 0.9057236995742259,
+        "id_restore": 0.9069001614782207,
+        "id_final": 0.9018654646135956,
+        "id_out": 0.7152779102850985,
+        "id_target": 0.24514572586953,
+        "outline_swap": 0.0011820640407125271,
+        "outline_final": 0.02564428630607296,
+        "shape_mismatch": 0.14189834043739974,
+        "shape_gap": 0.1526372412102673,
+        "shape_shift": -0.07568024220554692,
+        "outline_mismatch": 0.19238287159037687,
+        "outline_shift": -0.06455291616723491,
+        "texture_headroom": 6.498639808247774,
+        "texture_delivered": 5.962258338928223,
+        "texture_coverage": 0.9195392545766955,
+        "texture_confidence": 1.0,
+        "detail_reserve": 0.8,
+        "detail_ratio": 0.5975808449106966
+      },
+      "swapped": true
+    }
+  ]
+}
