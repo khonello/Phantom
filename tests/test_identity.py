@@ -1023,6 +1023,28 @@ _starved_text = _starved.format_report()
 check('an under-filled texture reservation says the face is softer',
       'SOFTER than with texture off' in _starved_text
       and 'Do not raise texture_strength' in _starved_text)
+
+# Coverage decides *which* cause, and the two want opposite fixes. A field that
+# is unit-deviation over a fraction c of the region it is measured across reads
+# sqrt(c), so coverage predicts the shortfall exactly when area is the whole
+# story -- and fails to when amplitude is being lost as well.
+_area = Readings()
+_amplitude = Readings()
+for _ in range(12):
+    for r in (_area, _amplitude):
+        r.record('texture_headroom', 6.5)
+        r.record('texture_delivered', 2.69)      # 41% of budget
+        r.record('detail_reserve', 0.8)
+    _area.record('texture_coverage', 0.171)      # sqrt -> 0.414, explains it
+    _amplitude.record('texture_coverage', 0.90)  # sqrt -> 0.949, does not
+
+check('coverage that explains the shortfall blames the area, not the map',
+      'arriving at full amplitude over less of the face' in _area.format_report())
+check('coverage that does not explain it blames the amplitude',
+      'amplitude is being lost too' in _amplitude.format_report())
+check('and the two verdicts are mutually exclusive',
+      ('amplitude is being lost too' in _area.format_report())
+      is False)
 check('and a filled one says the reservation is being filled',
       'reservation is being filled' in _filled.format_report()
       and 'SOFTER' not in _filled.format_report())

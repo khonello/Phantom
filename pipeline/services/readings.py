@@ -47,6 +47,7 @@ computed once at the end. Same reasoning `LatencyBudget` records unconditionally
 rather than at debug level.
 """
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -417,19 +418,43 @@ class Readings:
         spend = data.get('texture_delivered')
         if budget is not None and spend is not None and budget['p50'] > 1e-6:
             share = spend['p50'] / budget['p50']
-            if share < 0.6:
-                notes.append(
-                    '  -> texture delivered {:.2f} of a {:.2f} budget ({:.0%}). '
-                    'The map is not reaching the face at the amplitude the '
-                    'reserve already stood detail matching down for, so the '
-                    'face is SOFTER than with texture off. Do not raise '
-                    'texture_strength — it scales both sides.'.format(
-                        spend['p50'], budget['p50'], share))
-            else:
+            if share >= 0.6:
                 notes.append(
                     '  -> texture delivered {:.2f} of a {:.2f} budget ({:.0%}), '
                     'so the reservation is being filled.'.format(
                         spend['p50'], budget['p50'], share))
+            else:
+                notes.append(
+                    '  -> texture delivered {:.2f} of a {:.2f} budget ({:.0%}), '
+                    'so the face is SOFTER than with texture off — detail '
+                    'matching stood down by {:.2f} and this did not fill it. '
+                    'Do not raise texture_strength; it scales both sides.'
+                    .format(spend['p50'], budget['p50'], share,
+                            (data.get('detail_reserve') or {}).get('p50', 0.0)))
+
+                # Which of the two causes it is, and they want opposite fixes.
+                # A field that is unit-deviation over a fraction `c` of the
+                # region it is measured across reads `sqrt(c)`, so coverage
+                # predicts the shortfall exactly when area is the whole story.
+                cover = data.get('texture_coverage')
+                if cover is not None and cover['p50'] > 1e-6:
+                    predicted = math.sqrt(cover['p50'])
+                    if abs(predicted - share) < 0.08:
+                        notes.append(
+                            '     the map covers {:.0%} of the mask, which '
+                            'predicts a {:.0%} spend on area alone — so it is '
+                            'arriving at full amplitude over less of the face '
+                            'than the reserve assumed. The reserve is uniform '
+                            'and the fill is skin-only; that mismatch is the '
+                            'defect, not the map.'.format(
+                                cover['p50'], predicted))
+                    else:
+                        notes.append(
+                            '     the map covers {:.0%} of the mask, which '
+                            'would predict {:.0%} on area alone against the '
+                            '{:.0%} measured — so amplitude is being lost too. '
+                            'Look at the warp and the normalisation.'.format(
+                                cover['p50'], predicted, share))
 
         reserve = data.get('detail_reserve')
         if reserve is not None:

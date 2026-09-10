@@ -356,6 +356,13 @@ class FaceCompositor:
         # has already stood down by `detail_reserve` to make the room.
         self.last_texture_delivered: Optional[float] = None
 
+        # The share of the compositing alpha the map's support actually covers.
+        # Read with `last_texture_delivered`: a field that is unit-deviation on
+        # a fraction `c` of the region it is measured over reads `sqrt(c)`, so
+        # this is what separates "the map is weak" from "the map covers less of
+        # the face than the reserve assumed".
+        self.last_texture_coverage: Optional[float] = None
+
         # The correction `_match_detail` *wanted* on the last frame, before its
         # clamp, or None when the stage did not run. This is the reading that
         # decides how much of the texture work was necessary: if the clamp is
@@ -617,6 +624,7 @@ class FaceCompositor:
         self.last_texture_headroom = None
         self.last_texture_confidence = None
         self.last_texture_delivered = None
+        self.last_texture_coverage = None
         self.last_complexion_kept = None
 
     def reset(self) -> None:
@@ -1987,6 +1995,7 @@ class FaceCompositor:
         self.last_texture_headroom = None
         self.last_texture_confidence = None
         self.last_texture_delivered = None
+        self.last_texture_coverage = None
 
         strength, contrast, band, relief = self._texture_shaping()
         if strength <= 0.0:
@@ -2108,9 +2117,34 @@ class FaceCompositor:
         # actually commits, since the deviation of a field that is mostly zeros
         # outside the mask says nothing about what landed on the face.
         inside = mask > 0.5
-        self.last_texture_delivered = (
-            float(added[inside].std())
-            if int(np.count_nonzero(inside)) > 64 else None)
+        committed = int(np.count_nonzero(inside))
+        if committed > 64:
+            self.last_texture_delivered = float(added[inside].std())
+
+            # **Why the spend can fall short without the map being weak.**
+            #
+            # The map carries unit deviation inside *its own* skin support and
+            # zero outside it — eyes, nostrils and mouth are cut at extraction,
+            # and everything beyond the canonical oval is zero by the warp's
+            # border. `delivered` is measured over the *compositing* alpha,
+            # which is the whole face hull. Those are different regions, and a
+            # field that is unit-deviation on a fraction `c` of the region it is
+            # measured over reads `sqrt(c)`, not 1.
+            #
+            # So this is the term that says whether a low spend means "the map
+            # is not arriving at amplitude" or "the map is arriving exactly as
+            # intended over less of the face than the reserve assumed". They
+            # have opposite fixes, and the ratio alone cannot tell them apart.
+            #
+            # The second is a real defect either way: `_match_detail` stands
+            # down uniformly across the whole face, while the fill is skin-only
+            # by construction, so the excluded features lose detail with nothing
+            # replacing it.
+            support = int(np.count_nonzero(np.abs(warped)[inside] > 1e-6))
+            self.last_texture_coverage = float(support) / float(committed)
+        else:
+            self.last_texture_delivered = None
+            self.last_texture_coverage = None
 
         result: Frame = blended + added[:, :, None]
 

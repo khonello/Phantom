@@ -1074,6 +1074,10 @@ class ProcessingPipeline:
             # defect this reading exists to surface.
             self._readings.record('texture_delivered', delivered)
 
+        coverage = self._compositor.last_texture_coverage
+        if coverage is not None:
+            self._readings.record('texture_coverage', coverage)
+
         confidence = self._compositor.last_texture_confidence
         if confidence is not None:
             self._readings.record('texture_confidence', confidence)

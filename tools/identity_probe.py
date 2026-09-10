@@ -98,8 +98,8 @@ _SHAPE = ('shape_shift', 'outline_swap', 'outline_shift')
 # layer actually ran — a `texture_strength` sweep that comes back flat is
 # ambiguous without them (too weak, or declining for a reason unrelated to
 # strength), which is the exact question `detail_reserve` was added to answer.
-_TEXTURE = ('texture_headroom', 'texture_delivered', 'detail_reserve',
-            'texture_confidence', 'detail_ratio')
+_TEXTURE = ('texture_headroom', 'texture_delivered', 'texture_coverage',
+            'detail_reserve', 'texture_confidence', 'detail_ratio')
 
 # What each step between two stages has a knob for. Printed with the attribution
 # so a reading arrives with its remedy attached.
@@ -343,6 +343,7 @@ class Rig:
         for name, value in (
                 ('texture_headroom', self.compositor.last_texture_headroom),
                 ('texture_delivered', self.compositor.last_texture_delivered),
+                ('texture_coverage', self.compositor.last_texture_coverage),
                 ('texture_confidence', self.compositor.last_texture_confidence),
                 ('detail_reserve', self.compositor.last_detail_reserve),
                 ('detail_ratio', self.compositor.last_detail_ratio)):
@@ -623,8 +624,9 @@ def main() -> int:
     # table is already eight wide.
     if any(any(k in r['readings'] for k in _TEXTURE) for r in results):
         print('\n  texture readings')
-        print('  {:<{}}  {:>9} {:>9} {:>9} {:>9} {:>9}'.format(
-            '', width, 'headroom', 'delivered', 'reserve', 'pose', 'detail'))
+        print('  {:<{}}  {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}'.format(
+            '', width, 'headroom', 'delivered', 'coverage', 'reserve', 'pose',
+            'detail'))
         for result, label in zip(results, labels):
             cells = []
             for name in _TEXTURE:
@@ -668,6 +670,11 @@ def main() -> int:
                   'axes of several.')
 
     if args.json:
+        # `--save-frames` makes its directory and this did not, so a run that
+        # had already done all its compute died at the last line with
+        # FileNotFoundError and took every reading with it.
+        parent = os.path.dirname(os.path.abspath(args.json))
+        os.makedirs(parent, exist_ok=True)
         with open(args.json, 'w', encoding='utf-8') as handle:
             json.dump({
                 'source': list(args.source),

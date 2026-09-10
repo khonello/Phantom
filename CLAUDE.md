@@ -1401,9 +1401,35 @@ commits, in the same 8-bit units as `texture_headroom`. Budget against spend:
                            warp, the skin mask's coverage, and where the
                            normalisation is measured
 
-The REALISM block and `tools/identity_probe.py` both report it, and the report
-says outright when the face is softer than with texture off. Until that number
-exists on footage, `texture_strength` above 0 is a net loss and the default
+**Measured 2026-09-10, and the ratio is the finding.**
+
+| `texture_strength` | headroom | delivered | spend |
+|---|---|---|---|
+| 0.5 | 5.303 | 2.194 | **41.4%** |
+| 1.0 | 6.499 | 2.688 | **41.4%** |
+
+**Identical at both strengths**, which rules out an amplitude problem: a
+constant factor independent of the knob is geometric, not a weak map.
+
+The candidate is *area*. The map carries unit deviation inside **its own** skin
+support — eyes, nostrils and mouth cut at extraction, everything past the
+canonical oval zeroed by the warp's border — while `delivered` is measured over
+the **compositing alpha**, the whole face hull. A field that is unit-deviation
+over a fraction `c` of the region it is measured across reads `sqrt(c)`, so a
+41.4% spend predicts the map covering **17%** of the mask. `texture_coverage`
+tests exactly that, and the report now says which cause it is:
+
+    coverage explains the shortfall   the map arrives at full amplitude over
+                                      less of the face than the reserve assumed
+    coverage does not explain it      amplitude is being lost too — look at the
+                                      warp and the normalisation
+
+If it is area, the defect is **not the map**: `_match_detail` stands down
+*uniformly* across the whole face while the fill is *skin-only* by construction,
+so the excluded features lose detail with nothing replacing it. The fix is then
+to reserve against the region the fill actually covers, not against the hull.
+
+Until that is settled, `texture_strength` above 0 is a net loss and the default
 stays 0.
 
 Read `texture headroom` alongside `detail` in `tools/identity_probe.py`: a
