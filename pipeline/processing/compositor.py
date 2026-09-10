@@ -607,8 +607,13 @@ class FaceCompositor:
             return
 
         reading = shape_metric.compare(self.source_shape, target, points)
-        if reading is not None and reading.outline_shift is not None:
+        if reading is None:
+            return
+        if reading.outline_shift is not None:
             self.last_shape[name] = reading.outline_shift
+        if reading.interior_shift is not None:
+            self.last_shape[name.replace('outline', 'interior')] = (
+                reading.interior_shift)
 
     def clear_readings(self) -> None:
         """

@@ -739,6 +739,38 @@ check('and the outline reading separates them better than the whole face',
       'outline {:.3f} vs whole-face {:.3f}'.format(
           _a.outline_shift - _b.outline_shift, _a.shift - _b.shift))
 
+# The interior half must be reported too, and must be the half that separates
+# a swap which repaints features from one that moves the silhouette. Reporting
+# only the outline made a true statement answer the wrong question on footage:
+# the outline cannot move — the crop is framed by the target's keypoints and
+# the mask is a hull of the target's landmarks — while the head plainly reads
+# as the source's, because a viewer takes the interior contours for head shape.
+_ra = shape_metric.compare(_SRC, _TGT, _contour)    # only the contour moved
+_rb = shape_metric.compare(_SRC, _TGT, _interior)   # only the interior moved
+check('the interior shift is reported at all',
+      _ra.interior_shift is not None and _rb.interior_shift is not None)
+check('a contour-only change reads as outline movement, near exactly',
+      _ra.outline_shift > 0.95, '{:+.3f}'.format(_ra.outline_shift))
+check('and an interior-only change barely moves the outline reading',
+      _rb.outline_shift < 0.05, '{:+.3f}'.format(_rb.outline_shift))
+check('so the outline reading separates the two cleanly',
+      (_ra.outline_shift - _rb.outline_shift) > 0.9,
+      'separation {:.3f}'.format(_ra.outline_shift - _rb.outline_shift))
+
+# The interior reading is the weaker half and knowingly so: a similarity fitted
+# on the interior can absorb a uniform scaling of the features, so a scale-like
+# change is partly fitted away. It must still point the right way -- an
+# interior-only change moves it more than a contour-only one -- but it is not a
+# calibrated fraction and this pins that expectation honestly rather than
+# asserting a number it cannot deliver.
+check('the interior reading still points the right way',
+      _rb.interior_shift > _ra.interior_shift,
+      'interior-moved {:+.3f} vs contour-moved {:+.3f}'.format(
+          _rb.interior_shift, _ra.interior_shift))
+check('and it is reported at all, which is the half that was missing',
+      _ra.interior_shift is not None and _rb.interior_shift is not None)
+
+
 # Two heads that already agree have no disagreement to resolve, and the ratio
 # would be dividing noise by noise.
 _matched = shape_metric.compare(_SRC, _SRC, _SRC)

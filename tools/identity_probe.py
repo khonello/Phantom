@@ -91,7 +91,7 @@ _STAGES = ('id_swap', 'id_restore', 'id_final', 'id_out', 'id_target')
 # a column: it is a property of the source/target pairing rather than of any
 # configuration, so it cannot vary down a sweep and is printed once above the
 # table instead.
-_SHAPE = ('shape_shift', 'outline_swap', 'outline_shift')
+_SHAPE = ('shape_shift', 'interior_shift', 'outline_shift')
 
 # Whether the texture layer had anything to spend, and whether pose let it spend
 # it. Reported in their own block rather than as more columns, and only when the
@@ -575,7 +575,7 @@ def main() -> int:
     columns = [stage.replace('id_', '') for stage in _STAGES]
     # `gen` is what the swap model produced, `kept` is what survived the mask
     # and the paste. Reading them left to right is the attribution.
-    columns += ['shape', 'gen', 'kept']
+    columns += ['shape', 'inner', 'outln']
     print('  {:<{}}  {}'.format('configuration', width, '  '.join(
         '{:<5}'.format(name[:5]) for name in columns)))
     print('  ' + '-' * (width + 2 + len(columns) * 7))
