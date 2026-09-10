@@ -1479,7 +1479,42 @@ trading between them:
 | 0.06 | 0.08 | 0.604 | 0.429 |
 
 Feather is secondary — at erode 0 it runs 0.800 / 0.790 / 0.761 across
-0.02/0.04/0.08. **The default is now 0.015**, halved rather than zeroed: the
+0.02/0.04/0.08.
+
+**What the knob actually controls is how much of `_HULL_EXPAND` survives.** The
+hull is grown 10% radially and the erode takes a constant number of pixels back
+off; at a hull radius of about a third of the crop those coincide at every
+working size:
+
+| aligned size | 128 | 192 | 256 | 320 |
+|---|---|---|---|---|
+| expansion (px) | 4.2 | 6.3 | 8.4 | 10.5 |
+| erode 0.030 | 4 | 6 | 8 | 10 | 
+| erode 0.015 | 2 | 3 | 4 | 5 |
+| erode 0.0075 | 1 | 1 | 2 | 2 |
+
+So **0.03 cancelled the expansion outright**, leaving the mask at the bare
+landmark hull — and that expansion exists precisely because "the 106 points stop
+at the eyebrows and hug the jaw, so a bare hull clips the swap". The default was
+undoing its own correction, and the 0.087 of identity was the bill.
+
+**0.015 is a floor, not a midpoint.** Below it the constant-pixel erode is
+dominated by rounding — 0.0075 is 1px at both 128 and 192, a quarter of the
+expansion at one size and a sixth at another — so the mask would behave
+differently by preset and by how close the operator sits.
+`tests/test_identity.py` pins this.
+
+**Not zero**, for three reasons the still cannot test. XSeg gates the mask
+*before* the erode, so hair and background are normally excluded — but
+`occluder` is **off on `fast`**, the gear an operator drops to when the link is
+failing, so there the erode is the only protection left. A turned head pushes a
+radial expansion past the visible silhouette into background, and this still is
+frontal. And zero leaves no margin for landmark error. Read the 0.800 with that
+in mind: `id_out` embeds a crop framed on the face, so more coverage puts more
+source-derived pixels in it **whether or not the extra coverage landed on
+skin** — the cosine rewards reaching onto hair.
+
+The
 frames show the only place the settings visibly differ is the **hairline**,
 where a smaller erode lets the smoothed swap reach into fine hair at the
 temples. There is **no colour seam at the jaw at any setting** — the colour

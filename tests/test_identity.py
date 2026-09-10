@@ -979,6 +979,50 @@ check('an unreadable pose scores neutral rather than frontal',
       db._shape_score(*_no_pose) < db._shape_score(*_soft_frontal))
 
 
+# ── 7. mask_erode has a quantisation floor ─────────────────────────────────
+print('\nmask_erode survives rounding at every working size')
+
+# `_build` computes `erode_px = int(round(size * mask_erode))`, a constant
+# number of pixels, while `_expand_hull` grows the hull by a *fraction* of its
+# radius. The two only stay in proportion while the rounding does not dominate:
+# below about 0.008 the erode collapses to 1px at several sizes at once, so the
+# same setting removes a quarter of the expansion at one aligned size and a
+# sixth at another — behaviour that would then depend on the preset and on how
+# close the operator is sitting.
+_SIZES = (128, 192, 256, 320)   # _ALIGNED_MIN through the largest ceiling
+_default_erode = FaceSwapConfig().mask_erode
+
+
+def _erode_px(size: int, erode: float) -> int:
+    """The pixel erosion `FaceMasker._build` would apply."""
+    return int(round(size * max(0.0, min(erode, 0.25))))
+
+
+_at_default = [_erode_px(s, _default_erode) for s in _SIZES]
+check('the default erode acts at every aligned size, including the smallest',
+      all(px >= 1 for px in _at_default),
+      'px {} at sizes {}'.format(_at_default, list(_SIZES)))
+
+# Proportional means the pixel count tracks the size rather than flattening.
+check('and it scales with the crop rather than flattening into rounding',
+      len(set(_at_default)) == len(_SIZES) and _at_default == sorted(_at_default),
+      'px {}'.format(_at_default))
+
+# The value below the floor is the one this is protecting against: it must be
+# visibly worse on that same test, or the floor is not where it is claimed.
+_below = [_erode_px(s, 0.0075) for s in _SIZES]
+check('a value below the floor does flatten, which is why 0.015 is the floor',
+      len(set(_below)) < len(_SIZES), 'px {}'.format(_below))
+
+# And the old default cancelled the hull expansion outright, which is the
+# defect that was measured — kept as the explanation for why it moved.
+check('the old 0.03 removed roughly the whole 10% hull expansion',
+      all(abs(_erode_px(s, 0.03) - 0.10 * 0.33 * s) < 1.0 for s in _SIZES),
+      'px {} against expansion {}'.format(
+          [_erode_px(s, 0.03) for s in _SIZES],
+          [round(0.10 * 0.33 * s, 1) for s in _SIZES]))
+
+
 print('\n' + '=' * 70)
 print(f'{len(PASS)} passed, {len(FAIL)} failed')
 print('=' * 70)

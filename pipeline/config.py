@@ -247,10 +247,44 @@ class FaceSwapConfig:
     # visibly differ is the hairline, where a smaller erode lets the smoothed
     # swap reach into the fine hair at the temples.
     #
-    # Halved rather than zeroed, because that hairline cost is real and the
-    # still it was measured on is the *easy* case for it — the subject's hair is
-    # tied back. A target with loose hair across the temple is what would decide
-    # between 0.015 and 0.0, and has not been run.
+    # **What this knob actually controls is how much of `_HULL_EXPAND`
+    # survives**, which is not how it reads. `_expand_hull` grows the landmark
+    # hull 10% radially, and the erode then takes a constant number of pixels
+    # back off. At a hull radius of about a third of the crop those two land on
+    # the same number at every working size:
+    #
+    #     aligned size        128    192    256    320
+    #     expansion (px)      4.2    6.3    8.4   10.5
+    #     erode 0.030 (px)      4      6      8     10   <- cancels it exactly
+    #     erode 0.015 (px)      2      3      4      5   <- keeps half
+    #     erode 0.0075 (px)     1      1      2      2   <- quantisation noise
+    #
+    # So the old 0.03 undid the whole expansion, leaving the mask at the bare
+    # landmark hull — and that expansion exists precisely because "the 106
+    # points stop at the eyebrows and hug the jaw, so a bare hull clips the
+    # swap". The default was cancelling its own correction, which is what the
+    # 0.087 of identity was paying for.
+    #
+    # **0.015 is the floor, not a midpoint.** Below it the constant-pixel erode
+    # is dominated by rounding — 0.0075 is 1px at both 128 and 192, a quarter of
+    # the expansion at one size and a sixth at another — so the mask would
+    # behave differently depending on the preset and on how close the operator
+    # sits. 0.015 is the smallest value that still scales proportionally.
+    #
+    # **Not zero**, for three reasons the still cannot test. XSeg gates the mask
+    # *before* this erode, so hair and background are normally excluded — but
+    # `occluder` is off on the `fast` preset, which is the gear an operator
+    # drops to when the link is failing, so there the erode is the only
+    # protection left. A turned head pushes a radial expansion past the visible
+    # silhouette into background, and the measured still is frontal. And zero
+    # leaves no margin for landmark error: at 0.015 a frame whose landmarks
+    # overshoot still has half the expansion as slack, at 0.0 the mask is
+    # already at its maximum.
+    #
+    # Read the 0.800 at erode 0 with that in mind — `id_out` embeds a crop
+    # framed on the face, so more coverage puts more source-derived pixels in
+    # it whether or not the extra coverage landed on skin. The cosine rewards
+    # reaching onto hair.
     mask_feather: float = 0.04
     mask_erode: float = 0.015
 
