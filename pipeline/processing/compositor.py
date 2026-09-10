@@ -346,6 +346,16 @@ class FaceCompositor:
         # texture level and the texture layer has nothing left to add.
         self.last_texture_headroom: Optional[float] = None
 
+        # And what the layer *actually* put on the face, in the same 8-bit
+        # units, so the two can be read against each other. `headroom` is the
+        # budget and this is the spend; they are only equal if the map still
+        # carries unit deviation after being warped into frame space and
+        # multiplied by the compositing alpha, which was assumed and never
+        # measured. A spend well under the budget is the state that leaves the
+        # face softer than with texture switched off, because `_match_detail`
+        # has already stood down by `detail_reserve` to make the room.
+        self.last_texture_delivered: Optional[float] = None
+
         # The correction `_match_detail` *wanted* on the last frame, before its
         # clamp, or None when the stage did not run. This is the reading that
         # decides how much of the texture work was necessary: if the clamp is
@@ -606,6 +616,7 @@ class FaceCompositor:
         self.last_detail_reserve = None
         self.last_texture_headroom = None
         self.last_texture_confidence = None
+        self.last_texture_delivered = None
         self.last_complexion_kept = None
 
     def reset(self) -> None:
@@ -1975,6 +1986,7 @@ class FaceCompositor:
         """
         self.last_texture_headroom = None
         self.last_texture_confidence = None
+        self.last_texture_delivered = None
 
         strength, contrast, band, relief = self._texture_shaping()
         if strength <= 0.0:
@@ -2078,7 +2090,29 @@ class FaceCompositor:
         amount = min(
             max(strength, 1.0) * headroom * confidence, texture.TEXTURE_MAX,
         )
-        result: Frame = blended + (warped * amount)[:, :, None] * mask[:, :, None]
+        added = (warped * amount) * mask
+
+        # **What actually reached the picture, against what was budgeted.**
+        #
+        # `amount` is the deviation this layer intends to deliver, and it is
+        # correct only if `warped` still carries unit deviation *after* the warp
+        # and inside the compositing alpha. Nothing checked that, and the gap
+        # between intent and delivery is the whole of "the reservation was made
+        # and never filled" — a state that leaves the face softer than with the
+        # layer switched off, because `_match_detail` has already stood down by
+        # `reserve` to make the room.
+        #
+        # Measured on the field itself rather than by differencing the picture,
+        # so it is exactly this layer's contribution and not the sum of
+        # everything else that touched the ROI. Over the pixels the alpha
+        # actually commits, since the deviation of a field that is mostly zeros
+        # outside the mask says nothing about what landed on the face.
+        inside = mask > 0.5
+        self.last_texture_delivered = (
+            float(added[inside].std())
+            if int(np.count_nonzero(inside)) > 64 else None)
+
+        result: Frame = blended + added[:, :, None]
 
         # Contained within the `paste` bucket rather than added to it — the frame
         # total does not change, this just says how much of paste it was.

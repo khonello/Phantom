@@ -1067,6 +1067,13 @@ class ProcessingPipeline:
         if headroom is not None:
             self._readings.record('texture_headroom', headroom)
 
+        delivered = self._compositor.last_texture_delivered
+        if delivered is not None:
+            # Recorded beside the headroom on purpose: the budget is only
+            # meaningful next to the spend, and the gap between them is the
+            # defect this reading exists to surface.
+            self._readings.record('texture_delivered', delivered)
+
         confidence = self._compositor.last_texture_confidence
         if confidence is not None:
             self._readings.record('texture_confidence', confidence)

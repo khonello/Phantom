@@ -1368,11 +1368,43 @@ saturates. Headroom was **not** the problem: it measured 5.3–6.5 here against
 the 0.78 recorded on the live clip, so the budget existed and the map could not
 spend it.
 
-**The fix is not a knob.** `_texture_reserve` gates on whether the layer will
-*run*; it needs to gate on whether the map can *deliver at the working size* —
-an upsampled donor, or one whose native face is smaller than the target's,
-should reserve proportionally less or not at all. Until that exists,
-`texture_strength` above 0 is a net loss and the default stays 0.
+**How far short, exactly.** At strength 1.0 the reserve is 0.8, so
+`_match_detail` aims at `sqrt(1 - 0.8²)` = 0.600 of the band. Measured totals
+came to 0.692 and 0.638 of the strength-0 level, so texture filled
+`sqrt(0.692² - 0.6²)` = **0.35** and **0.22** of a band it had reserved **0.80**
+of. At strength 0.5 the totals land *below* the reserved level, so it delivered
+roughly nothing. **The layer spends 0–43% of what it reserves.**
+
+**The warp is a similarity, and cannot correct proportions.**
+`canonical_from_frame` is `estimate_similarity` against `FFHQ_TEMPLATE` — 4
+degrees of freedom, so one *uniform* scale plus rotation and translation. There
+is no independent vertical and horizontal fit, on either side: the map is
+extracted from the donor and placed on the target by matching five keypoints at
+a single scale. A donor whose face is proportionally different from the target's
+therefore lands misaligned, and `shape_mismatch` measured that difference at
+**0.142 and 0.157** on these two pairings — large. Misplacement carries the
+baked-in skin mask with it, so the eye, nose and mouth exclusions land off their
+features too.
+
+That is a genuine limitation and a candidate for the shortfall, but it is not
+yet the demonstrated cause: two uncorrelated fields still *add* in quadrature,
+so misalignment alone should not reduce delivered amplitude.
+
+**`texture_delivered` is what settles it** — added 2026-09-10. `_add_texture`
+computes `amount` on the assumption that the map still carries unit deviation
+*after* the warp and inside the compositing alpha, and nothing ever checked
+that. The reading measures the field actually added, over the pixels the alpha
+commits, in the same 8-bit units as `texture_headroom`. Budget against spend:
+
+    delivered ~ headroom   the map is fine, the loss is elsewhere
+    delivered << headroom  the map is not arriving at amplitude — look at the
+                           warp, the skin mask's coverage, and where the
+                           normalisation is measured
+
+The REALISM block and `tools/identity_probe.py` both report it, and the report
+says outright when the face is softer than with texture off. Until that number
+exists on footage, `texture_strength` above 0 is a net loss and the default
+stays 0.
 
 Read `texture headroom` alongside `detail` in `tools/identity_probe.py`: a
 falling `detail_ratio` with no corresponding gain is this defect.

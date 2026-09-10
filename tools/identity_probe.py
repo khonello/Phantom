@@ -98,8 +98,8 @@ _SHAPE = ('shape_shift', 'outline_swap', 'outline_shift')
 # layer actually ran — a `texture_strength` sweep that comes back flat is
 # ambiguous without them (too weak, or declining for a reason unrelated to
 # strength), which is the exact question `detail_reserve` was added to answer.
-_TEXTURE = ('texture_headroom', 'detail_reserve', 'texture_confidence',
-            'detail_ratio')
+_TEXTURE = ('texture_headroom', 'texture_delivered', 'detail_reserve',
+            'texture_confidence', 'detail_ratio')
 
 # What each step between two stages has a knob for. Printed with the attribution
 # so a reading arrives with its remedy attached.
@@ -342,6 +342,7 @@ class Rig:
 
         for name, value in (
                 ('texture_headroom', self.compositor.last_texture_headroom),
+                ('texture_delivered', self.compositor.last_texture_delivered),
                 ('texture_confidence', self.compositor.last_texture_confidence),
                 ('detail_reserve', self.compositor.last_detail_reserve),
                 ('detail_ratio', self.compositor.last_detail_ratio)):
@@ -622,8 +623,8 @@ def main() -> int:
     # table is already eight wide.
     if any(any(k in r['readings'] for k in _TEXTURE) for r in results):
         print('\n  texture readings')
-        print('  {:<{}}  {:>9} {:>9} {:>9} {:>9}'.format(
-            '', width, 'headroom', 'reserve', 'pose', 'detail'))
+        print('  {:<{}}  {:>9} {:>9} {:>9} {:>9} {:>9}'.format(
+            '', width, 'headroom', 'delivered', 'reserve', 'pose', 'detail'))
         for result, label in zip(results, labels):
             cells = []
             for name in _TEXTURE:
@@ -631,8 +632,10 @@ def main() -> int:
                 cells.append('       —' if value is None
                              else '{:9.3f}'.format(value))
             print('  {:<{}}  {}'.format(label, width, ' '.join(cells)))
-        print('  headroom near zero means the layer had nothing to add, and '
-              'raising texture_strength will not change that.')
+        print('  headroom is the budget and delivered is the spend. Delivered '
+              'well under headroom means the map is not')
+        print('  reaching the face at the amplitude the reserve already stood '
+              'detail matching down for.')
 
     if baseline:
         print('\n  where it goes, for `{}`:'.format(labels[0]))

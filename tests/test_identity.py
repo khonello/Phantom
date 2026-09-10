@@ -1008,6 +1008,33 @@ check('and it scales with the crop rather than flattening into rounding',
       len(set(_at_default)) == len(_SIZES) and _at_default == sorted(_at_default),
       'px {}'.format(_at_default))
 
+# The budget-against-spend verdict. A layer that reserves and then under-fills
+# leaves the face softer than with texture off, and that state was previously
+# invisible: the readings carried the numbers and nothing compared them.
+_starved = Readings()
+_filled = Readings()
+for _ in range(12):
+    _starved.record('texture_headroom', 6.5)
+    _starved.record('texture_delivered', 1.4)      # 22% of budget
+    _filled.record('texture_headroom', 6.5)
+    _filled.record('texture_delivered', 5.9)       # 91% of budget
+
+_starved_text = _starved.format_report()
+check('an under-filled texture reservation says the face is softer',
+      'SOFTER than with texture off' in _starved_text
+      and 'Do not raise texture_strength' in _starved_text)
+check('and a filled one says the reservation is being filled',
+      'reservation is being filled' in _filled.format_report()
+      and 'SOFTER' not in _filled.format_report())
+
+# Neither reading alone can produce the verdict — that is the point of the pair.
+_alone = Readings()
+for _ in range(12):
+    _alone.record('texture_headroom', 6.5)
+check('headroom without delivered produces no budget verdict',
+      'budget' not in _alone.format_report())
+
+
 # The value below the floor is the one this is protecting against: it must be
 # visibly worse on that same test, or the floor is not where it is claimed.
 _below = [_erode_px(s, 0.0075) for s in _SIZES]

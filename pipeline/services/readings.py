@@ -410,6 +410,27 @@ class Readings:
                     'which is the case for adding real detail.'.format(
                         share * 100.0))
 
+        # The budget against the spend. Read together or neither means much:
+        # headroom alone says the layer had room, and only this pair says
+        # whether it used it.
+        budget = data.get('texture_headroom')
+        spend = data.get('texture_delivered')
+        if budget is not None and spend is not None and budget['p50'] > 1e-6:
+            share = spend['p50'] / budget['p50']
+            if share < 0.6:
+                notes.append(
+                    '  -> texture delivered {:.2f} of a {:.2f} budget ({:.0%}). '
+                    'The map is not reaching the face at the amplitude the '
+                    'reserve already stood detail matching down for, so the '
+                    'face is SOFTER than with texture off. Do not raise '
+                    'texture_strength — it scales both sides.'.format(
+                        spend['p50'], budget['p50'], share))
+            else:
+                notes.append(
+                    '  -> texture delivered {:.2f} of a {:.2f} budget ({:.0%}), '
+                    'so the reservation is being filled.'.format(
+                        spend['p50'], budget['p50'], share))
+
         reserve = data.get('detail_reserve')
         if reserve is not None:
             if reserve['p95'] <= 1e-6:
