@@ -38,6 +38,7 @@ from pipeline.services import shape as shape_metric
 from pipeline.services import complexion
 from pipeline.services.complexion import SourceComplexion
 from pipeline.services.skin import SkinSegmenter
+from pipeline.processing.complexion_stage import ComplexionStage
 from pipeline.services import swapper_models
 from pipeline.services.identity import IdentityProbe
 from pipeline.services.shape import ShapeProbe
@@ -472,6 +473,17 @@ class FaceCompositor:
         # gap and not a behaviour change.
         self.skin: Optional[SkinSegmenter] = None
 
+        # Route A. Grades the target frame's skin toward the source's
+        # complexion before the swap. Built here because it needs the
+        # segmenter and the reference this object already holds; called by
+        # the pipeline through `grade_skin` because it runs before `composite`.
+        self.complexion_stage: Optional[ComplexionStage] = None
+        # The frame as it arrived, kept while a graded copy is what the swap
+        # and the composite see, so the readings still measure the target's
+        # real complexion rather than the graded one.
+        self._ungraded: Optional[Frame] = None
+        self._warned_disagreement = False
+
         # Frames since the last identity measurement. Measuring is several
         # ArcFace inferences, so it runs every Nth frame rather than on all of
         # them — a distribution over a run is what the reading is for, and it
@@ -585,6 +597,11 @@ class FaceCompositor:
         if self.source_complexion is None or pasted is None:
             return
 
+        # The target's REAL complexion is the ungraded frame's. When Route A
+        # ran, `frame` is already graded and would report the gap as closed
+        # before the swap did anything.
+        original = self._ungraded if self._ungraded is not None else frame
+
         body = None
         if self.skin is not None:
             # On the target frame rather than the finished one: outside the
@@ -594,10 +611,27 @@ class FaceCompositor:
             if masks is not None:
                 body = masks.body
 
+        # Against the EFFECTIVE reference — the baseline with the photographs'
+        # undertone — when a baseline is set, since that is what the grade
+        # aimed at; against the photographs alone under `auto`.
+        reference = self.reference_complexion()
+        against = self.source_complexion
+        if reference is not None and reference.base != complexion.BASE_AUTO:
+            against = complexion.SourceComplexion(
+                lab=reference.lab,
+                photographs=self.source_complexion.photographs,
+                spread=self.source_complexion.spread)
+
         reading = complexion.measure_output(
-            frame, pasted, face, self.source_complexion, body=body)
+            original, pasted, face, against, body=body)
         if reading is not None:
             self.last_complexion.update(reading.as_readings())
+
+        stage = self.complexion_stage
+        if stage is not None and stage.last_shift is not None:
+            self.last_complexion['complexion_shift'] = stage.last_shift
+            if stage.last_gain is not None:
+                self.last_complexion['complexion_gain'] = stage.last_gain
 
     def _reshape_head(self, frame: Optional[Frame], face: Face) -> Optional[Frame]:
         """
@@ -772,6 +806,9 @@ class FaceCompositor:
         self.last_identity.clear()
         self.last_shape.clear()
         self.last_complexion.clear()
+        self._ungraded = None
+        if self.complexion_stage is not None:
+            self.complexion_stage.clear_readings()
         self.last_detail_ratio = None
         self.last_detail_reserve = None
         self.last_texture_headroom = None
@@ -789,10 +826,63 @@ class FaceCompositor:
         self._working_size = None
         if self.skin is not None:
             self.skin.reset()
+        if self.complexion_stage is not None:
+            self.complexion_stage.reset()
 
     # ------------------------------------------------------------------
     # Entry point
     # ------------------------------------------------------------------
+
+    def reference_complexion(self) -> Optional[complexion.Reference]:
+        """
+        The complexion everything here aims at: the operator's baseline with
+        the photographs' undertone, or the photographs alone under `auto`.
+        Says once, per source, when the two disagree about the person.
+        """
+        reference = complexion.resolve_reference(
+            self.source_complexion,
+            getattr(self.config, 'complexion_base', complexion.BASE_AUTO))
+        if (reference is not None and reference.disagrees
+                and not self._warned_disagreement):
+            self._warned_disagreement = True
+            emit_warning(
+                'Complexion baseline {} and the source photographs disagree by '
+                '{:.1f} LAB units - more than the {:.0f} the photographs may '
+                'pull it. The baseline wins; if the photographs are right, '
+                'pick the step that matches them.'.format(
+                    reference.base, reference.disagreement or 0.0,
+                    complexion.UNDERTONE_BOUND),
+                scope='COMPLEXION')
+        return reference
+
+    def grade_skin(self, frame: Frame, face: Face) -> Frame:
+        """
+        Route A: grade the target frame's skin toward the source's complexion.
+
+        Runs before the swap, on the frame the swapper will crop from and the
+        compositor will paste into, so the colour match downstream matches the
+        face to surroundings that already carry the source's tone. Returns the
+        frame itself when the stage is off or has nothing to do.
+
+        Args:
+            frame: The target frame as it arrived
+            face: The detection made on it
+
+        Returns:
+            The graded frame, or `frame` unchanged
+        """
+        self._ungraded = None
+        stage = self.complexion_stage
+        if stage is None or not stage.enabled():
+            return frame
+
+        reference = self.reference_complexion()
+        graded = stage.apply(
+            frame, face, None if reference is None else reference.lab)
+        if graded is not frame:
+            self._ungraded = frame
+            self.last_stage_ms['skin_grade'] = stage.last_ms
+        return graded
 
     def composite(
         self,

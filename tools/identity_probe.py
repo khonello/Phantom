@@ -73,6 +73,7 @@ from pipeline.processing import texture                           # noqa: E402
 from pipeline.processing.compositor import FaceCompositor         # noqa: E402
 from pipeline.services import complexion                          # noqa: E402
 from pipeline.services.skin import SkinSegmenter                  # noqa: E402
+from pipeline.processing.complexion_stage import ComplexionStage  # noqa: E402
 from pipeline.services.database import (                          # noqa: E402
     FaceDatabase,
     off_axis,
@@ -108,7 +109,7 @@ _TEXTURE = ('texture_headroom', 'texture_delivered', 'texture_coverage',
 # those are blind to. `complexion_gap` is the pairing rather than the
 # configuration, so it is printed once rather than per row.
 _COMPLEXION = ('complexion_face', 'complexion_target', 'complexion_lum',
-               'complexion_neck', 'complexion_seam')
+               'complexion_neck', 'complexion_seam', 'complexion_shift')
 
 # What each step between two stages has a knob for. Printed with the attribution
 # so a reading arrives with its remedy attached.
@@ -194,6 +195,8 @@ class Rig:
         self.compositor.identity = IdentityProbe(self.detector)
         self.compositor.shape = ShapeProbe(self.detector)
         self.compositor.skin = SkinSegmenter(config.skin_model)
+        self.compositor.complexion_stage = ComplexionStage(
+            config, self.compositor.skin)
         self.probe = IdentityProbe(self.detector)
         self._announced = False
 
@@ -354,6 +357,12 @@ class Rig:
         detection = self.detector.detect_one(frame)
         if detection is None:
             return None, {}
+
+        # Route A runs before the swap in the pipeline (`_swap_face`), and
+        # has to here too, or a `skin_complexion` sweep returns identical
+        # rows and reads as "the stage does nothing" — the same confident
+        # wrong answer the texture layer once gave from this rig.
+        frame = self.compositor.grade_skin(frame.copy(), detection.face)
 
         swapped = self.swapper.swap_aligned(source, detection.face, frame)
         if swapped is None:
@@ -674,8 +683,9 @@ def main() -> int:
         print('\n  complexion readings (LAB a/b units; lum is signed L)')
         if gap is not None:
             print('  source and target skin tones are {:.1f} apart'.format(gap))
-        print('  {:<{}}  {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}'.format(
-            '', width, 'to source', 'to target', 'lum', 'neck', 'seam', 'closed'))
+        print('  {:<{}}  {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}'.format(
+            '', width, 'to source', 'to target', 'lum', 'neck', 'seam',
+            'graded', 'closed'))
         for result, label in zip(results, labels):
             cells = []
             for name in _COMPLEXION:
@@ -692,7 +702,9 @@ def main() -> int:
               'rather than a contradiction.')
         print('  neck is the rest of the skin against the source; seam is the '
               'face against its own neck, which is the')
-        print('  colour step at the jaw a face-only transfer creates.')
+        print('  colour step at the jaw a face-only transfer creates. graded '
+              'is the chroma shift Route A applied to the')
+        print('  whole skin before the swap (skin_complexion), in the same units.')
 
     if baseline:
         print('\n  where it goes, for `{}`:'.format(labels[0]))

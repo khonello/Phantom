@@ -56,6 +56,7 @@ from pipeline.services.masking import FaceMasker
 from pipeline.services.identity import IdentityProbe
 from pipeline.services.shape import ShapeProbe
 from pipeline.services.skin import SkinSegmenter
+from pipeline.processing.complexion_stage import ComplexionStage
 from pipeline.services.face_tracking import LandmarkStabilizer
 from pipeline.services import guards
 from pipeline.services import identity_models
@@ -275,6 +276,8 @@ class ProcessingPipeline:
         # per frame from the face's own skin, and it runs only on the probe
         # interval until a stage asks for it every frame.
         self._compositor.skin = SkinSegmenter(self.config.skin_model)
+        self._compositor.complexion_stage = ComplexionStage(
+            self.config, self._compositor.skin)
         self._stabilizer = LandmarkStabilizer(
             alpha=self.config.alpha,
             identity_sim=self.config.guard_identity_sim,
@@ -621,6 +624,12 @@ class ProcessingPipeline:
             Callers must decide what to show instead; returning `frame` here
             would put the operator's real face on the call.
         """
+        # Route A, before the swap: the frame the swapper crops from and the
+        # compositor pastes into is the graded one, so the colour match
+        # downstream aims at skin that already carries the source's tone.
+        # Returns `frame` itself when the stage is off.
+        frame = self._compositor.grade_skin(frame, face)
+
         result = self._swapping_proc.swap_aligned(frame, face)
         if result is None:
             return self._swapping_proc.swap_pasted(frame, face)

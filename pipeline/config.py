@@ -386,6 +386,24 @@ class FaceSwapConfig:
     # needs no model file. See pipeline/services/skin.py.
     skin_model: str = 'seeded'
 
+    # Route A (RESEMBLANCE.md). `skin_complexion` grades every visible skin
+    # pixel of the TARGET frame toward the source's complexion before the
+    # swap, as the fraction of the measured gap to close — so the colour
+    # match then pulls the swapped face toward surroundings that already
+    # carry the source's tone, and the face and the neck agree because one
+    # stage graded both. Chroma shifted, lightness scaled, bounded, smoothed
+    # on its parameters. 0 is off. See pipeline/processing/complexion_stage.py.
+    skin_complexion: float = 0.0
+    # Whether that grade reaches body skin outside the corridor below the
+    # face — hands and arms. A cross-tone hand recolour is where the eye
+    # catches it; a graded neck over an ungraded wrist is the other failure.
+    skin_complexion_hands: bool = True
+    # The baseline the grade aims at: `auto` is the median of the source
+    # photographs; an `mstNN` Monk Skin Tone step is an operator-chosen anchor
+    # with the photographs supplying undertone inside a bound. A prior, not a
+    # destination. See `complexion.resolve_reference`.
+    complexion_base: str = 'auto'
+
     # Subsurface scattering, approximated. Real skin is translucent: light
     # enters, bounces around under the surface and leaves somewhere slightly
     # else, which softens the *shading* over a millimetre or two without
@@ -699,6 +717,9 @@ class FaceSwapConfig:
             'complexion_keep': self.complexion_keep,
             'source_blend': self.source_blend,
             'skin_model': self.skin_model,
+            'skin_complexion': self.skin_complexion,
+            'skin_complexion_hands': self.skin_complexion_hands,
+            'complexion_base': self.complexion_base,
             'mask_feather': self.mask_feather,
             'mask_erode': self.mask_erode,
             'mask_shape_growth': self.mask_shape_growth,

@@ -300,6 +300,16 @@ class Readings:
                 "neck: a face this far from the target's tone sits on a neck "
                 "that still has it, unless the skin stage graded both.")
 
+        shift = data.get('complexion_shift')
+        if shift is not None:
+            notes.append(
+                "     Route A graded the whole skin by {:.1f} LAB units of "
+                "chroma before the swap (p50, skin_complexion){}.".format(
+                    shift['p50'],
+                    '' if shift['p95'] < 27.5 else
+                    " - at the cap on the far frames, so part of this "
+                    "pairing's gap is out of the stage's reach"))
+
         seam = data.get('complexion_seam')
         neck = data.get('complexion_neck')
         if seam is not None:

@@ -431,7 +431,7 @@ check('.env.example documents every registered model',
 # same kind (the texture and mask keys) were found the day this check was
 # written. A key present and blank reads as "this exists and I have not set
 # it"; an absent key reads as nothing at all.
-_core_env = set(re.findall(r"_env_(?:float|int|flag|str)\('([A-Z][A-Z0-9_]*)'", core_src))
+_core_env = set(re.findall(r"_env_(?:float|int|flag|str|bool)\('([A-Z][A-Z0-9_]*)'", core_src))
 _core_env |= set(re.findall(r"os\.environ\.get\('([A-Z][A-Z0-9_]*)'", core_src))
 _core_env |= set(re.findall(r"os\.getenv\('([A-Z][A-Z0-9_]*)'", core_src))
 _unkeyed = sorted(n for n in _core_env if n not in set(_env_keys))

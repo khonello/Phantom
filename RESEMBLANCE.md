@@ -5,7 +5,7 @@ the source, target feature leakage driven down, until the output is a striking,
 unmistakable resemblance to the source.** Complexion means *all visible skin* —
 neck, ears, chest, hands — not the face alone.
 
-Status: **the core (§3) is built, 2026-09-13; every route is planned and none started.**
+Status: **the core (§3) and Route A are built, 2026-09-13, both off by default; Route A is unjudged on footage. B–E planned.**
 This is the implementation approach agreed 2026-09-13, written before the
 first line of code so the routes are judged against what they were meant to
 deliver rather than what they happened to do.
@@ -234,6 +234,27 @@ that means something else.
 **Delivers:** the source's complexion on the face *and* on every other visible
 skin pixel — neck, ears, chest, hands — with no colour step at the jaw.
 
+**Built 2026-09-13** — `pipeline/processing/complexion_stage.py`, called from
+`ProcessingPipeline._swap_face` through `FaceCompositor.grade_skin` before
+the swap, on both the live and batch paths, and mirrored in
+`tools/identity_probe.py` so a sweep measures it. Off by default
+(`SKIN_COMPLEXION=`), **never judged on footage.** On the synthetic scene
+(`tests/test_complexion_stage.py`, 44 checks): at strength 1 the face and
+the neck both land within 0.0 units of the reference chroma with a 0.0 seam,
+the neck's shading ratio to the forehead survives (0.747 → 0.750), the wall
+and the shirt are byte-identical, half strength closes half the gap, the cap
+binds at 28 units and reports it, and the readings measure `complexion_gap`
+against the *ungraded* frame (14.1 = the real gap) while `complexion_face`
+reads 0.0. ~30ms at 640×360 on a laptop CPU, dominated by the segmenter
+(~10ms) and two colour round trips; the pod prints its own, and it is
+**not yet in the latency budget's own verdict** — read `skin_grade` in
+`last_stage_ms`.
+
+What it deliberately does when the pairing is far apart: bounds the chroma
+shift at `_MAX_SHIFT` (28) and the gain at [0.5, 2.0] and says so, rather
+than producing an implausible colour. A cross-ethnicity pairing will hit the
+cap; that is the reading to look at first on the C1/C2 fixtures.
+
 **Why upstream, and why all the skin.** A face-only complexion transfer is
 self-defeating: the jaw becomes a colour step, which is the exact seam
 `_match_color` exists to prevent and the reason it matches the face *to* the
@@ -281,6 +302,16 @@ as good as the set. So Route A grades toward an anchor built in two parts:
 
 It does nothing until Route A exists: it is the anchor Route A grades toward,
 not a stage of its own.
+
+**Built 2026-09-13**, pipeline side: `complexion_base` / `COMPLEXION_BASE=`,
+`complexion.MST_SRGB` (the ten published swatches, converted once into the
+8-bit LAB used everywhere here), `resolve_reference` (undertone from the
+photographs inside `UNDERTONE_BOUND` = 6 a/b units, the baseline's L),
+and a warning, once per source, when the photographs and the baseline
+disagree past the bound. Note the published scale is not strictly monotone
+in L — step 2 → 3 is a hue step — so it is a *tone* scale, not a brightness
+ladder. **The desktop dropdown is not built yet**; the key is reachable
+through `set_realism` and `tools/realism.py`.
 
 **Design constraints, from the literature and from this codebase's own rules:**
 
@@ -442,7 +473,7 @@ D and E whenever there is a pod hour.**
 
 | Route | Key | Off | Lives on |
 |---|---|---|---|
-| A | `COMPLEXION_BASE=` (baseline, blank is `auto`), `SKIN_COMPLEXION=` (+ `SKIN_COMPLEXION_HANDS=`) | blank | main, behind the flag |
+| A | `COMPLEXION_BASE=` (baseline, blank is `auto`), `SKIN_COMPLEXION=` (+ `SKIN_COMPLEXION_HANDS=`) | blank | **main, built, off** |
 | B | `ENHANCER_MODEL=` | default model | main, registry entry |
 | C | `REENACT=` | blank | long-lived branch |
 | D | `IDENTITY_MODEL=` | blank | long-lived branch; output consumed on main |

@@ -34,6 +34,7 @@ from pipeline.services import swapper_models
 from pipeline.services import enhancer_models
 from pipeline.services import database
 from pipeline.services import skin
+from pipeline.services import complexion
 
 warnings.filterwarnings('ignore', category=FutureWarning, module='insightface')
 warnings.filterwarnings('ignore', category=UserWarning, module='torchvision')
@@ -207,6 +208,20 @@ def parse_args() -> None:
                              '(seeded needs no model file)',
                         dest='skin_model', choices=skin.names(),
                         default=os.environ.get('SKIN_MODEL') or None)
+    program.add_argument('--skin-complexion',
+                        help='grade all visible skin toward the source complexion before the '
+                             'swap, as the fraction of the gap to close (0-1, 0 is off)',
+                        dest='skin_complexion', type=float,
+                        default=_env_float('SKIN_COMPLEXION'))
+    program.add_argument('--no-skin-complexion-hands',
+                        help='keep that grade off hands and arms',
+                        dest='skin_complexion_hands', action='store_false',
+                        default=_env_bool('SKIN_COMPLEXION_HANDS'))
+    program.add_argument('--complexion-base',
+                        help='baseline the grade aims at: auto (the photographs) or a Monk '
+                             'Skin Tone step mst01-mst10',
+                        dest='complexion_base', choices=list(complexion.BASES),
+                        default=os.environ.get('COMPLEXION_BASE') or None)
     program.add_argument('--identity-probe',
                         help='measure source-to-output identity every Nth frame (0 disables); '
                              'reports as id_* in the REALISM block',
@@ -317,6 +332,9 @@ def parse_args() -> None:
         ('complexion_keep', args.complexion_keep),
         ('source_blend', args.source_blend),
         ('skin_model', args.skin_model),
+        ('skin_complexion', args.skin_complexion),
+        ('skin_complexion_hands', args.skin_complexion_hands),
+        ('complexion_base', args.complexion_base),
         ('texture_strength', args.texture_strength),
         ('texture_band', args.texture_band),
         ('texture_relief', args.texture_relief),

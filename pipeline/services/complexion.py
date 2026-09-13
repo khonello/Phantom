@@ -132,6 +132,101 @@ class ComplexionReading:
         return out
 
 
+# The Monk Skin Tone scale — ten steps, published as sRGB by Google's Skin
+# Tone Research (skintone.google), CC-BY. Chosen over Fitzpatrick because it
+# was designed for camera and image work and resolves dark tones where
+# Fitzpatrick collapses above type IV. Stored as hex and converted once into
+# the 8-bit LAB convention every other number here uses.
+MST_SRGB: Dict[str, str] = {
+    'mst01': 'f6ede4', 'mst02': 'f3e7db', 'mst03': 'f7ead0', 'mst04': 'eadaba',
+    'mst05': 'd7bd96', 'mst06': 'a07e56', 'mst07': '825c43', 'mst08': '604134',
+    'mst09': '3a312a', 'mst10': '292420',
+}
+
+BASE_AUTO = 'auto'
+BASES: Tuple[str, ...] = (BASE_AUTO,) + tuple(MST_SRGB)
+
+# How far the photographs may pull the baseline toward their own undertone, in
+# a/b units. Inside it the photographs are trusted for the fine tone; past it
+# the two references disagree about the person, and the dropdown wins.
+UNDERTONE_BOUND = 6.0
+
+
+def base_lab(base: str) -> Optional[np.ndarray]:
+    """The LAB triple for a baseline name, or None for `auto` and unknowns."""
+    hexcode = MST_SRGB.get((base or '').strip().lower())
+    if hexcode is None:
+        return None
+    r, g, b = (int(hexcode[i:i + 2], 16) for i in (0, 2, 4))
+    pixel = np.array([[[b, g, r]]], dtype=np.uint8)
+    return cv2.cvtColor(pixel, cv2.COLOR_BGR2LAB)[0, 0].astype(np.float64)
+
+
+@dataclass(frozen=True)
+class Reference:
+    """
+    The complexion a frame is graded toward, and where it came from.
+
+    Attributes:
+        lab: The effective (L, a, b)
+        base: The baseline name, `auto` when the photographs alone decided
+        disagreement: Chroma distance between the baseline and the
+            photographs, when both exist. Past `UNDERTONE_BOUND` the dropdown
+            and the uploads disagree about the person — one of them is wrong,
+            and the operator should hear so before a session
+    """
+
+    lab: np.ndarray
+    base: str
+    disagreement: Optional[float]
+
+    @property
+    def disagrees(self) -> bool:
+        """Whether the baseline and the photographs conflict."""
+        return self.disagreement is not None and self.disagreement > UNDERTONE_BOUND
+
+
+def resolve_reference(
+    source: Optional[SourceComplexion], base: Optional[str],
+) -> Optional[Reference]:
+    """
+    Combine the operator's baseline with the photographs' measured tone.
+
+        dropdown  ->  baseline L, a, b and a bound      coarse, stable
+        photos    ->  undertone offset within the bound  fine, measured
+        past the bound  ->  the dropdown wins, and says so
+
+    A prior rather than a destination: undertone — warm, cool, olive — lives
+    inside a scale step, and snapping to the step would erase the thing that
+    makes a complexion someone's. `auto` is the photographs alone, which is
+    the behaviour that existed before the baseline did.
+
+    Args:
+        source: The measured reference, if any photographs yielded skin
+        base: `auto`, or an `MST_SRGB` key
+
+    Returns:
+        The effective reference, or None when neither exists
+    """
+    anchor = base_lab(base or BASE_AUTO)
+    if anchor is None:
+        if source is None:
+            return None
+        return Reference(lab=source.lab.copy(), base=BASE_AUTO, disagreement=None)
+
+    name = (base or '').strip().lower()
+    if source is None:
+        return Reference(lab=anchor, base=name, disagreement=None)
+
+    offset = source.lab[1:] - anchor[1:]
+    distance = float(np.hypot(offset[0], offset[1]))
+    if distance > UNDERTONE_BOUND:
+        offset = offset * (UNDERTONE_BOUND / distance)
+    effective = anchor.copy()
+    effective[1:] += offset
+    return Reference(lab=effective, base=name, disagreement=distance)
+
+
 def skin_lab(image: Frame, face: Face, size: int = MEASURE_SIZE) -> Optional[np.ndarray]:
     """
     Median LAB of the skin in one image, for one detected face.

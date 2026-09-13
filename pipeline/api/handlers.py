@@ -40,6 +40,7 @@ from pipeline.services import enhancer_models
 from pipeline.services import face_swapping
 from pipeline.services import database
 from pipeline.services import skin
+from pipeline.services import complexion
 from pipeline.services import onnx_session
 from pipeline.services.database import SourceReview
 from pipeline.services.templates import TemplateLibrary
@@ -605,6 +606,9 @@ def handle_get_stats(
             'complexion_keep': config.complexion_keep,
             'source_blend': config.source_blend,
             'skin_model': config.skin_model,
+            'skin_complexion': config.skin_complexion,
+            'skin_complexion_hands': config.skin_complexion_hands,
+            'complexion_base': config.complexion_base,
             # A shape-aware model whose contour is being clipped back off is
             # the configuration this whole section exists to make visible.
             'shape_growth_useful': swapper_models.resolve(
@@ -976,6 +980,13 @@ _REALISM_FIELDS: Dict[str, Any] = {
     # is refused here rather than silently resolved to the default.
     'skin_model': (
         lambda v: str(v) if skin.resolve(str(v)).key == str(v) else None),
+    # Route A. The grade is a fraction of the measured gap, so 1.0 is the
+    # source's complexion and there is nothing past it.
+    'skin_complexion': lambda v: min(1.0, max(0.0, float(v))),
+    'skin_complexion_hands': lambda v: bool(v),
+    'complexion_base': (
+        lambda v: str(v).strip().lower()
+        if str(v).strip().lower() in complexion.BASES else None),
     # The two seam levers. Clamped well short of absurd: a feather a quarter of
     # the face wide is not a seam fix, it is a dissolve.
     'mask_feather': lambda v: min(0.25, max(0.0, float(v))),
