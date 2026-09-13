@@ -424,6 +424,47 @@ check('.env.example documents every registered model',
       all(name in read('.env.example') for name in swapper_models.names()),
       str([n for n in swapper_models.names() if n not in read('.env.example')]))
 
+# Every variable the pipeline reads is a KEY in the example, not merely a
+# mention. DIFFUSE_STRENGTH was read by core.py, forwarded by the orchestrator
+# and named in neither env file — a lever that existed in the code, was
+# documented, and did nothing on the one box anybody uses. Six more of the
+# same kind (the texture and mask keys) were found the day this check was
+# written. A key present and blank reads as "this exists and I have not set
+# it"; an absent key reads as nothing at all.
+_core_env = set(re.findall(r"_env_(?:float|int|flag|str)\('([A-Z][A-Z0-9_]*)'", core_src))
+_core_env |= set(re.findall(r"os\.environ\.get\('([A-Z][A-Z0-9_]*)'", core_src))
+_core_env |= set(re.findall(r"os\.getenv\('([A-Z][A-Z0-9_]*)'", core_src))
+_unkeyed = sorted(n for n in _core_env if n not in set(_env_keys))
+check('.env.example has a key for every variable core.py reads',
+      not _unkeyed, 'read by core.py, no key in .env.example: {}'.format(_unkeyed))
+check('core.py reads a plausible number of variables', len(_core_env) >= 25,
+      '{} found'.format(len(_core_env)))
+
+# And every forwarded realism key is one core.py actually reads — a name in
+# `_FORWARDED_ENV` that nothing consumes would travel to the pod and vanish.
+_forwarded = set(re.findall(r'"([A-Z][A-Z0-9_]*)"',
+                            orch_src[orch_src.find('_FORWARDED_ENV'):
+                                     orch_src.find(')', orch_src.find('_FORWARDED_ENV'))]))
+_pipeline_src = ''.join(
+    open(_os.path.join(_root, _name), encoding='utf-8').read()
+    for _root, _, _files in _os.walk(_os.path.join(_REPO_ROOT, 'pipeline'))
+    for _name in _files if _name.endswith('.py'))
+_orphans = sorted(n for n in _forwarded if n not in _pipeline_src)
+check('every forwarded env key is read somewhere in the pipeline', not _orphans,
+      'forwarded but read by nothing: {}'.format(_orphans))
+
+# ── The cross-tone fixture pair exists ──────────────────────────────────
+# RESEMBLANCE.md §3.3 / docs/REALISM_TESTING.md Pass C. The pair every route
+# is judged on first; a route measured only on the two closest complexions
+# in the fixtures has not been tested.
+for _fixture in ('source/two/IMG_3623.jpg', 'target/face-3.jpeg', 'target/face-6.mp4',
+                 'target/face-1.jpeg', 'target/face-5.jpeg'):
+    check('cross-tone fixture is tracked: {}'.format(_fixture),
+          _os.path.isfile(_os.path.join(_REPO_ROOT, *_fixture.split('/'))))
+check('the fair source set has its six photographs',
+      len([n for n in _os.listdir(_os.path.join(_REPO_ROOT, 'source', 'two'))
+           if n.lower().endswith(('.jpg', '.jpeg', '.png'))]) >= 6)
+
 # ── Order of application ───────────────────────────────────────────────
 print('\nPreset then profile, in that order')
 

@@ -5,7 +5,7 @@ the source, target feature leakage driven down, until the output is a striking,
 unmistakable resemblance to the source.** Complexion means *all visible skin* —
 neck, ears, chest, hands — not the face alone.
 
-Status: **core §3.1 and §3.2 built (2026-09-13); §3.3, §3.4 and every route planned.**
+Status: **the core (§3) is built, 2026-09-13; every route is planned and none started.**
 This is the implementation approach agreed 2026-09-13, written before the
 first line of code so the routes are judged against what they were meant to
 deliver rather than what they happened to do.
@@ -176,6 +176,17 @@ difference, tracked with the other fixtures, so every route is judged on the
 hard case first. The CASIA benchmark's cross-ethnicity protocol is the right
 *shape* of test; this is our single-pair version of it.
 
+**Pinned 2026-09-13, in both directions** — docs/REALISM_TESTING.md Pass C.
+The tracked fixtures hold three people and every earlier measurement paired
+the two closest complexions. **C1 fair → dark:** `source/two/*` onto
+`target/face-3.jpeg` (still) and `target/face-6.mp4` (stream). **C2 dark →
+fair:** `target/face-1..5.jpeg` onto `source/two/IMG_3623.jpg`, the still
+every earlier `id_*` and `shape_*` number was taken on. Chosen by eye —
+no detector runs on the development machine — so `complexion_gap` and
+`shape_mismatch` for both are **unmeasured**; the first probe run prints
+them, and they belong here when they exist. `tests/test_wiring.py` pins that
+the files are tracked.
+
 ### 3.4 Keys, forwarding and tests
 
 Every flag in §4 declared in `FaceSwapConfig`, read by `core.py`, forwarded by
@@ -183,6 +194,14 @@ the orchestrator, documented in `.env.example`, settable through `set_realism`
 and reported by `tools/stats.py`. `tests/test_wiring.py` extended so a key that
 exists in the code and not in the env file fails, which is the gap
 `DIFFUSE_STRENGTH` fell through.
+
+**Built 2026-09-13.** The check found **six more** of the same kind the day it
+was written — `TEXTURE_STRENGTH/BAND/RELIEF/CONTRAST`, `MASK_FEATHER`,
+`MASK_ERODE` — read by `core.py`, forwarded, and a key in neither env file.
+All six now exist blank in both. A second check catches the reverse: a name in
+`_FORWARDED_ENV` that nothing in `pipeline/` reads. And the two env files were
+brought back into the same key order, which they had drifted out of by one
+block. Route keys are added as each route lands.
 
 ### 3.5 Core deliverables — the checklist for main
 
@@ -192,8 +211,8 @@ Done means merged to main, tested, defaults unchanged, and the pod prints it.
 |---|---|---|---|
 | 1 | `complexion_gap/face/target/lum/neck/seam` | `pipeline/services/complexion.py`, `FaceCompositor._measure_complexion` | **Done 2026-09-13.** In the REALISM block on stream stop **and** batch finish, on the `identity_probe=N` interval; `tools/identity_probe.py` prints them per configuration with `closed`, `neck`, `seam` columns |
 | 2 | `SkinSegmenter` service with a model registry | `pipeline/services/skin.py` | **Seeded backend done 2026-09-13**; `mediapipe_multiclass` registered, not built. Selected by `SKIN_MODEL=`; feathered, parameter-smoothed; eyes, nostrils, mouth excluded. Still to do: the parsing backend, and `skin` as a line in the latency budget once a stage runs it every frame |
-| 3 | Cross-tone fixture pair | `tests/fixtures/` beside the existing source and target fixtures | one source set and one target chosen for maximum complexion **and** `shape_mismatch`; named in `docs/REALISM_TESTING.md` as the first pair every route runs on |
-| 4 | Keys and wiring | `pipeline/config.py`, `pipeline/core.py`, `vast/orchestrator.py::_FORWARDED_ENV`, `.env.example`, every local `.env`, `pipeline/api/handlers.py` (`set_realism` clamps), `tools/stats.py` | every key in §6 exists blank in both env files; `tests/test_wiring.py` fails on any key `core.py` reads that `.env.example` does not name |
+| 3 | Cross-tone fixture pair | `source/two/*` ↔ `target/*`, both directions | **Done 2026-09-13**, provisional: chosen by eye, `complexion_gap` and `shape_mismatch` unmeasured until the first probe run. docs/REALISM_TESTING.md Pass C |
+| 4 | Keys and wiring | `pipeline/config.py`, `pipeline/core.py`, `vast/orchestrator.py::_FORWARDED_ENV`, `.env.example`, every local `.env`, `pipeline/api/handlers.py` (`set_realism` clamps), `tools/stats.py` | **Done 2026-09-13.** `tests/test_wiring.py` fails on any key `core.py` reads that `.env.example` does not name, and on any forwarded key nothing reads; six missing keys found and added. Route keys land with their routes |
 | 5 | The skin mask reaches the layers that want it | `FaceCompositor._add_texture`, `reshape.py`, `_match_color` | each takes the mask when present and behaves bit-identically without it — a capability gap must not become a behaviour change |
 | 6 | Documentation | this file, CLAUDE.md pointer, `docs/PENDING_WORK.md` | the runbook's next pod session lists the flag matrix from §2 with the commands |
 

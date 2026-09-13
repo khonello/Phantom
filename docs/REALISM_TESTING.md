@@ -138,6 +138,60 @@ of what they can see; records the disagreement.
 
 ---
 
+## Pass C — resemblance (RESEMBLANCE.md)
+
+### The question
+
+*Does the output carry the source's complexion, texture and shape — and at
+what cost to the seam?*
+
+### The cross-tone pair
+
+Pass B's third precondition — *a source reasonably matched to the target in
+complexion* — is **inverted here on purpose.** Every measurement so far paired
+`source/one` with `source/two`, the two closest complexions in the fixtures;
+a route that only works on that pair has not been tested. The tracked
+fixtures hold three people, and the pair with the largest complexion gap is
+pinned as the first pair every route in RESEMBLANCE.md runs on, **in both
+directions**, because fair-onto-dark and dark-onto-fair fail differently:
+luminance has to come down in one and up in the other, and a chroma-only
+transfer lands on the wrong brightness in the right hue in both.
+
+| Pair | Source set | Target | Exercises |
+|---|---|---|---|
+| **C1 fair → dark** | `source/two/*` (six photographs) | `target/face-3.jpeg` (still), `target/face-6.mp4` (stream) | L down, chroma toward warm-neutral; the neck and hands are in shot on the video |
+| **C2 dark → fair** | `target/face-1..5.jpeg` (five photographs) | `source/two/IMG_3623.jpg` | L up; and the still every earlier measurement used, so `id_*` and `shape_*` stay comparable |
+
+**Chosen by eye, 2026-09-13, and provisional.** No detector runs on the
+development machine, so `complexion_gap` and `shape_mismatch` for these pairs
+are unmeasured. The first probe run prints both:
+
+```bash
+python tools/identity_probe.py -s source/two -t target/face-3.jpeg --save-frames c1/
+python tools/identity_probe.py -s target/face-1.jpeg target/face-2.jpeg target/face-3.jpeg target/face-4.jpeg target/face-5.jpeg -t source/two/IMG_3623.jpg --save-frames c2/
+```
+
+Record the two `complexion_gap` values and the two `shape_mismatch` values in
+RESEMBLANCE.md §3.3 when they exist. If a different pairing in the fixtures
+measures larger on either, swap it in — the point is the hardest case, not
+these files.
+
+### The readings that decide it
+
+`complexion_face` toward zero and `complexion_seam` held under 4 — the
+second is the one Route A exists for, and a route that wins the first while
+losing the second has moved the seam, not removed it. `id_target` falling.
+`detail_ratio` and `texture_delivered` as in Pass B. `id_out` with the caveat
+RESEMBLANCE.md §3.1 gives: ArcFace carries a little skin tone, so it rises when
+complexion transfers and cannot say that is why.
+
+### Roles
+
+As Pass B. The operator's verdict on *resemblance* outranks every number
+above; the numbers say which stage to look at.
+
+---
+
 ## What Pass A established, 2026-09-04
 
 RunPod 4090, `hyperswap_1a_256` + `gpen_bfr_256`, aligned pinned 256/256,
