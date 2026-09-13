@@ -202,6 +202,44 @@ now-source-toned surroundings. The seam logic is untouched, the face and the
 neck agree because one stage graded both, and `complexion_keep` becomes
 unnecessary.
 
+**The baseline comes first, and it is a dropdown (proposed 2026-09-13).** The
+measured reference has one weakness the docs already name: uploaded
+photographs carry their own white balance, and the median across them is only
+as good as the set. So Route A grades toward an anchor built in two parts:
+
+    dropdown  ->  baseline L, a, b and a bound      coarse, stable, operator-chosen
+    photos    ->  undertone offset within the bound  fine, measured, `spread` as its error bar
+    disagreement past the bound  ->  tell the operator, trust the dropdown
+
+- **`complexion_base`** on `FaceSwapConfig`: `auto` | `mst01` … `mst10`.
+  `COMPLEXION_BASE=` in every env file, blank is `auto`; reachable through
+  `set_realism`; a dropdown in the sidebar under QUALITY beside the restoration
+  preset, and justified the way that one is — a named step an operator
+  understands, and a support question has an answer.
+- **`auto` is the default and means "measured from the photographs"** — the
+  behaviour that exists today. The same pattern as the restoration preset: a
+  named scale with an `auto` that lets the pipeline decide, and no silent
+  override of a choice the operator made.
+- **A prior, not a destination.** Undertone — warm, cool, olive, neutral —
+  lives *inside* a scale step, and snapping to the step would erase the thing
+  that makes a complexion someone's. The photographs supply it, bounded.
+- **Monk Skin Tone, ten steps, not Fitzpatrick.** MST was designed for camera
+  and image work, resolves dark tones where Fitzpatrick collapses above type
+  IV, and publishes reference sRGB values that convert to the LAB units this
+  pipeline already uses.
+- **It supplies luminance as well as chroma.** A scale step is an L anchor with
+  a known relationship to a/b; a photo median's L is mostly that photograph's
+  lighting. This is what lets the large-gap case below move L honestly.
+- **It validates the photographs.** Pick tone 4, measure tone 7, and one of
+  them is wrong — the operator is told before the session rather than on a
+  call. That guard cannot exist without a second, independent reference.
+- **The reading reports both.** `complexion_face` is measured against the
+  effective reference (baseline plus undertone) *and* against the raw photo
+  median, so a disagreement is a number rather than a surprise.
+
+It does nothing until Route A exists: it is the anchor Route A grades toward,
+not a stage of its own.
+
 **Design constraints, from the literature and from this codebase's own rules:**
 
 - **Transfer chroma, preserve luminance.** Shading and light direction live
@@ -225,7 +263,8 @@ unnecessary.
 
 **Depends on:** core §3.1 (or it cannot be judged), §3.2 (or it has no neck).
 
-**Switch:** `SKIN_COMPLEXION=` (0–1, fraction of the measured complexion gap
+**Switch:** `COMPLEXION_BASE=` (the baseline; blank is `auto`) and
+`SKIN_COMPLEXION=` (0–1, fraction of the measured complexion gap
 to close; blank is off). `SKIN_COMPLEXION_HANDS=` as above.
 
 **Cost:** one segmentation pass and one LAB transfer per frame. Expected
@@ -361,7 +400,7 @@ D and E whenever there is a pod hour.**
 
 | Route | Key | Off | Lives on |
 |---|---|---|---|
-| A | `SKIN_COMPLEXION=` (+ `SKIN_COMPLEXION_HANDS=`) | blank | main, behind the flag |
+| A | `COMPLEXION_BASE=` (baseline, blank is `auto`), `SKIN_COMPLEXION=` (+ `SKIN_COMPLEXION_HANDS=`) | blank | main, behind the flag |
 | B | `ENHANCER_MODEL=` | default model | main, registry entry |
 | C | `REENACT=` | blank | long-lived branch |
 | D | `IDENTITY_MODEL=` | blank | long-lived branch; output consumed on main |
