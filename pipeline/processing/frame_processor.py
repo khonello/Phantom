@@ -36,6 +36,8 @@ from pipeline.services.database import FaceDatabase, SourceReview
 from pipeline.services import templates
 from pipeline.processing import texture
 from pipeline.processing.texture import SourceTexture
+from pipeline.services import complexion
+from pipeline.services.complexion import SourceComplexion
 from pipeline.logging import emit_status, emit_warning
 
 
@@ -182,6 +184,10 @@ class SwappingProcessor(FrameProcessor):
         # texture layer. Built here rather than there because it is a property
         # of the source photographs, which the compositor never sees.
         self.source_texture: Optional[SourceTexture] = None
+        # The source's skin colour, for the complexion reading. Every accepted
+        # photograph rather than one, because the reference is a colour and
+        # the median across uploads is what survives their white balance.
+        self.source_complexion: Optional[SourceComplexion] = None
 
         # Said once, when a trained model is named and its weights are not
         # on disk. Not per frame: that is a configuration mistake, and one
@@ -230,6 +236,7 @@ class SwappingProcessor(FrameProcessor):
                 return False
 
             self._load_texture(review.accepted)
+            self._load_complexion(review.accepted)
             self._attach_source_image(review.accepted)
 
             emit_status(
@@ -345,6 +352,40 @@ class SwappingProcessor(FrameProcessor):
             + (' - upsampled, so the band is thinner than it looks'
                if self.source_texture.upsampled else ''),
             scope='TEXTURE',
+        )
+
+    def _load_complexion(self, accepted: List[str]) -> None:
+        """
+        Measure the source's skin colour across the accepted photographs.
+
+        Off the live path, once per source, like texture — and unlike texture
+        it uses every photograph, because a colour averages where a pore map
+        does not. Silent when nothing can be measured: the reading is absent
+        rather than wrong, and the swap is unaffected either way.
+
+        Args:
+            accepted: Source paths that passed the guards
+        """
+        self.source_complexion = None
+
+        pairs = []
+        for path in accepted:
+            face = self.database.face_for(path)
+            if face is not None:
+                pairs.append((path, face))
+        if not pairs:
+            return
+
+        self.source_complexion = complexion.measure_source(pairs)
+        if self.source_complexion is None:
+            return
+
+        lab = self.source_complexion.lab
+        emit_status(
+            f'Complexion reference: L {lab[0]:.0f} a {lab[1]:.0f} b {lab[2]:.0f} '
+            f'over {self.source_complexion.photographs} photograph(s), '
+            f'spread {self.source_complexion.spread:.1f}',
+            scope='COMPLEXION',
         )
 
     def process(self, frame: Frame) -> Frame:

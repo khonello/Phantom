@@ -36,6 +36,15 @@ ArcFace is trained to be invariant to most of the geometry it describes, so the
 two can disagree completely and a good cosine does not cover head shape. See
 pipeline/services/shape.py.
 
+**`complexion_gap` / `complexion_face` / `complexion_target` / `complexion_lum`**
+— whether the output carries the source's skin colour or the target's, in the
+a/b plane of 8-bit LAB. The second axis the cosine is blind to: `_match_color`
+moves the face onto the target's tone by design and nothing could price it.
+`gap` is the pairing (source against target, no setting moves it); `face` is
+what to drive down; `target` rising is the swap taking. `lum` is reported apart
+and signed, because lightness is mostly lighting and lighting is the target's
+to keep. See pipeline/services/complexion.py.
+
 **`detail_reserve`** — the share of that budget `_match_detail` now holds back so
 the texture layer has something to fill. This is the reading that says whether
 the fix is engaged on a given clip, and it is the first thing to check when
@@ -237,6 +246,67 @@ class Readings:
                     '     target similarity {:.3f}, source {:.3f}. The gap is '
                     'the swap actually working.'.format(
                         target['p50'], out['p50']))
+
+        return notes
+
+    @staticmethod
+    def _complexion_verdicts(data: Dict[str, Any]) -> List[str]:
+        """
+        Say whose skin colour the output has.
+
+        Reported as a fraction of the pairing's own gap rather than as an
+        absolute, for the reason the shape verdict is: a distance of 4 LAB
+        units means nothing until you know whether the two people were 5
+        apart or 40. And apart from the identity verdict on purpose — ArcFace
+        carries a little skin tone, so `id_out` rises when complexion transfers
+        but cannot say that is why it rose.
+        """
+        notes: List[str] = []
+
+        gap = data.get('complexion_gap')
+        face = data.get('complexion_face')
+        if gap is None or face is None:
+            return notes
+
+        if gap['p50'] < 3.0:
+            notes.append(
+                '  -> source and target complexions already agree ({:.1f} '
+                'LAB units apart). Nothing here can transfer what is not '
+                'different; read complexion_face as noise on this pair.'.format(
+                    gap['p50']))
+            return notes
+
+        target = data.get('complexion_target')
+        closed = 1.0 - face['p50'] / gap['p50']
+        against = ('' if target is None
+                   else ' and {:.1f} from the target'.format(target['p50']))
+        notes.append(
+            "  -> source and target skin tones differ by {:.1f} LAB units. "
+            "The output sits {:.1f} from the source{}, so it carries "
+            "{:+.0%} of the way from the target's complexion to the "
+            "source's.".format(gap['p50'], face['p50'], against, closed))
+
+        if closed < 0.15:
+            notes.append(
+                "     the face has the TARGET's complexion. That is "
+                "_match_color doing its job; the levers are complexion_keep "
+                "(chroma, bounded) and the whole-skin stage in "
+                "RESEMBLANCE.md Route A, which is the only one that can move "
+                "this without a colour step at the jaw.")
+        elif closed > 0.85:
+            notes.append(
+                "     the face has the SOURCE's complexion. Now read the "
+                "neck: a face this far from the target's tone sits on a neck "
+                "that still has it, unless the skin stage graded both.")
+
+        lum = data.get('complexion_lum')
+        if lum is not None and abs(lum['p50']) > 12.0:
+            notes.append(
+                "     lightness is {:+.0f} units off the source photographs "
+                "(p50). Mostly lighting, and the target's lighting is "
+                "correct to keep — but past ~20 units a complexion transfer "
+                "in chroma alone lands on the wrong brightness in the right "
+                "hue.".format(lum['p50']))
 
         return notes
 
@@ -496,6 +566,7 @@ class Readings:
 
         notes.extend(Readings._identity_verdicts(data))
         notes.extend(Readings._shape_verdicts(data))
+        notes.extend(Readings._complexion_verdicts(data))
 
         headroom = data.get('texture_headroom')
         if headroom is not None:

@@ -1135,6 +1135,7 @@ check('keeping the asymmetry is a no-op at 1.0',
 _comp = FaceCompositor(FaceSwapConfig(), MagicMock(), MagicMock())
 _comp.last_identity['id_out'] = 0.8
 _comp.last_shape['outline_shift'] = 0.4
+_comp.last_complexion['complexion_face'] = 6.0
 _comp.last_texture_headroom = 5.0
 _comp.reset()
 check('reset() deliberately does NOT drop the readings',
@@ -1144,6 +1145,7 @@ check('reset() deliberately does NOT drop the readings',
 _comp.clear_readings()
 check('but clear_readings() drops every one of them',
       not _comp.last_identity and not _comp.last_shape
+      and not _comp.last_complexion
       and _comp.last_texture_headroom is None)
 
 

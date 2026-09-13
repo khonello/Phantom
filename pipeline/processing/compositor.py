@@ -35,6 +35,8 @@ from pipeline.services.masking import FaceMasker
 from pipeline.services import guards
 from pipeline.services import identity
 from pipeline.services import shape as shape_metric
+from pipeline.services import complexion
+from pipeline.services.complexion import SourceComplexion
 from pipeline.services import swapper_models
 from pipeline.services.identity import IdentityProbe
 from pipeline.services.shape import ShapeProbe
@@ -455,6 +457,14 @@ class FaceCompositor:
         # Shape readings from the last measured frame. Same ownership rule.
         self.last_shape: Dict[str, float] = {}
 
+        # The source's skin colour, from every accepted photograph, and the
+        # complexion readings from the last measured frame. The third axis
+        # beside identity and shape, measured on the same interval because
+        # the cosine cannot see it and the colour match spends it — see
+        # pipeline/services/complexion.py.
+        self.source_complexion: Optional[SourceComplexion] = None
+        self.last_complexion: Dict[str, float] = {}
+
         # Frames since the last identity measurement. Measuring is several
         # ArcFace inferences, so it runs every Nth frame rather than on all of
         # them — a distribution over a run is what the reading is for, and it
@@ -546,6 +556,32 @@ class FaceCompositor:
             getattr(face, 'normed_embedding', None), embedding)
         if against is not None:
             self.last_identity['id_target'] = against
+
+    def _measure_complexion(
+        self, frame: Frame, pasted: Optional[Frame], face: Face,
+    ) -> None:
+        """
+        Record the finished face's skin colour against the source and target.
+
+        The reading the identity cosine cannot give. `_match_color` moves the
+        face onto the target's complexion by design, and `complexion_keep`
+        withholds a bounded part of that; neither could be judged, because
+        ArcFace is nearly blind to skin tone. This says, in LAB units, how far
+        the output's skin sits from the source's and from the target's — and
+        how far apart those two were to begin with, which is the denominator.
+
+        Args:
+            frame: The target frame before the swap
+            pasted: The finished frame
+            face: The target detection, whose landmarks bound the skin in both
+        """
+        if self.source_complexion is None or pasted is None:
+            return
+
+        reading = complexion.measure_output(
+            frame, pasted, face, self.source_complexion)
+        if reading is not None:
+            self.last_complexion.update(reading.as_readings())
 
     def _reshape_head(self, frame: Optional[Frame], face: Face) -> Optional[Frame]:
         """
@@ -719,6 +755,7 @@ class FaceCompositor:
         self.last_stage_ms.clear()
         self.last_identity.clear()
         self.last_shape.clear()
+        self.last_complexion.clear()
         self.last_detail_ratio = None
         self.last_detail_reserve = None
         self.last_texture_headroom = None
@@ -930,6 +967,10 @@ class FaceCompositor:
             # can take the source's outline away, so shape has to be read after
             # it rather than on the aligned crop.
             self._measure_shape(pasted, face)
+            # And the other axis it is blind to. Read here, after the paste,
+            # because the frame-space feather is the last thing that mixes
+            # target skin back into the face.
+            self._measure_complexion(frame, pasted, face)
 
         return pasted
 

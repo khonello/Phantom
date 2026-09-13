@@ -311,6 +311,10 @@ class ProcessingPipeline:
             # average the way identity does.
             self._compositor.source_shape = getattr(
                 source, 'source_landmarks', None)
+            # The skin colour every `complexion_*` reading is measured against.
+            self._compositor.source_complexion = (
+                self._swapping_proc.source_complexion if loaded else None
+            )
             # A new identity is a new chance to say the layer has nothing to
             # work with. Without this, only the first failing source is ever
             # reported and the second looks like a working layer set too low.
@@ -1097,6 +1101,9 @@ class ProcessingPipeline:
             self._readings.record(name, score)
 
         for name, value in self._compositor.last_shape.items():
+            self._readings.record(name, value)
+
+        for name, value in self._compositor.last_complexion.items():
             self._readings.record(name, value)
 
     @staticmethod

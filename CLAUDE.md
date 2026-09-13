@@ -3060,6 +3060,7 @@ back to the other backend or off — rather than failing.
 - `pipeline/services/guards.py`: Source and runtime input guards, threshold validation
 - `pipeline/services/readings.py`: `Readings` — per-frame realism scalars, reported as distributions when a stream stops or a batch job finishes
 - `pipeline/services/identity.py`: `IdentityProbe` — ArcFace similarity between the source and the output, measured per compositing stage. Shares the detector's own recognition model rather than loading a second copy, and re-frames aligned crops from whichever swapper template made them into the `arcface_112` framing recognition needs
+- `pipeline/services/complexion.py`: the **other** axis the cosine is blind to — whether the output's skin is the source's colour or the target's, in LAB chroma against a median-of-photographs source reference. `complexion_gap` is the pairing, `complexion_face` is the number to drive down, `complexion_target` the leakage direction. Same interval as the identity probe. Face only until the skin segmentation service lands — see RESEMBLANCE.md §3.1
 - `pipeline/services/shape.py`: `ShapeProbe` — **the axis the cosine is blind to.** Whether the output took the source's head shape or kept the target's, from 106-point landmarks on three faces reduced to pure shape by fitting away the similarity transform. Borrows the detector's landmark model. See "Head shape" below
 
 ### Processing Pipeline

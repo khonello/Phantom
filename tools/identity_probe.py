@@ -71,6 +71,7 @@ from pipeline.core import (                                        # noqa: E402
 )
 from pipeline.processing import texture                           # noqa: E402
 from pipeline.processing.compositor import FaceCompositor         # noqa: E402
+from pipeline.services import complexion                          # noqa: E402
 from pipeline.services.database import (                          # noqa: E402
     FaceDatabase,
     off_axis,
@@ -100,6 +101,12 @@ _SHAPE = ('shape_shift', 'interior_shift', 'outline_shift')
 # strength), which is the exact question `detail_reserve` was added to answer.
 _TEXTURE = ('texture_headroom', 'texture_delivered', 'texture_coverage',
             'detail_reserve', 'texture_confidence', 'detail_ratio')
+
+# Whose skin colour the output has. Its own block, for the reason texture is:
+# the main table is identity and shape, and complexion is the axis both of
+# those are blind to. `complexion_gap` is the pairing rather than the
+# configuration, so it is printed once rather than per row.
+_COMPLEXION = ('complexion_face', 'complexion_target', 'complexion_lum')
 
 # What each step between two stages has a knob for. Printed with the attribution
 # so a reading arrives with its remedy attached.
@@ -288,6 +295,22 @@ class Rig:
             None if best is None
             else getattr(best[1], 'landmark_2d_106', None))
 
+        # Skin colour, from every accepted photograph — the one per-source
+        # asset that averages soundly, since it is a colour and not a map.
+        # Unaffected by `--holdout` for the reason shape is.
+        pairs = []
+        for path in accepted:
+            known = self.database.face_for(path)
+            if known is not None:
+                pairs.append((path, known))
+        self.compositor.source_complexion = complexion.measure_source(pairs)
+        if announce and self.compositor.source_complexion is not None:
+            ref = self.compositor.source_complexion
+            print('  complexion reference: L {:.0f} a {:.0f} b {:.0f} over {} '
+                  'photograph(s), spread {:.1f}'.format(
+                      ref.lab[0], ref.lab[1], ref.lab[2],
+                      ref.photographs, ref.spread))
+
         if announce:
             if self.compositor.source_shape is None:
                 print('  no 106-point landmarks on the source; the shape '
@@ -339,6 +362,7 @@ class Rig:
 
         readings = dict(self.compositor.last_identity)
         readings.update(self.compositor.last_shape)
+        readings.update(self.compositor.last_complexion)
 
         for name, value in (
                 ('texture_headroom', self.compositor.last_texture_headroom),
@@ -638,6 +662,31 @@ def main() -> int:
               'well under headroom means the map is not')
         print('  reaching the face at the amplitude the reserve already stood '
               'detail matching down for.')
+
+    # Whose skin colour the output has. The gap is the pairing and is printed
+    # once; the per-row numbers are what a configuration did with it.
+    if any(any(k in r['readings'] for k in _COMPLEXION) for r in results):
+        gap = next((r['readings']['complexion_gap'] for r in results
+                    if 'complexion_gap' in r['readings']), None)
+        print('\n  complexion readings (LAB a/b units; lum is signed L)')
+        if gap is not None:
+            print('  source and target skin tones are {:.1f} apart'.format(gap))
+        print('  {:<{}}  {:>9} {:>9} {:>9} {:>9}'.format(
+            '', width, 'to source', 'to target', 'lum', 'closed'))
+        for result, label in zip(results, labels):
+            cells = []
+            for name in _COMPLEXION:
+                value = result['readings'].get(name)
+                cells.append('        —' if value is None
+                             else '{:9.1f}'.format(value))
+            distance = result['readings'].get('complexion_face')
+            closed = ('        —' if distance is None or not gap or gap < 3.0
+                      else '{:9.0%}'.format(1.0 - distance / gap))
+            print('  {:<{}}  {} {}'.format(label, width, ' '.join(cells), closed))
+        print("  closed is the share of the way from the target's tone to the "
+              "source's. ArcFace barely sees this,")
+        print('  so a row that wins here and not on id_out is a real result '
+              'rather than a contradiction.')
 
     if baseline:
         print('\n  where it goes, for `{}`:'.format(labels[0]))

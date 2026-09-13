@@ -583,3 +583,14 @@ def _skin_mask(face: Face, matrix: Matrix, size: int) -> Mask:
     feathered = cv2.GaussianBlur(eroded, (0, 0), size * _SKIN_FEATHER)
     result: Mask = np.clip(feathered, 0.0, 1.0).astype(np.float32)
     return result
+
+
+def skin_mask(face: Face, matrix: Matrix, size: int) -> Mask:
+    """
+    The texture layer's definition of skin, for anyone else who measures it.
+
+    Exposed so the complexion reading samples the same pixels this layer
+    extracts under — two definitions of "skin" in one pipeline would put the
+    reading and the layer in disagreement about the thing they share.
+    """
+    return _skin_mask(face, matrix, size)

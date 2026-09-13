@@ -5,9 +5,10 @@ the source, target feature leakage driven down, until the output is a striking,
 unmistakable resemblance to the source.** Complexion means *all visible skin* —
 neck, ears, chest, hands — not the face alone.
 
-Status: **planned, nothing built.** This is the implementation approach agreed
-2026-09-13, written before the first line of code so the routes are judged
-against what they were meant to deliver rather than what they happened to do.
+Status: **core §3.1 face half built (2026-09-13); everything else planned.**
+This is the implementation approach agreed 2026-09-13, written before the
+first line of code so the routes are judged against what they were meant to
+deliver rather than what they happened to do.
 The research behind it is summarised in §1; GEOMETRY.md and TEXTURE.md carry
 what was already measured on the two axes this work extends.
 
@@ -98,13 +99,25 @@ complexion transferred. Add to `Readings`, the REALISM block and
 
 | Reading | Meaning |
 |---|---|
-| `complexion_face` | ΔE (LAB) between the output's face skin and the **source's** face skin |
-| `complexion_neck` | The same for the target's neck / visible body skin — the number that says whether the face and the rest of the person agree |
-| `complexion_seam` | ΔE between the output's face skin and its own neck skin. **This is the seam a face-only transfer creates**, and the number Route A exists to hold at zero |
-| `complexion_target` | ΔE between the output's face skin and the **target's** original — the leakage direction |
+| `complexion_gap` | **Built.** Source skin against target skin — a property of the *pairing*, no setting moves it, and the denominator for the rest. Under ~3 units the two already agree |
+| `complexion_face` | **Built.** Chroma distance between the output's face skin and the **source's** — the number to drive toward zero |
+| `complexion_target` | **Built.** The same against the **target's** original face skin — the leakage direction; rising is the swap taking |
+| `complexion_lum` | **Built.** Output lightness less the source's, signed. Apart from the chroma distances because it is mostly lighting, and lighting is the target's to keep |
+| `complexion_neck` | *Waits on §3.2.* The target's neck / visible body skin against the source — whether the face and the rest of the person agree |
+| `complexion_seam` | *Waits on §3.2.* The output's face skin against its own neck skin. **This is the seam a face-only transfer creates**, and the number Route A exists to hold at zero |
 
-Skin means the skin mask from §3.2 minus lips, eyes, brows and hair. Medians,
-not means: a freckle field and a specular highlight are not complexion.
+`pipeline/services/complexion.py`. The three distances are **chroma only** —
+the a/b plane of OpenCV's 8-bit LAB, the units `_COMPLEXION_RESIDUAL` and
+`complexion_kept` already use — because pigment lives in chroma and luminance
+is shading, which a correct swap takes from the target. Skin is the texture
+layer's own `skin_mask` (landmark hull minus eyes, nostrils, mouth), so the two
+agree on what skin is. Medians, not means: a freckle field and a specular
+highlight are not complexion. The source reference is the **median across
+every accepted photograph**, with `spread` reporting how much their white
+balance disagreed — the honest error bar on `complexion_face`. Measured on the
+`identity_probe=N` interval, after the paste, in `FaceCompositor._measure_complexion`;
+reported in the REALISM block with a verdict, and per row in
+`tools/identity_probe.py` with a `closed` column. `tests/test_complexion.py`.
 
 **Read `id_out` with a new caveat.** ArcFace does carry *some* skin tone —
 that is CrossSwap's whole complaint about E4S — so `id_out` will rise when
@@ -154,7 +167,7 @@ Done means merged to main, tested, defaults unchanged, and the pod prints it.
 
 | # | Deliverable | Where | Done when |
 |---|---|---|---|
-| 1 | `complexion_face`, `complexion_neck`, `complexion_seam`, `complexion_target` | `pipeline/services/readings.py`, `FaceCompositor` (face), `ProcessingPipeline` (neck, since it is outside the crop) | in the REALISM block on stream stop **and** batch finish, on the same `identity_probe=N` interval; `tools/identity_probe.py` prints them per configuration |
+| 1 | `complexion_gap/face/target/lum` **done**; `complexion_neck`, `complexion_seam` | `pipeline/services/complexion.py`, `FaceCompositor._measure_complexion` (face), `ProcessingPipeline` (neck, since it is outside the crop) | in the REALISM block on stream stop **and** batch finish, on the same `identity_probe=N` interval; `tools/identity_probe.py` prints them per configuration. **Face half landed 2026-09-13**; neck and seam wait on #2 |
 | 2 | `SkinSegmenter` service with a model registry | `pipeline/services/skin.py` | face-skin and body-skin masks per frame; both candidates (§3.2) registered, one selected by `SKIN_MODEL=`; feathered, EMA-smoothed; lips, eyes, hair excluded; cost printed in the latency budget as `skin` |
 | 3 | Cross-tone fixture pair | `tests/fixtures/` beside the existing source and target fixtures | one source set and one target chosen for maximum complexion **and** `shape_mismatch`; named in `docs/REALISM_TESTING.md` as the first pair every route runs on |
 | 4 | Keys and wiring | `pipeline/config.py`, `pipeline/core.py`, `vast/orchestrator.py::_FORWARDED_ENV`, `.env.example`, every local `.env`, `pipeline/api/handlers.py` (`set_realism` clamps), `tools/stats.py` | every key in §6 exists blank in both env files; `tests/test_wiring.py` fails on any key `core.py` reads that `.env.example` does not name |

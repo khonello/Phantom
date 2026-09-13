@@ -433,6 +433,22 @@ class FaceDatabase:
 
         return self._average_faces(faces)
 
+    def face_for(self, path: str) -> Optional[Face]:
+        """
+        The detection the review already made for one source path.
+
+        Cache only, never a re-detection: this is for stages that want the
+        same face the guards judged, and a fresh detection on the same file
+        can differ from it.
+
+        Args:
+            path: A source path that went through `review_sources`
+
+        Returns:
+            The cached face, or None if this path was never reviewed
+        """
+        return self._cache.get(self._cache_key(path))
+
     def select_texture_source(
         self,
         paths: List[str],
