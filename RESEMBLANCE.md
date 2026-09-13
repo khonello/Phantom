@@ -310,8 +310,10 @@ photographs inside `UNDERTONE_BOUND` = 6 a/b units, the baseline's L),
 and a warning, once per source, when the photographs and the baseline
 disagree past the bound. Note the published scale is not strictly monotone
 in L — step 2 → 3 is a hue step — so it is a *tone* scale, not a brightness
-ladder. **The desktop dropdown is not built yet**; the key is reachable
-through `set_realism` and `tools/realism.py`.
+ladder. **The desktop dropdown is built** — COMPLEXION, under RESTORATION in
+the sidebar, each step drawn as its published swatch; read back on connect
+like the restoration preset, never asserted. Also reachable through
+`set_realism` and `tools/realism.py`.
 
 **Design constraints, from the literature and from this codebase's own rules:**
 

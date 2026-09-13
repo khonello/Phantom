@@ -691,6 +691,10 @@ class PipelineClient:
         """Set restoration strength by name (auto/off/subtle/balanced/full)."""
         return self._send('set_restoration', preset=preset)
 
+    def set_complexion_base(self, base: str) -> Dict[str, Any]:
+        """Set the complexion baseline (auto, or a Monk Skin Tone step mst01-mst10)."""
+        return self.set_realism(complexion_base=base)
+
     def set_input_url(self, url: str) -> Dict[str, Any]:
         """Set network input stream URL."""
         return self._send('set_input_url', url=url)

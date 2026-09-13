@@ -646,6 +646,115 @@ Window {
                                     }
                                 }
 
+                                // ── Complexion ────────────────────────────────────────
+                                // The baseline Route A grades every visible skin
+                                // pixel toward (RESEMBLANCE.md). "auto" is the
+                                // median of the source photographs; a Monk Skin
+                                // Tone step is an anchor the operator chose, with
+                                // the photographs supplying undertone inside a
+                                // bound - a prior, not a destination. Read back on
+                                // connect rather than asserted, like restoration.
+                                Text {
+                                    text: "COMPLEXION"
+                                    color: "#252545"; font.pixelSize: 8; font.letterSpacing: 1.5
+                                    Layout.topMargin: 16; Layout.bottomMargin: 8
+                                }
+
+                                Rectangle {
+                                    id: compBox
+                                    Layout.fillWidth: true; height: 38; radius: 8
+                                    color: compHover.containsMouse ? "#1a1a2e" : "#12121e"
+                                    border.color: compBox.open ? "#3a3a60" : "#1e1e35"
+                                    border.width: 1
+                                    z: open ? 10 : 0
+                                    Behavior on color { ColorAnimation { duration: 130 } }
+
+                                    property var opts: ["auto", "mst01", "mst02", "mst03", "mst04", "mst05",
+                                                        "mst06", "mst07", "mst08", "mst09", "mst10"]
+                                    // The published Monk swatches, so the step reads as a
+                                    // colour and not as a number.
+                                    property var swatches: ["transparent", "#f6ede4", "#f3e7db", "#f7ead0",
+                                                            "#eadaba", "#d7bd96", "#a07e56", "#825c43",
+                                                            "#604134", "#3a312a", "#292420"]
+                                    property bool open: false
+                                    property int sel: Math.max(0, opts.indexOf(bridge.complexionBase))
+
+                                    Row {
+                                        anchors { fill: parent; leftMargin: 14; rightMargin: 10 }
+                                        spacing: 8
+                                        Rectangle {
+                                            width: 12; height: 12; radius: 6
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            color: compBox.swatches[compBox.sel]
+                                            border.color: "#3a3a60"; border.width: compBox.sel === 0 ? 1 : 0
+                                        }
+                                        Text {
+                                            text: compBox.sel === 0 ? "auto (photos)" : "tone " + compBox.sel
+                                            color: "#cbd5e1"; font.pixelSize: 12
+                                            width: parent.width - 40
+                                            anchors.verticalCenter: parent.verticalCenter
+                                        }
+                                        Text { text: "\u2304"; color: "#334155"; font.pixelSize: 10; anchors.verticalCenter: parent.verticalCenter }
+                                    }
+
+                                    HoverHandler { id: compHover }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        onClicked: compBox.open = !compBox.open
+                                        cursorShape: Qt.PointingHandCursor
+                                    }
+
+                                    Rectangle {
+                                        visible: compBox.open
+                                        anchors.top: parent.bottom; anchors.topMargin: 4
+                                        anchors.left: parent.left
+                                        width: parent.width
+                                        height: compBox.opts.length * 28 + 10
+                                        radius: 8; color: "#12121e"
+                                        border.color: "#252545"; border.width: 1
+
+                                        Column {
+                                            anchors { fill: parent; margins: 5 }
+                                            spacing: 2
+
+                                            Repeater {
+                                                model: compBox.opts
+                                                Rectangle {
+                                                    width: parent.width; height: 26; radius: 5
+                                                    color: compBox.sel === index ? "#1e1e38"
+                                                         : (crh.containsMouse ? "#171730" : "transparent")
+                                                    HoverHandler { id: crh }
+                                                    Row {
+                                                        anchors { left: parent.left; leftMargin: 10; verticalCenter: parent.verticalCenter }
+                                                        spacing: 8
+                                                        Rectangle {
+                                                            width: 12; height: 12; radius: 6
+                                                            anchors.verticalCenter: parent.verticalCenter
+                                                            color: compBox.swatches[index]
+                                                            border.color: "#3a3a60"; border.width: index === 0 ? 1 : 0
+                                                        }
+                                                        Text {
+                                                            text: index === 0 ? "auto (photos)" : "tone " + index
+                                                            color: compBox.sel === index ? "#c4b5fd" : "#475569"
+                                                            font.pixelSize: 12
+                                                            anchors.verticalCenter: parent.verticalCenter
+                                                        }
+                                                    }
+                                                    MouseArea {
+                                                        anchors.fill: parent
+                                                        onClicked: {
+                                                            compBox.sel = index
+                                                            bridge.setComplexionBase(modelData)
+                                                            compBox.open = false
+                                                        }
+                                                        cursorShape: Qt.PointingHandCursor
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
                                 // ── Voice ─────────────────────────────────────────────
                                 Text {
                                     text: "VOICE"

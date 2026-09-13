@@ -264,6 +264,7 @@ class Bridge(QObject):
     tuningPanelChanged = Signal(bool)
     tuningChanged = Signal()
     restorationChanged = Signal(str)
+    complexionBaseChanged = Signal(str)
     faceNoticeOpenChanged = Signal(bool)
     autoStopWarning = Signal(int)  # minutes remaining
     # Internal: carries a licence-server reply from a worker thread back to the
@@ -455,6 +456,7 @@ class Bridge(QObject):
         # 'auto' defers to the swap model's profile, which is what
         # happened before this was a control.
         self._restoration: str = 'auto'
+        self._complexion_base: str = 'auto'
         self._health_tick: int = 0  # counter for periodic health checks
 
         # Single webcam thread — always running
@@ -892,6 +894,11 @@ class Bridge(QObject):
             self._restoration = preset
             self.restorationChanged.emit(preset)
 
+        base = data.get('complexion_base')
+        if base and base != self._complexion_base:
+            self._complexion_base = base
+            self.complexionBaseChanged.emit(base)
+
         # The tuning panel, read back rather than asserted.
         #
         # `_push_realism` only fires from the panel's own slots, so nothing sent
@@ -1223,6 +1230,51 @@ class Bridge(QObject):
 
         # Off the GUI thread: this is a request/response over the socket.
         threading.Thread(target=_apply, name='set-restoration',
+                         daemon=True).start()
+
+    @Property(str, notify=complexionBaseChanged)
+    def complexionBase(self) -> str:
+        """Current complexion baseline: auto, or a Monk Skin Tone step."""
+        return self._complexion_base
+
+    @Slot(str)
+    def setComplexionBase(self, base: str) -> None:
+        """
+        Set the complexion baseline — RESEMBLANCE.md Route A.
+
+        The anchor the whole-skin grade aims at. `auto` is the median of the
+        source photographs; an `mstNN` step is a Monk Skin Tone the operator
+        chose, with the photographs supplying undertone inside a bound. The
+        same shape as the restoration dropdown and justified the same way: a
+        named step an operator understands, an `auto` that lets the pipeline
+        decide, and read back on connect rather than asserted. It does
+        nothing until `skin_complexion` is set, which the desktop does not
+        own a control for.
+        """
+        if base == self._complexion_base:
+            return
+        self._complexion_base = base
+        self.complexionBaseChanged.emit(base)
+
+        if not self._connected:
+            return
+
+        def _apply() -> None:
+            reply = self._client.set_complexion_base(base)
+            # `set_realism` answers with what it applied and what it
+            # rejected, and `success` is False whenever anything was.
+            data = reply.get('data') or {}
+            rejected = data.get('rejected') or {}
+            if not reply.get('success', True) or 'complexion_base' in rejected:
+                self._set_status(
+                    'complexion: {}'.format(
+                        rejected.get('complexion_base')
+                        or reply.get('error', 'refused')),
+                    error=True)
+                return
+            self._set_status('complexion baseline {}'.format(base))
+
+        threading.Thread(target=_apply, name='set-complexion-base',
                          daemon=True).start()
 
     @Slot(str)

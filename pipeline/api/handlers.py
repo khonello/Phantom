@@ -450,6 +450,8 @@ def handle_get_state(
             # So a reconnecting desktop shows the strength that is actually in
             # force rather than resetting its dropdown to the default.
             'restoration_preset': config.restoration_preset,
+            # The complexion baseline dropdown, read back for the same reason.
+            'complexion_base': config.complexion_base,
             # The tuning panel's two knobs, for the same reason and a sharper
             # one. They are the only appearance controls the desktop can set
             # while a stream runs, and it deliberately does not assert them on
