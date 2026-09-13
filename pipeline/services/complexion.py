@@ -23,6 +23,12 @@ once. Four readings:
     complexion_lum     output lightness less the source's, signed. Reported
                        apart from the chroma distances because it is mostly
                        lighting, and lighting is the target's to keep
+    complexion_neck    the target's OTHER skin — neck, ears, chest, hands —
+                       against the source's. Whether the rest of the person
+                       agrees with the face. Needs the skin segmenter
+    complexion_seam    the output's face skin against its own neck skin. The
+                       seam a face-only complexion transfer creates, and the
+                       number Route A exists to hold at zero
 
 Chroma only for the three distances — the a/b plane of OpenCV's 8-bit LAB, the
 same units `_COMPLEXION_RESIDUAL` and `complexion_kept` are in. Pigment lives
@@ -43,10 +49,11 @@ Two things this deliberately does not do:
   that a set of uncontrolled uploads can give. `SourceComplexion.spread` says
   how much they disagreed, which is the honest error bar on `complexion_face`.
 
-Neck and hands are the other half of this reading and they wait on the skin
-segmentation service — see RESEMBLANCE.md §3.1 and §3.2. A face-only
-complexion transfer creates the seam at the jaw that the colour match exists
-to prevent, and the reading that prices that seam needs a neck to read.
+The neck comes from `pipeline/services/skin.py` — the body mask, which is
+classified skin outside the grown face hull — and the two readings that need
+it are simply absent when no segmenter is attached or no body skin is visible.
+A face-only complexion transfer creates the seam at the jaw that the colour
+match exists to prevent, and `complexion_seam` is what prices it.
 """
 
 from dataclasses import dataclass
@@ -107,15 +114,22 @@ class ComplexionReading:
     face: float
     target: float
     lightness: float
+    neck: Optional[float] = None
+    seam: Optional[float] = None
 
     def as_readings(self) -> Dict[str, float]:
         """The reading under the names the REALISM block reports."""
-        return {
+        out = {
             'complexion_gap': self.gap,
             'complexion_face': self.face,
             'complexion_target': self.target,
             'complexion_lum': self.lightness,
         }
+        if self.neck is not None:
+            out['complexion_neck'] = self.neck
+        if self.seam is not None:
+            out['complexion_seam'] = self.seam
+        return out
 
 
 def skin_lab(image: Frame, face: Face, size: int = MEASURE_SIZE) -> Optional[np.ndarray]:
@@ -149,6 +163,28 @@ def skin_lab(image: Frame, face: Face, size: int = MEASURE_SIZE) -> Optional[np.
     if int(lit.sum()) >= _MIN_PIXELS:
         pixels = pixels[lit]
 
+    return np.median(pixels, axis=0)
+
+
+def masked_lab(image: Frame, mask: 'npt.NDArray[np.float32]') -> Optional[np.ndarray]:
+    """
+    Median LAB under a frame-space mask — the body-skin reading.
+
+    Args:
+        image: BGR frame
+        mask: Float mask in [0, 1], frame-sized; pixels above 0.5 count
+
+    Returns:
+        (L, a, b) as float64, or None when too little is masked
+    """
+    inside = mask > 0.5
+    if int(inside.sum()) < _MIN_PIXELS:
+        return None
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    pixels = lab[inside].astype(np.float64)
+    lit = (pixels[:, 0] > _L_FLOOR) & (pixels[:, 0] < _L_CEILING)
+    if int(lit.sum()) >= _MIN_PIXELS:
+        pixels = pixels[lit]
     return np.median(pixels, axis=0)
 
 
@@ -195,6 +231,7 @@ def measure_output(
     pasted: Frame,
     face: Face,
     source: SourceComplexion,
+    body: Optional['npt.NDArray[np.float32]'] = None,
 ) -> Optional[ComplexionReading]:
     """
     Score the finished frame's face skin against the source and the target.
@@ -204,18 +241,30 @@ def measure_output(
         pasted: The finished frame
         face: The target detection, whose landmarks bound the skin in both
         source: The reference built by `measure_source`
+        body: The skin segmenter's body mask for this frame, if one ran —
+            classified skin outside the face. Adds the neck and seam readings
 
     Returns:
-        The reading, or None when skin could not be measured in either frame
+        The reading, or None when face skin could not be measured in either
+        frame. The neck and seam are None when no body skin was visible
     """
     before = skin_lab(frame, face)
     after = skin_lab(pasted, face)
     if before is None or after is None:
         return None
 
+    neck = seam = None
+    if body is not None:
+        rest = masked_lab(pasted, body)
+        if rest is not None:
+            neck = chroma_distance(rest, source.lab)
+            seam = chroma_distance(after, rest)
+
     return ComplexionReading(
         gap=chroma_distance(source.lab, before),
         face=chroma_distance(after, source.lab),
         target=chroma_distance(after, before),
         lightness=float(after[0]) - float(source.lab[0]),
+        neck=neck,
+        seam=seam,
     )

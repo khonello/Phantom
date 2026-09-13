@@ -33,6 +33,7 @@ from pipeline.services import studio_swappers
 from pipeline.services import swapper_models
 from pipeline.services import enhancer_models
 from pipeline.services import database
+from pipeline.services import skin
 
 warnings.filterwarnings('ignore', category=FutureWarning, module='insightface')
 warnings.filterwarnings('ignore', category=UserWarning, module='torchvision')
@@ -201,6 +202,11 @@ def parse_args() -> None:
                         help='how several source photographs become one identity vector',
                         dest='source_blend', choices=list(database.SOURCE_BLENDS),
                         default=os.environ.get('SOURCE_BLEND') or None)
+    program.add_argument('--skin-model',
+                        help='skin segmentation backend for neck, ears, chest and hands '
+                             '(seeded needs no model file)',
+                        dest='skin_model', choices=skin.names(),
+                        default=os.environ.get('SKIN_MODEL') or None)
     program.add_argument('--identity-probe',
                         help='measure source-to-output identity every Nth frame (0 disables); '
                              'reports as id_* in the REALISM block',
@@ -310,6 +316,7 @@ def parse_args() -> None:
         ('identity_probe', args.identity_probe),
         ('complexion_keep', args.complexion_keep),
         ('source_blend', args.source_blend),
+        ('skin_model', args.skin_model),
         ('texture_strength', args.texture_strength),
         ('texture_band', args.texture_band),
         ('texture_relief', args.texture_relief),

@@ -380,6 +380,12 @@ class FaceSwapConfig:
     # See pipeline/services/shape.py.
     identity_probe: int = 0
 
+    # Which skin segmentation backend finds the person's skin outside the
+    # face — neck, ears, chest, hands. Feeds the complexion reading's neck and
+    # seam numbers today and Route A's whole-skin grading later. `seeded`
+    # needs no model file. See pipeline/services/skin.py.
+    skin_model: str = 'seeded'
+
     # Subsurface scattering, approximated. Real skin is translucent: light
     # enters, bounces around under the surface and leaves somewhere slightly
     # else, which softens the *shading* over a millimetre or two without
@@ -692,6 +698,7 @@ class FaceSwapConfig:
             'color_strength': self.color_strength,
             'complexion_keep': self.complexion_keep,
             'source_blend': self.source_blend,
+            'skin_model': self.skin_model,
             'mask_feather': self.mask_feather,
             'mask_erode': self.mask_erode,
             'mask_shape_growth': self.mask_shape_growth,

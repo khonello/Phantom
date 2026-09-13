@@ -36,9 +36,10 @@ ArcFace is trained to be invariant to most of the geometry it describes, so the
 two can disagree completely and a good cosine does not cover head shape. See
 pipeline/services/shape.py.
 
-**`complexion_gap` / `complexion_face` / `complexion_target` / `complexion_lum`**
+**`complexion_gap` / `complexion_face` / `complexion_target` / `complexion_lum`
+/ `complexion_neck` / `complexion_seam`**
 — whether the output carries the source's skin colour or the target's, in the
-a/b plane of 8-bit LAB. The second axis the cosine is blind to: `_match_color`
+a/b plane of 8-bit LAB, and whether the face agrees with the neck it sits on. The second axis the cosine is blind to: `_match_color`
 moves the face onto the target's tone by design and nothing could price it.
 `gap` is the pairing (source against target, no setting moves it); `face` is
 what to drive down; `target` rising is the swap taking. `lum` is reported apart
@@ -298,6 +299,25 @@ class Readings:
                 "     the face has the SOURCE's complexion. Now read the "
                 "neck: a face this far from the target's tone sits on a neck "
                 "that still has it, unless the skin stage graded both.")
+
+        seam = data.get('complexion_seam')
+        neck = data.get('complexion_neck')
+        if seam is not None:
+            if seam['p50'] > 4.0:
+                notes.append(
+                    "     -> the face and the neck DISAGREE by {:.1f} LAB units "
+                    "(p50). That is a colour step at the jaw, whatever the "
+                    "face reads against the source — grade the whole skin "
+                    "(Route A) or give the complexion back to the "
+                    "target.".format(seam['p50']))
+            else:
+                notes.append(
+                    "     face and neck agree to {:.1f} LAB units (p50)"
+                    "{}.".format(
+                        seam['p50'],
+                        '' if neck is None else
+                        '; the rest of the skin sits {:.1f} from the '
+                        'source'.format(neck['p50'])))
 
         lum = data.get('complexion_lum')
         if lum is not None and abs(lum['p50']) > 12.0:

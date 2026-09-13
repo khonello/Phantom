@@ -72,6 +72,7 @@ from pipeline.core import (                                        # noqa: E402
 from pipeline.processing import texture                           # noqa: E402
 from pipeline.processing.compositor import FaceCompositor         # noqa: E402
 from pipeline.services import complexion                          # noqa: E402
+from pipeline.services.skin import SkinSegmenter                  # noqa: E402
 from pipeline.services.database import (                          # noqa: E402
     FaceDatabase,
     off_axis,
@@ -106,7 +107,8 @@ _TEXTURE = ('texture_headroom', 'texture_delivered', 'texture_coverage',
 # the main table is identity and shape, and complexion is the axis both of
 # those are blind to. `complexion_gap` is the pairing rather than the
 # configuration, so it is printed once rather than per row.
-_COMPLEXION = ('complexion_face', 'complexion_target', 'complexion_lum')
+_COMPLEXION = ('complexion_face', 'complexion_target', 'complexion_lum',
+               'complexion_neck', 'complexion_seam')
 
 # What each step between two stages has a knob for. Printed with the attribution
 # so a reading arrives with its remedy attached.
@@ -191,6 +193,7 @@ class Rig:
         self.compositor = FaceCompositor(config, Enhancer(config), self.masker)
         self.compositor.identity = IdentityProbe(self.detector)
         self.compositor.shape = ShapeProbe(self.detector)
+        self.compositor.skin = SkinSegmenter(config.skin_model)
         self.probe = IdentityProbe(self.detector)
         self._announced = False
 
@@ -671,8 +674,8 @@ def main() -> int:
         print('\n  complexion readings (LAB a/b units; lum is signed L)')
         if gap is not None:
             print('  source and target skin tones are {:.1f} apart'.format(gap))
-        print('  {:<{}}  {:>9} {:>9} {:>9} {:>9}'.format(
-            '', width, 'to source', 'to target', 'lum', 'closed'))
+        print('  {:<{}}  {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}'.format(
+            '', width, 'to source', 'to target', 'lum', 'neck', 'seam', 'closed'))
         for result, label in zip(results, labels):
             cells = []
             for name in _COMPLEXION:
@@ -687,6 +690,9 @@ def main() -> int:
               "source's. ArcFace barely sees this,")
         print('  so a row that wins here and not on id_out is a real result '
               'rather than a contradiction.')
+        print('  neck is the rest of the skin against the source; seam is the '
+              'face against its own neck, which is the')
+        print('  colour step at the jaw a face-only transfer creates.')
 
     if baseline:
         print('\n  where it goes, for `{}`:'.format(labels[0]))

@@ -5,7 +5,7 @@ the source, target feature leakage driven down, until the output is a striking,
 unmistakable resemblance to the source.** Complexion means *all visible skin* —
 neck, ears, chest, hands — not the face alone.
 
-Status: **core §3.1 face half built (2026-09-13); everything else planned.**
+Status: **core §3.1 and §3.2 built (2026-09-13); §3.3, §3.4 and every route planned.**
 This is the implementation approach agreed 2026-09-13, written before the
 first line of code so the routes are judged against what they were meant to
 deliver rather than what they happened to do.
@@ -103,8 +103,8 @@ complexion transferred. Add to `Readings`, the REALISM block and
 | `complexion_face` | **Built.** Chroma distance between the output's face skin and the **source's** — the number to drive toward zero |
 | `complexion_target` | **Built.** The same against the **target's** original face skin — the leakage direction; rising is the swap taking |
 | `complexion_lum` | **Built.** Output lightness less the source's, signed. Apart from the chroma distances because it is mostly lighting, and lighting is the target's to keep |
-| `complexion_neck` | *Waits on §3.2.* The target's neck / visible body skin against the source — whether the face and the rest of the person agree |
-| `complexion_seam` | *Waits on §3.2.* The output's face skin against its own neck skin. **This is the seam a face-only transfer creates**, and the number Route A exists to hold at zero |
+| `complexion_neck` | **Built.** The target's neck / visible body skin against the source — whether the face and the rest of the person agree. Absent when no body skin is visible |
+| `complexion_seam` | **Built.** The output's face skin against its own neck skin. **This is the seam a face-only transfer creates**, and the number Route A exists to hold at zero. The REALISM verdict calls it out past 4 units |
 
 `pipeline/services/complexion.py`. The three distances are **chroma only** —
 the a/b plane of OpenCV's 8-bit LAB, the units `_COMPLEXION_RESIDUAL` and
@@ -129,6 +129,29 @@ complexion from likeness. Read it beside `complexion_*`, never instead.
 `pipeline/services/skin.py`. Face skin *and* body skin, per frame, real-time.
 Used by Route A for the neck and hands, by Route C for the head-onto-body
 composite, and available to the texture and reshape layers for exclusions.
+
+**Built 2026-09-13: the registry and the `seeded` backend.** `SkinSegmenter`
+returns `face` (the texture layer's `skin_mask` warped into frame space — one
+definition of skin for every stage) and `body` (classified skin outside the
+grown face hull). Selected by `skin_model` / `SKIN_MODEL=`, blank is
+`seeded`; forwarded, `set_realism`-reachable, reported by `tools/stats.py`.
+Attached to the compositor by the pipeline, reset with its temporal state,
+and run only on the probe interval until a stage asks for it every frame.
+**~10ms at 640×360 on a laptop CPU; the pod prints its own.**
+
+The seeded model fits per frame from the face's own skin — median and MAD in
+the a/b plane, a wide lightness gate — and smooths its **parameters**, not its
+matte, so it cannot crawl. Measured on a synthetic scene: neck in shadow 0.77,
+hand 0.98, blue wall 0.00, dark shirt 0.00, face-in-body 0.00, a dark
+complexion the same. **And a skin-coloured wall patch 1.00** — the stated
+blind spot, pinned by `tests/test_skin.py`, and it is worse than a false
+positive: with such a wall in shot the body median *is* the wall, so
+`complexion_neck` reads the wall's colour (the test pins that too). That is
+the argument for the parsing backend, for the reading as well as for Route A.
+
+`mediapipe_multiclass` is registered as a spec and **not built** — its
+pre/post-processing is unverified, and `resolve` lands an unbuilt name on the
+default rather than trusting a matte from it.
 
 Two candidates, to be measured against each other:
 
@@ -167,8 +190,8 @@ Done means merged to main, tested, defaults unchanged, and the pod prints it.
 
 | # | Deliverable | Where | Done when |
 |---|---|---|---|
-| 1 | `complexion_gap/face/target/lum` **done**; `complexion_neck`, `complexion_seam` | `pipeline/services/complexion.py`, `FaceCompositor._measure_complexion` (face), `ProcessingPipeline` (neck, since it is outside the crop) | in the REALISM block on stream stop **and** batch finish, on the same `identity_probe=N` interval; `tools/identity_probe.py` prints them per configuration. **Face half landed 2026-09-13**; neck and seam wait on #2 |
-| 2 | `SkinSegmenter` service with a model registry | `pipeline/services/skin.py` | face-skin and body-skin masks per frame; both candidates (§3.2) registered, one selected by `SKIN_MODEL=`; feathered, EMA-smoothed; lips, eyes, hair excluded; cost printed in the latency budget as `skin` |
+| 1 | `complexion_gap/face/target/lum/neck/seam` | `pipeline/services/complexion.py`, `FaceCompositor._measure_complexion` | **Done 2026-09-13.** In the REALISM block on stream stop **and** batch finish, on the `identity_probe=N` interval; `tools/identity_probe.py` prints them per configuration with `closed`, `neck`, `seam` columns |
+| 2 | `SkinSegmenter` service with a model registry | `pipeline/services/skin.py` | **Seeded backend done 2026-09-13**; `mediapipe_multiclass` registered, not built. Selected by `SKIN_MODEL=`; feathered, parameter-smoothed; eyes, nostrils, mouth excluded. Still to do: the parsing backend, and `skin` as a line in the latency budget once a stage runs it every frame |
 | 3 | Cross-tone fixture pair | `tests/fixtures/` beside the existing source and target fixtures | one source set and one target chosen for maximum complexion **and** `shape_mismatch`; named in `docs/REALISM_TESTING.md` as the first pair every route runs on |
 | 4 | Keys and wiring | `pipeline/config.py`, `pipeline/core.py`, `vast/orchestrator.py::_FORWARDED_ENV`, `.env.example`, every local `.env`, `pipeline/api/handlers.py` (`set_realism` clamps), `tools/stats.py` | every key in §6 exists blank in both env files; `tests/test_wiring.py` fails on any key `core.py` reads that `.env.example` does not name |
 | 5 | The skin mask reaches the layers that want it | `FaceCompositor._add_texture`, `reshape.py`, `_match_color` | each takes the mask when present and behaves bit-identically without it — a capability gap must not become a behaviour change |

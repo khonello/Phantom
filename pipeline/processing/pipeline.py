@@ -55,6 +55,7 @@ from pipeline.services.database import FaceDatabase
 from pipeline.services.masking import FaceMasker
 from pipeline.services.identity import IdentityProbe
 from pipeline.services.shape import ShapeProbe
+from pipeline.services.skin import SkinSegmenter
 from pipeline.services.face_tracking import LandmarkStabilizer
 from pipeline.services import guards
 from pipeline.services import identity_models
@@ -270,6 +271,10 @@ class ProcessingPipeline:
         # use, and only while `identity_probe` is set.
         self._compositor.identity = IdentityProbe(detector)
         self._compositor.shape = ShapeProbe(detector)
+        # Loads nothing either: the default backend is a colour model fitted
+        # per frame from the face's own skin, and it runs only on the probe
+        # interval until a stage asks for it every frame.
+        self._compositor.skin = SkinSegmenter(self.config.skin_model)
         self._stabilizer = LandmarkStabilizer(
             alpha=self.config.alpha,
             identity_sim=self.config.guard_identity_sim,

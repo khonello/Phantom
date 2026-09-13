@@ -37,6 +37,7 @@ from pipeline.services import identity
 from pipeline.services import shape as shape_metric
 from pipeline.services import complexion
 from pipeline.services.complexion import SourceComplexion
+from pipeline.services.skin import SkinSegmenter
 from pipeline.services import swapper_models
 from pipeline.services.identity import IdentityProbe
 from pipeline.services.shape import ShapeProbe
@@ -465,6 +466,12 @@ class FaceCompositor:
         self.source_complexion: Optional[SourceComplexion] = None
         self.last_complexion: Dict[str, float] = {}
 
+        # Finds the person's skin outside the face, for the neck and seam
+        # halves of that reading. Attached by the pipeline; None leaves the
+        # face-only readings and drops the other two, which is a capability
+        # gap and not a behaviour change.
+        self.skin: Optional[SkinSegmenter] = None
+
         # Frames since the last identity measurement. Measuring is several
         # ArcFace inferences, so it runs every Nth frame rather than on all of
         # them — a distribution over a run is what the reading is for, and it
@@ -578,8 +585,17 @@ class FaceCompositor:
         if self.source_complexion is None or pasted is None:
             return
 
+        body = None
+        if self.skin is not None:
+            # On the target frame rather than the finished one: outside the
+            # face the two are identical, and inside it the sample the colour
+            # model is fitted from should be the real skin, not the swap.
+            masks = self.skin.segment(frame, face)
+            if masks is not None:
+                body = masks.body
+
         reading = complexion.measure_output(
-            frame, pasted, face, self.source_complexion)
+            frame, pasted, face, self.source_complexion, body=body)
         if reading is not None:
             self.last_complexion.update(reading.as_readings())
 
@@ -771,6 +787,8 @@ class FaceCompositor:
         self._prev_fake = None
         self._prev_real = None
         self._working_size = None
+        if self.skin is not None:
+            self.skin.reset()
 
     # ------------------------------------------------------------------
     # Entry point

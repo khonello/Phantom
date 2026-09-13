@@ -39,6 +39,7 @@ from pipeline.services import swapper_models
 from pipeline.services import enhancer_models
 from pipeline.services import face_swapping
 from pipeline.services import database
+from pipeline.services import skin
 from pipeline.services import onnx_session
 from pipeline.services.database import SourceReview
 from pipeline.services.templates import TemplateLibrary
@@ -603,6 +604,7 @@ def handle_get_stats(
             'probe_interval': config.identity_probe,
             'complexion_keep': config.complexion_keep,
             'source_blend': config.source_blend,
+            'skin_model': config.skin_model,
             # A shape-aware model whose contour is being clipped back off is
             # the configuration this whole section exists to make visible.
             'shape_growth_useful': swapper_models.resolve(
@@ -970,6 +972,10 @@ _REALISM_FIELDS: Dict[str, Any] = {
     # configuration.
     'source_blend': (
         lambda v: str(v) if str(v) in database.SOURCE_BLENDS else None),
+    # Only a built backend is accepted; a registered spec that is not built
+    # is refused here rather than silently resolved to the default.
+    'skin_model': (
+        lambda v: str(v) if skin.resolve(str(v)).key == str(v) else None),
     # The two seam levers. Clamped well short of absurd: a feather a quarter of
     # the face wide is not a seam fix, it is a dissolve.
     'mask_feather': lambda v: min(0.25, max(0.0, float(v))),
