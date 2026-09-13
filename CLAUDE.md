@@ -1754,13 +1754,26 @@ default and silently reverts a pipeline started with `--no-enhance`. The
 question is a product one: should an offline job inherit a live latency preset
 at all? Recorded here rather than decided.
 
-### Two topics have their own documents now
+### Three topics have their own documents now
 
-**[GEOMETRY.md](GEOMETRY.md)** and **[TEXTURE.md](TEXTURE.md)** in the root.
-Read the relevant one before touching either area — each carries what is
-covered, what was measured, what is knowingly broken, and where to restart.
+**[GEOMETRY.md](GEOMETRY.md)**, **[TEXTURE.md](TEXTURE.md)** and
+**[RESEMBLANCE.md](RESEMBLANCE.md)** in the root. Read the relevant one before
+touching any of those areas — each carries what is covered, what was measured,
+what is knowingly broken, and where to restart.
 
 The headline from each, so this file is not silent on them:
+
+- **Resemblance.** The plan for texture and complexion transfer from the source
+  and for driving target leakage down, agreed 2026-09-13 and **not yet built**.
+  Its framing: the goal is the *inverse* of what the face-swap literature
+  optimises, and the LIVE tier cannot deliver it alone because ArcFace
+  conditioning is invariant to exactly what has to be carried. A shared core
+  goes on main first — a complexion reading, a skin segmentation service, a
+  cross-tone fixture, keys — then five routes (A whole-skin complexion, B
+  reference-guided restoration, C reenactment, D per-identity texture, E
+  identity-first stills), each behind its own env key, blank for off. A, B and
+  E are stages on main; C and D are branches. Dependencies are stated and are
+  not optional: A comes before anything that touches skin.
 
 - **Geometry.** The head *does* read as the source's, and **no landmark moves
   to make that happen** — interior and outline both measure ~0 at every setting.
