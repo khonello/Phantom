@@ -172,7 +172,11 @@ python tools/identity_probe.py -s target/face-1.jpeg target/face-2.jpeg target/f
 ```
 
 Record the two `complexion_gap` values and the two `shape_mismatch` values in
-RESEMBLANCE.md §3.3 when they exist. If a different pairing in the fixtures
+RESEMBLANCE.md §3.3 when they exist. **C1 measured 2026-09-14** (inswapper,
+`identity_probe.py` on the pod): `shape_mismatch` **0.309** (0.282 at the
+outline), `complexion_gap` **6.0** in chroma with **31 L units** of lightness
+difference — on this pairing the complexion gap is almost entirely lightness,
+which is the axis `complexion_target_base` exists for. C2 still unmeasured. If a different pairing in the fixtures
 measures larger on either, swap it in — the point is the hardest case, not
 these files.
 

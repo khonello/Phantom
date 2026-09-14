@@ -5,7 +5,7 @@ the source, target feature leakage driven down, until the output is a striking,
 unmistakable resemblance to the source.** Complexion means *all visible skin* —
 neck, ears, chest, hands — not the face alone.
 
-Status: **the core (§3) and Route A are built (2026-09-13). Route A is ON, and after two footage runs on 2026-09-14 the face verdict is positive on the hardest pairing** — see the notes under Route A. Route B is next; C–E planned.
+Status: **the core (§3) and Route A are built (2026-09-13). Route A is ON, and after two footage runs on 2026-09-14 the face verdict is positive on the hardest pairing** — see the notes under Route A. **Route B's measurement is set up on the pod and blocked on one download** — see under Route B. C–E planned.
 This is the implementation approach agreed 2026-09-13, written before the
 first line of code so the routes are judged against what they were meant to
 deliver rather than what they happened to do.
@@ -484,6 +484,51 @@ the live deadline. The registry's `live_capable` fact decides where it may run.
 
 **Depends on:** core §3.3 (the hard pair) and, to be judged correctly, **Route
 A underneath it** — texture on a target-toned face is not the measurement.
+
+**Where it got to, 2026-09-14.** Candidate chosen: **RefSTAR** (AAAI 2026) —
+complete CLI, weights public, InsightFace-based like this pipeline, and built
+for exactly this shape (select a reference, transfer its detail, reconstruct).
+FaceMe (SDXL, 7 GB base) and InstantRestore (README gives only a script path)
+were the alternatives. The measurement is scripted end to end:
+
+- `tools/routeb_refstar_setup.sh` — its own venv beside the pipeline's,
+  torch pinned to the pipeline's 2.2.0 so the wheel cache serves it, and
+  every pin that bit on the way recorded in place: `numpy<2` (torch 2.2's
+  ABI), `opencv-python==4.10.0.84` (OpenCV 5 wants numpy 2),
+  `huggingface_hub<0.26` (diffusers 0.23 imports `cached_download`),
+  `peft==0.10.0` (newer imports `EncoderDecoderCache`), the basicsr
+  `functional_tensor` import patched by `sed` after locating the file with
+  `find_spec` rather than an import, and the repo's `LandmarksType._2D`
+  renamed to `TWO_D`. Runs detached with `setsid` — plain `nohup` died with
+  the orchestrator's SSH session, silently.
+- `tools/routeb_refstar_run.sh` — one swapped still (restoration **off**,
+  since RefSTAR is a candidate to *replace* the restorer) plus one source
+  photograph, full-frame mode, timed.
+- `tools/restore_probe.py` — scores restored stills against the source:
+  ArcFace cosine to the source identity, cosine to the reference photograph
+  (a restorer that copies its reference scores perfectly and is a different
+  picture), cheek high-frequency deviation, face size.
+- Inputs already on the pod: `/workspace/routeb/in/enhance-False.png` (the
+  unrestored swap) and `enhance-True.png` (GPEN), from `identity_probe.py`
+  on the **C1 pair**. Which also gave §3.3 its first numbers:
+  **`shape_mismatch` 0.309**, **`complexion_gap` 6.0 chroma / 31 L** — on
+  this pairing the complexion difference is almost entirely lightness.
+
+**Blocked on:** `net_g_latest.pth`, **7 GB**, hosted only on Google Drive.
+The first download arrived CRC-corrupt (`zipfile.testzip` fails on its first
+entry, while RefSel passes); the re-download hit Drive's per-file quota —
+*"may exceed the maximum download quota"* — which resets in about 24 hours.
+Everything else (venv, 4.1 GB of Arc2Face weights, the four detector/parser
+files, the stills) is on the pod's disk with 7.4 GB free. **The retry is:**
+
+```bash
+python vast/orchestrator.py run "cd /workspace/RefSTAR/test/pretrained_models && /workspace/venv-refstar/bin/python -m gdown -O net_g_latest.pth 'https://drive.google.com/uc?id=1kKMO9fSUHf5RbpKFPMaPp3D7gC0n99-m' && /workspace/venv-refstar/bin/python -c \"import zipfile; print(zipfile.ZipFile('net_g_latest.pth').testzip())\""
+python vast/orchestrator.py run "bash /workspace/routeb_refstar_run.sh /workspace/routeb/in/enhance-False.png /workspace/Phantom/source/two/IMG_3623.jpg /workspace/routeb/out"
+python vast/orchestrator.py run "cd /workspace/Phantom && /workspace/venv/bin/python tools/restore_probe.py -s source/two/IMG_3091.jpg source/two/IMG_3623.jpg source/two/IMG_3674.jpg source/two/IMG_3701.jpg source/two/IMG_3745.png source/two/IMG_3751.png --reference source/two/IMG_3623.jpg --frames /workspace/routeb/in/enhance-True.png /workspace/routeb/out/*from_512.png --execution-provider cuda"
+```
+
+A `None` from `testzip` is the go signal. Note the pod disk is the only copy
+of all of it: a `terminate` starts this over, a `stop` does not.
 
 **Switch:** `ENHANCER_MODEL=<reference model name>` — the existing key. Its
 reference photographs come from the source set with no new configuration.
