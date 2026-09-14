@@ -5,7 +5,7 @@ the source, target feature leakage driven down, until the output is a striking,
 unmistakable resemblance to the source.** Complexion means *all visible skin* —
 neck, ears, chest, hands — not the face alone.
 
-Status: **the core (§3) and Route A are built (2026-09-13). Route A is ON and under test on footage as of 2026-09-14** — see the note under Route A. B–E planned.
+Status: **the core (§3) and Route A are built (2026-09-13). Route A is ON, and after two footage runs on 2026-09-14 the face verdict is positive on the hardest pairing** — see the notes under Route A. Route B is next; C–E planned.
 This is the implementation approach agreed 2026-09-13, written before the
 first line of code so the routes are judged against what they were meant to
 deliver rather than what they happened to do.
@@ -293,7 +293,31 @@ Two mechanisms, both confirmed by those numbers and both fixed:
 
 `skin_grade` now survives into the latency report. Its cost is real and was a
 quarter of the frame; **not optimised yet, on purpose** — the operator's
-instruction is to get it working before making it cheap. Note also that the
+instruction is to get it working before making it cheap.
+
+**Second footage verdict, 2026-09-14, after those fixes.** Same pod, same
+poor light and camera — the operator asked that no abrupt decision be made on
+it. **Fair source onto a dark-complexioned target: the C1 direction, the
+hardest pairing in §3.3.** In the operator's words: *"face is phenomenal"*,
+*"face skin is match closer to source than the rest of the body"*, *"better
+than what we had before today's work"*, and the remaining defect is the
+*"shoulder area"* — the neck toward the shoulders reads less like the source
+than the face does, most visibly when the torch moves from the face to below
+it. **Go for the next route** was the call, with this open.
+
+The likely cause of the shoulder step is the lightness bound set that
+morning, not the segmenter. `[0.80, 1.25]` was right for the run it came from
+(the face 40 L under the *photographs* because of the torch), but on a
+fair-on-dark pairing a large L difference IS the complexion, and the cap holds
+the neck at most 25% lighter while the swapped face — generated fair, then
+colour-matched to graded skin — lands closer to the source. The next REALISM
+block separates the two without guessing: `complexion_gain` p50 at 1.25 with
+`complexion_lum` still large-negative is the cap binding; low
+`complexion_coverage` is the neck not being found. **Not retuned blind.** The
+candidate fix, if it is the cap: the baseline dropdown as *permission* — a
+source tone step several classes from the target's measured tone licenses a
+larger gain than `auto` should ever take, which is what the operator proposed
+the dropdown for in the first place. Note also that the
 texture layer was **on** during this run (`detail_reserve` 0.28 ⇒ the TUNING
 slider at ~0.35) and delivered 77% of its budget — the parked layer, running
 on footage for the first time.
