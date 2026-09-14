@@ -60,6 +60,7 @@ _STATE = {
     'targetThumbnail': '', 'outputPath': '/tmp/out.mp4', 'outputThumbnail': '',
     'detectionStatus': '', 'guardReason': '', 'latencyText': '',
     'loadingMessage': '', 'restoration': 'auto', 'complexionBase': 'auto',
+    'complexionTargetBase': 'auto',
     'activeFilter': 'none',
     'activeEffect': 'none', 'activeBackground': 'none',
     'sessionReason': '', 'authError': '',

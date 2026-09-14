@@ -186,6 +186,40 @@ class Reference:
         return self.disagreement is not None and self.disagreement > UNDERTONE_BOUND
 
 
+# Largest lightness gain two declared tone classes may license. Fair skin sits
+# around L 190 and dark skin around L 80 in these units under the same light,
+# so a genuine complexion change is a ratio near two; this leaves room past it
+# and stops well short of the swatch table's own extremes (mst01/mst10 is 6.5),
+# which would blow a dark neck out rather than lighten it.
+CLASS_GAIN_MAX = 2.5
+
+
+def lightness_ratio(source_base: Optional[str], target_base: Optional[str]) -> Optional[float]:
+    """
+    How much lighter the source's declared tone is than the target's.
+
+    The ratio of two Monk swatches' L — two paint chips under the same
+    canonical light — so the room cancels out. This is the one lightness
+    signal that is complexion and not lighting, and it exists only when BOTH
+    tones are declared: the photographs' L is a real scene's, the frame's L
+    is another, and their ratio is mostly the two rooms.
+
+    Args:
+        source_base: `complexion_base` — `auto` or an MST step
+        target_base: `complexion_target_base` — `auto` or an MST step
+
+    Returns:
+        L(source) / L(target), bounded to [1/CLASS_GAIN_MAX, CLASS_GAIN_MAX],
+        or None when either side is `auto`
+    """
+    source = base_lab(source_base or BASE_AUTO)
+    target = base_lab(target_base or BASE_AUTO)
+    if source is None or target is None:
+        return None
+    ratio = float(source[0]) / max(float(target[0]), 1.0)
+    return float(np.clip(ratio, 1.0 / CLASS_GAIN_MAX, CLASS_GAIN_MAX))
+
+
 def resolve_reference(
     source: Optional[SourceComplexion], base: Optional[str],
 ) -> Optional[Reference]:

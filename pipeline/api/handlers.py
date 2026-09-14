@@ -452,6 +452,7 @@ def handle_get_state(
             'restoration_preset': config.restoration_preset,
             # The complexion baseline dropdown, read back for the same reason.
             'complexion_base': config.complexion_base,
+            'complexion_target_base': config.complexion_target_base,
             # The tuning panel's two knobs, for the same reason and a sharper
             # one. They are the only appearance controls the desktop can set
             # while a stream runs, and it deliberately does not assert them on
@@ -611,6 +612,7 @@ def handle_get_stats(
             'skin_complexion': config.skin_complexion,
             'skin_complexion_hands': config.skin_complexion_hands,
             'complexion_base': config.complexion_base,
+            'complexion_target_base': config.complexion_target_base,
             # A shape-aware model whose contour is being clipped back off is
             # the configuration this whole section exists to make visible.
             'shape_growth_useful': swapper_models.resolve(
@@ -987,6 +989,9 @@ _REALISM_FIELDS: Dict[str, Any] = {
     'skin_complexion': lambda v: min(1.0, max(0.0, float(v))),
     'skin_complexion_hands': lambda v: bool(v),
     'complexion_base': (
+        lambda v: str(v).strip().lower()
+        if str(v).strip().lower() in complexion.BASES else None),
+    'complexion_target_base': (
         lambda v: str(v).strip().lower()
         if str(v).strip().lower() in complexion.BASES else None),
     # The two seam levers. Clamped well short of absurd: a feather a quarter of

@@ -755,6 +755,110 @@ Window {
                                     }
                                 }
 
+                                // ── My tone ───────────────────────────────────────────
+                                // The operator's own tone. With both this and the
+                                // source tone declared, the pipeline may move
+                                // lightness as far as the two classes are apart -
+                                // the one lightness signal that is complexion and
+                                // not the room. Measured: without it the gain sat
+                                // at its narrow cap on every frame of a fair-on-dark
+                                // pairing and the neck stayed 6 units off the face.
+                                Text {
+                                    text: "MY TONE"
+                                    color: "#252545"; font.pixelSize: 8; font.letterSpacing: 1.5
+                                    Layout.topMargin: 16; Layout.bottomMargin: 8
+                                }
+
+                                Rectangle {
+                                    id: mineBox
+                                    Layout.fillWidth: true; height: 38; radius: 8
+                                    color: mineHover.containsMouse ? "#1a1a2e" : "#12121e"
+                                    border.color: mineBox.open ? "#3a3a60" : "#1e1e35"
+                                    border.width: 1
+                                    z: open ? 10 : 0
+                                    Behavior on color { ColorAnimation { duration: 130 } }
+
+                                    property var opts: compBox.opts
+                                    property var swatches: compBox.swatches
+                                    property bool open: false
+                                    property int sel: Math.max(0, opts.indexOf(bridge.complexionTargetBase))
+
+                                    Row {
+                                        anchors { fill: parent; leftMargin: 14; rightMargin: 10 }
+                                        spacing: 8
+                                        Rectangle {
+                                            width: 12; height: 12; radius: 6
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            color: mineBox.swatches[mineBox.sel]
+                                            border.color: "#3a3a60"; border.width: mineBox.sel === 0 ? 1 : 0
+                                        }
+                                        Text {
+                                            text: mineBox.sel === 0 ? "auto (not declared)" : "tone " + mineBox.sel
+                                            color: "#cbd5e1"; font.pixelSize: 12
+                                            width: parent.width - 40
+                                            anchors.verticalCenter: parent.verticalCenter
+                                        }
+                                        Text { text: "\u2304"; color: "#334155"; font.pixelSize: 10; anchors.verticalCenter: parent.verticalCenter }
+                                    }
+
+                                    HoverHandler { id: mineHover }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        onClicked: mineBox.open = !mineBox.open
+                                        cursorShape: Qt.PointingHandCursor
+                                    }
+
+                                    Rectangle {
+                                        visible: mineBox.open
+                                        anchors.top: parent.bottom; anchors.topMargin: 4
+                                        anchors.left: parent.left
+                                        width: parent.width
+                                        height: mineBox.opts.length * 28 + 10
+                                        radius: 8; color: "#12121e"
+                                        border.color: "#252545"; border.width: 1
+
+                                        Column {
+                                            anchors { fill: parent; margins: 5 }
+                                            spacing: 2
+
+                                            Repeater {
+                                                model: mineBox.opts
+                                                Rectangle {
+                                                    width: parent.width; height: 26; radius: 5
+                                                    color: mineBox.sel === index ? "#1e1e38"
+                                                         : (mrh.containsMouse ? "#171730" : "transparent")
+                                                    HoverHandler { id: mrh }
+                                                    Row {
+                                                        anchors { left: parent.left; leftMargin: 10; verticalCenter: parent.verticalCenter }
+                                                        spacing: 8
+                                                        Rectangle {
+                                                            width: 12; height: 12; radius: 6
+                                                            anchors.verticalCenter: parent.verticalCenter
+                                                            color: mineBox.swatches[index]
+                                                            border.color: "#3a3a60"; border.width: index === 0 ? 1 : 0
+                                                        }
+                                                        Text {
+                                                            text: index === 0 ? "auto (not declared)" : "tone " + index
+                                                            color: mineBox.sel === index ? "#c4b5fd" : "#475569"
+                                                            font.pixelSize: 12
+                                                            anchors.verticalCenter: parent.verticalCenter
+                                                        }
+                                                    }
+                                                    MouseArea {
+                                                        anchors.fill: parent
+                                                        onClicked: {
+                                                            mineBox.sel = index
+                                                            bridge.setComplexionTargetBase(modelData)
+                                                            mineBox.open = false
+                                                        }
+                                                        cursorShape: Qt.PointingHandCursor
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
                                 // ── Voice ─────────────────────────────────────────────
                                 Text {
                                     text: "VOICE"

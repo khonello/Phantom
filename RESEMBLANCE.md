@@ -317,7 +317,29 @@ block separates the two without guessing: `complexion_gain` p50 at 1.25 with
 candidate fix, if it is the cap: the baseline dropdown as *permission* — a
 source tone step several classes from the target's measured tone licenses a
 larger gain than `auto` should ever take, which is what the operator proposed
-the dropdown for in the first place. Note also that the
+the dropdown for in the first place.
+
+**The block from that run settled it, and the fix landed the same day.**
+`complexion_gain` p50 = p95 = max = **1.250** — pinned on every frame;
+`complexion_lum` −36; **`complexion_coverage` 4.63**, so the neck and
+shoulders *were* found (4.6× the face's area of body skin); `complexion_face`
+4.4, 54% closed; `skin_grade` 9.8ms, visible for the first time. The cap, not
+the segmenter.
+
+The fix is the symmetric half of the operator's dropdown: **declare the
+target's tone too.** `complexion_target_base` / `COMPLEXION_TARGET_BASE=` /
+a MY TONE dropdown under COMPLEXION. With both tones declared, the ratio of
+the two Monk swatches' L — two paint chips under one canonical light — is
+complexion with the room cancelled out, and `lightness_ratio` licenses a gain
+as far as the classes are apart, bounded at `CLASS_GAIN_MAX` = 2.5. With
+either side `auto`, the narrow [0.80, 1.25] band stays, because
+photographs-against-frame is two rooms and cannot be told from lighting. On
+the fair-on-dark synthetic scene the neck goes L 63 → 157 declared against 79
+under `auto`, shading ratio intact. The REALISM block now says so itself when
+the gain is pinned. **Unjudged on footage**, and the thing to watch when it is:
+a 2.5× gain on dark skin multiplies the camera's noise there by 2.5 as well —
+grain and JPEG blocking on the neck are the expected cost, and whether they
+read as skin is the question. Note also that the
 texture layer was **on** during this run (`detail_reserve` 0.28 ⇒ the TUNING
 slider at ~0.35) and delivered 77% of its budget — the parked layer, running
 on footage for the first time.

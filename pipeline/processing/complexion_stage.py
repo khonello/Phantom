@@ -176,8 +176,25 @@ class ComplexionStage:
         magnitude = float(np.hypot(shift[0], shift[1]))
         if magnitude > _MAX_SHIFT:
             shift = shift * (_MAX_SHIFT / magnitude)
-        ratio = float(reference[0]) / max(float(target[0]), 1.0)
-        gain = float(np.clip(ratio ** strength, _MIN_GAIN, _MAX_GAIN))
+
+        # Lightness. Two regimes, and which one applies is declared, not
+        # guessed. With BOTH tone classes named, the ratio of their swatches
+        # is complexion with the room cancelled out, and it may move L as far
+        # as the classes are apart. With either side `auto`, the only L
+        # signal is photographs-against-frame — two rooms — and it stays
+        # inside the narrow band that cannot grade the lighting away. This
+        # was measured: on a fair-on-dark pairing the narrow band pinned at
+        # 1.25 on every frame while the seam stayed at 6 units.
+        declared = complexion.lightness_ratio(
+            getattr(self.config, 'complexion_base', None),
+            getattr(self.config, 'complexion_target_base', None))
+        if declared is not None:
+            gain = float(np.clip(
+                declared ** strength,
+                1.0 / complexion.CLASS_GAIN_MAX, complexion.CLASS_GAIN_MAX))
+        else:
+            ratio = float(reference[0]) / max(float(target[0]), 1.0)
+            gain = float(np.clip(ratio ** strength, _MIN_GAIN, _MAX_GAIN))
 
         if self._shift is None or self._gain is None:
             self._shift, self._gain = shift.astype(np.float32), gain

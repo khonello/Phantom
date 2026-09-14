@@ -403,6 +403,12 @@ class FaceSwapConfig:
     # with the photographs supplying undertone inside a bound. A prior, not a
     # destination. See `complexion.resolve_reference`.
     complexion_base: str = 'auto'
+    # The TARGET's own tone — the operator's — as a Monk step. With both
+    # declared, the ratio of the two swatches licenses a lightness gain that
+    # the photographs never can, because two paint chips under one canonical
+    # light are complexion with the room cancelled out. `auto` keeps the
+    # narrow band. See `complexion.lightness_ratio`.
+    complexion_target_base: str = 'auto'
 
     # Subsurface scattering, approximated. Real skin is translucent: light
     # enters, bounces around under the surface and leaves somewhere slightly
@@ -720,6 +726,7 @@ class FaceSwapConfig:
             'skin_complexion': self.skin_complexion,
             'skin_complexion_hands': self.skin_complexion_hands,
             'complexion_base': self.complexion_base,
+            'complexion_target_base': self.complexion_target_base,
             'mask_feather': self.mask_feather,
             'mask_erode': self.mask_erode,
             'mask_shape_growth': self.mask_shape_growth,

@@ -310,6 +310,19 @@ class Readings:
                     " - at the cap on the far frames, so part of this "
                     "pairing's gap is out of the stage's reach"))
 
+        gain = data.get('complexion_gain')
+        lum = data.get('complexion_lum')
+        if (gain is not None and lum is not None and abs(gain['p50'] - 1.25) < 0.01
+                and lum['p50'] < -20.0):
+            notes.append(
+                "     -> the lightness gain is PINNED at the narrow cap (1.25 on "
+                "p50) while the face sits {:.0f} L units off the source. Under "
+                "auto the stage cannot tell complexion from lighting and stays "
+                "narrow; declaring BOTH tones (COMPLEXION_BASE and "
+                "COMPLEXION_TARGET_BASE, or the two sidebar dropdowns) licenses "
+                "the move as far as the two classes are apart.".format(
+                    abs(lum['p50'])))
+
         coverage = data.get('complexion_coverage')
         if coverage is not None:
             if coverage['p50'] < 0.15:

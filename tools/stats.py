@@ -129,6 +129,7 @@ def _render(data: Dict[str, Any]) -> List[str]:
     out.append(_line('skin_model', ident.get('skin_model')))
     out.append(_line('skin_complexion', ident.get('skin_complexion')))
     out.append(_line('complexion_base', ident.get('complexion_base')))
+    out.append(_line('complexion_target_base', ident.get('complexion_target_base')))
 
     interval = ident.get('probe_interval') or 0
     out.append(_line('identity_probe', 'off' if not interval

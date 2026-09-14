@@ -222,6 +222,11 @@ def parse_args() -> None:
                              'Skin Tone step mst01-mst10',
                         dest='complexion_base', choices=list(complexion.BASES),
                         default=os.environ.get('COMPLEXION_BASE') or None)
+    program.add_argument('--complexion-target-base',
+                        help='the target\'s own tone as a Monk Skin Tone step (mst01-mst10); '
+                             'with --complexion-base set too, licenses the lightness move',
+                        dest='complexion_target_base', choices=list(complexion.BASES),
+                        default=os.environ.get('COMPLEXION_TARGET_BASE') or None)
     program.add_argument('--identity-probe',
                         help='measure source-to-output identity every Nth frame (0 disables); '
                              'reports as id_* in the REALISM block',
@@ -335,6 +340,7 @@ def parse_args() -> None:
         ('skin_complexion', args.skin_complexion),
         ('skin_complexion_hands', args.skin_complexion_hands),
         ('complexion_base', args.complexion_base),
+        ('complexion_target_base', args.complexion_target_base),
         ('texture_strength', args.texture_strength),
         ('texture_band', args.texture_band),
         ('texture_relief', args.texture_relief),

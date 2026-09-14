@@ -301,6 +301,54 @@ check('and the pull is capped at the bound',
       abs(complexion.chroma_distance(clash.lab, anchor) - complexion.UNDERTONE_BOUND) < 1e-6)
 check('the config default is auto', FaceSwapConfig().complexion_base == 'auto')
 
+# ── Declared tone classes license the lightness move ───────────────────
+print('\nDeclared tone classes')
+
+check('no ratio when either side is auto',
+      complexion.lightness_ratio('auto', 'mst08') is None
+      and complexion.lightness_ratio('mst03', 'auto') is None
+      and complexion.lightness_ratio(None, None) is None)
+fair_on_dark = complexion.lightness_ratio('mst03', 'mst08')
+check('a fair source over a dark target licenses a gain well past the narrow band',
+      fair_on_dark is not None and fair_on_dark > 1.6,
+      'mst03/mst08 = {:.2f}'.format(fair_on_dark or 0.0))
+check('and is bounded at CLASS_GAIN_MAX rather than the swatch extremes',
+      abs((complexion.lightness_ratio('mst01', 'mst10') or 0.0) - complexion.CLASS_GAIN_MAX) < 1e-9)
+check('the same tone on both sides is a gain of one',
+      abs((complexion.lightness_ratio('mst05', 'mst05') or 0.0) - 1.0) < 1e-9)
+check('dark over fair goes the other way',
+      (complexion.lightness_ratio('mst08', 'mst03') or 9.0) < 0.6)
+
+# The fair-on-dark scene: a dark target, a fair source, the pairing that
+# pinned the narrow band on every frame of the second footage run.
+DARK = (85, 140, 146)
+dark_frame = scene(skin_lab=DARK)
+fair_ref = np.array((190, 138, 144), dtype=np.float64)
+
+narrow = stage_for(1.0)
+narrow_out = settle(narrow, dark_frame, face, fair_ref)
+check('under auto the lightness gain stays in the narrow band',
+      narrow.last_gain is not None and abs(narrow.last_gain - complexion_stage._MAX_GAIN) < 1e-6,
+      'gain {:.3f} - the cap, as measured on footage'.format(narrow.last_gain or 0.0))
+
+declared = stage_for(1.0)
+declared.config.complexion_base = 'mst03'
+declared.config.complexion_target_base = 'mst08'
+declared_out = settle(declared, dark_frame, face, fair_ref)
+check('with both tones declared the gain follows the class ratio',
+      declared.last_gain is not None and abs(declared.last_gain - fair_on_dark) < 1e-6,
+      'gain {:.3f}'.format(declared.last_gain or 0.0))
+check('and the neck is lightened far past what auto allowed',
+      median_lab(declared_out, NECK)[0] > median_lab(narrow_out, NECK)[0] * 1.3,
+      'neck L {:.0f} declared vs {:.0f} under auto (was {:.0f})'.format(
+          median_lab(declared_out, NECK)[0], median_lab(narrow_out, NECK)[0],
+          median_lab(dark_frame, NECK)[0]))
+check('while the shading ratio still survives',
+      abs(median_lab(declared_out, NECK)[0] / median_lab(declared_out, FOREHEAD)[0]
+          - median_lab(dark_frame, NECK)[0] / median_lab(dark_frame, FOREHEAD)[0]) < 0.06)
+check('and the wall is still byte-identical',
+      np.array_equal(declared_out[WALL], dark_frame[WALL]))
+
 # ── The compositor's wiring ────────────────────────────────────────────
 print('\nCompositor wiring')
 

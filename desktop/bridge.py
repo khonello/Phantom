@@ -265,6 +265,7 @@ class Bridge(QObject):
     tuningChanged = Signal()
     restorationChanged = Signal(str)
     complexionBaseChanged = Signal(str)
+    complexionTargetBaseChanged = Signal(str)
     faceNoticeOpenChanged = Signal(bool)
     autoStopWarning = Signal(int)  # minutes remaining
     # Internal: carries a licence-server reply from a worker thread back to the
@@ -457,6 +458,7 @@ class Bridge(QObject):
         # happened before this was a control.
         self._restoration: str = 'auto'
         self._complexion_base: str = 'auto'
+        self._complexion_target_base: str = 'auto'
         self._health_tick: int = 0  # counter for periodic health checks
 
         # Single webcam thread — always running
@@ -899,6 +901,11 @@ class Bridge(QObject):
             self._complexion_base = base
             self.complexionBaseChanged.emit(base)
 
+        mine = data.get('complexion_target_base')
+        if mine and mine != self._complexion_target_base:
+            self._complexion_target_base = mine
+            self.complexionTargetBaseChanged.emit(mine)
+
         # The tuning panel, read back rather than asserted.
         #
         # `_push_realism` only fires from the panel's own slots, so nothing sent
@@ -1275,6 +1282,45 @@ class Bridge(QObject):
             self._set_status('complexion baseline {}'.format(base))
 
         threading.Thread(target=_apply, name='set-complexion-base',
+                         daemon=True).start()
+
+    @Property(str, notify=complexionTargetBaseChanged)
+    def complexionTargetBase(self) -> str:
+        """The target's own tone: auto, or a Monk Skin Tone step."""
+        return self._complexion_target_base
+
+    @Slot(str)
+    def setComplexionTargetBase(self, base: str) -> None:
+        """
+        Declare the operator's own skin tone.
+
+        The other half of the complexion baseline. With both declared the
+        pipeline may move lightness as far as the two tone classes are apart;
+        with either at `auto` it stays in the narrow band that cannot grade
+        the room away. Same shape and same reply handling as the baseline.
+        """
+        if base == self._complexion_target_base:
+            return
+        self._complexion_target_base = base
+        self.complexionTargetBaseChanged.emit(base)
+
+        if not self._connected:
+            return
+
+        def _apply() -> None:
+            reply = self._client.set_complexion_target_base(base)
+            data = reply.get('data') or {}
+            rejected = data.get('rejected') or {}
+            if not reply.get('success', True) or 'complexion_target_base' in rejected:
+                self._set_status(
+                    'my tone: {}'.format(
+                        rejected.get('complexion_target_base')
+                        or reply.get('error', 'refused')),
+                    error=True)
+                return
+            self._set_status('my tone {}'.format(base))
+
+        threading.Thread(target=_apply, name='set-complexion-target-base',
                          daemon=True).start()
 
     @Slot(str)
