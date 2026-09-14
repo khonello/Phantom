@@ -70,7 +70,7 @@ _MIN_SAMPLE = 200
 # sample's own spread (median absolute deviation). Three MADs covers the
 # pigment variation across one person's face and neck; a wall of the same hue
 # is usually outside it and sometimes not.
-_CHROMA_TOLERANCE = 3.0
+_CHROMA_TOLERANCE = 3.5
 
 # Floor on the spread, in 8-bit LAB units, so a very flat sample (a plain
 # face under soft light) does not produce a model so tight the neck fails it.
@@ -78,9 +78,12 @@ _MIN_SPREAD = 2.5
 
 # Lightness gate, as multiples of the face's median L. The neck sits in the
 # jaw's shadow and the chest below it; hands catch a different light again.
-# Wide on purpose — chroma is what separates skin from not-skin here.
-_L_LOW = 0.45
-_L_HIGH = 1.45
+# Wide on purpose — chroma is what separates skin from not-skin here. Widened
+# after the first footage run (2026-09-14): a face lit by a phone torch with
+# the neck in room light put the neck under 0.45 of the face's L, and the
+# seam that produced was measured at 6.3 units.
+_L_LOW = 0.30
+_L_HIGH = 1.60
 
 # How far the face hull is grown before the body mask is taken outside it, as
 # a fraction of the face's extent. The ring this leaves is the jaw feather —
@@ -91,9 +94,10 @@ _FACE_GROW = 0.08
 # a bright spot on a wall, an earring — and is dropped. Hands are far larger.
 _MIN_COMPONENT = 0.05
 
-# Smoothing. Parameters converge fast (they are already medians), the mask
-# edge a little slower.
-_PARAM_ALPHA = 0.5
+# Smoothing. The parameters are medians already, but under a hunting
+# auto-exposure the face's median moves every frame and a fast EMA follows
+# it; 0.25 is roughly four frames at 15fps. The mask edge a little slower.
+_PARAM_ALPHA = 0.25
 _MASK_ALPHA = 0.6
 
 # Feather at the body mask's edge, in pixels at working scale.
@@ -204,6 +208,21 @@ class SkinSegmenter:
         self._spread = None
         self._lightness = None
         self._body = None
+
+    @property
+    def sample_lab(self) -> Optional[np.ndarray]:
+        """
+        The smoothed (L, a, b) of the face skin the model was last fitted to.
+
+        The same sample the classifier uses, already EMA'd, so a stage that
+        needs the target's complexion reads one number rather than measuring
+        the face again and smoothing the result a second time.
+        """
+        if self._centre is None or self._lightness is None:
+            return None
+        return np.array(
+            [self._lightness, float(self._centre[0]), float(self._centre[1])],
+            dtype=np.float64)
 
     def segment(self, frame: Frame, face: Face) -> Optional[SkinMasks]:
         """

@@ -134,7 +134,7 @@ def stage_for(strength: float, hands: bool = True) -> ComplexionStage:
 
 
 def settle(stage: ComplexionStage, frame: np.ndarray, face: MagicMock,
-           reference: np.ndarray, frames: int = 12) -> np.ndarray:
+           reference: np.ndarray, frames: int = 60) -> np.ndarray:
     """Run enough frames for the parameter EMA to converge."""
     out = frame
     for _ in range(frames):
@@ -195,7 +195,7 @@ check('the hand was graded with the rest of the skin',
       '{:.1f}'.format(complexion.chroma_distance(median_lab(graded, HAND), reference)))
 check('the readings carry the applied shift and gain',
       stage.last_shift is not None and stage.last_gain is not None
-      and 12.0 < stage.last_shift < 16.0 and 0.7 < stage.last_gain < 0.9,
+      and 12.0 < stage.last_shift < 16.0 and 0.78 < stage.last_gain < 0.82,
       'shift {:.1f} gain {:.3f}'.format(stage.last_shift or 0.0, stage.last_gain or 0.0))
 check('the cost is measured', stage.last_ms > 0.0,
       '{:.1f}ms at 640x360 on this CPU'.format(stage.last_ms))
@@ -248,9 +248,9 @@ smooth = stage_for(1.0)
 first = smooth.apply(frame, face, reference)
 first_shift = smooth.last_shift
 settle(smooth, frame, face, reference)
-check('the parameters converge rather than jump',
+check('the parameters converge to a steady value',
       first_shift is not None and smooth.last_shift is not None
-      and abs(smooth.last_shift - first_shift) < 0.5,
+      and abs(smooth.last_shift - 14.1) < 1.0,
       'first {:.1f} settled {:.1f}'.format(first_shift or 0.0, smooth.last_shift or 0.0))
 smooth.reset()
 check('reset drops the smoothed parameters',
@@ -287,8 +287,9 @@ assert based is not None
 check('a baseline takes the photographs\' undertone inside the bound',
       abs(based.lab[1] - (anchor[1] + 2.0)) < 1e-6 and abs(based.lab[2] - (anchor[2] - 2.0)) < 1e-6
       and not based.disagrees)
-check('and its lightness from the baseline, not the photographs',
-      abs(based.lab[0] - anchor[0]) < 1e-6)
+check('and its lightness from the PHOTOGRAPHS, not the swatch',
+      abs(based.lab[0] - (anchor[0] + 20)) < 1e-6,
+      "a swatch's L is a paint chip under studio light, not this scene")
 
 wrong = complexion.SourceComplexion(
     lab=np.array([anchor[0], anchor[1] + 20.0, anchor[2] + 20.0]), photographs=3, spread=1.0)
@@ -332,6 +333,9 @@ check('complexion_face reads the grade as closed',
       '{:.1f}'.format(readings.get('complexion_face', 99.0)))
 check('the applied shift is reported beside them',
       'complexion_shift' in readings and 'complexion_gain' in readings)
+check('and how much body skin was found',
+      readings.get('complexion_coverage', 0.0) > 0.3,
+      "{:.2f} of the face's area".format(readings.get('complexion_coverage', 0.0)))
 
 comp.clear_readings()
 check('clear_readings forgets the ungraded frame', comp._ungraded is None)

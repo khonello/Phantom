@@ -65,15 +65,21 @@ from pipeline.types import Face, Frame, Mask
 # the reading reports the cap binding so it is a number, not a mystery.
 _MAX_SHIFT = 28.0
 
-# Bounds on the lightness gain. Halving or doubling L is already an extreme
-# pairing; past it the grade produces a face darker than its own shadows or
-# brighter than its highlights.
-_MIN_GAIN = 0.5
-_MAX_GAIN = 2.0
+# Bounds on the lightness gain. Narrow on purpose, after the first footage run
+# (2026-09-14): the face measured 40 L units darker than the source
+# photographs — lighting, not complexion — and a cap of 2.0 let the stage try
+# to grade the lighting away, doubling every exposure wobble on the way. A
+# real complexion difference under the SAME light is a modest ratio; anything
+# past this band is the room, and the room is the target's to keep.
+_MIN_GAIN = 0.80
+_MAX_GAIN = 1.25
 
-# EMA on the per-frame parameters. Converges in a few frames; a step change
-# in the source is a new source and comes with a reset.
-_PARAM_ALPHA = 0.35
+# EMA on the per-frame parameters. About a second at 15fps: slow enough that
+# a hunting auto-exposure averages out instead of being followed, which is
+# what read as pulsing on the first footage run (`complexion_shift` swung
+# from 6 to 19 units between frames). A step change in the source is a new
+# source and comes with a reset.
+_PARAM_ALPHA = 0.08
 
 # The corridor below the face inside which body skin counts as neck and
 # chest rather than hands, as multiples of the face's width either side of
@@ -98,6 +104,9 @@ class ComplexionStage:
         # units and the lightness gain. None when the stage did not run.
         self.last_shift: Optional[float] = None
         self.last_gain: Optional[float] = None
+        # Body skin found, as a share of the face's area — whether the neck
+        # was there to grade at all.
+        self.last_coverage: Optional[float] = None
         self._shift: Optional[np.ndarray] = None
         self._gain: Optional[float] = None
 
@@ -110,6 +119,7 @@ class ComplexionStage:
         """Drop the last frame's readings, per frame."""
         self.last_shift = None
         self.last_gain = None
+        self.last_coverage = None
 
     def enabled(self) -> bool:
         """Whether `skin_complexion` asks for anything at all."""
@@ -150,9 +160,16 @@ class ComplexionStage:
         if masks is None:
             return frame
 
-        target = complexion.skin_lab(frame, face)
+        # The target's complexion is the sample the segmenter fitted its
+        # model to, already smoothed — one measurement per frame, not two,
+        # and the two cannot disagree about what the face's colour is.
+        target = self.segmenter.sample_lab
         if target is None:
             return frame
+
+        face_area = float(np.count_nonzero(masks.face > 0.5))
+        if face_area > 0.0:
+            self.last_coverage = float(np.count_nonzero(masks.body > 0.5)) / face_area
 
         # This frame's correction, then the smoothed one actually applied.
         shift = (reference[1:] - target[1:]) * strength

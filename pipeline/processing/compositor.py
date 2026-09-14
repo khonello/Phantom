@@ -632,6 +632,12 @@ class FaceCompositor:
             self.last_complexion['complexion_shift'] = stage.last_shift
             if stage.last_gain is not None:
                 self.last_complexion['complexion_gain'] = stage.last_gain
+            if stage.last_coverage is not None:
+                # Body skin found, as a share of the face's area. Near zero
+                # means the neck was never found and the seam is a
+                # segmentation failure; healthy means the grade landed there
+                # and the seam is something else.
+                self.last_complexion['complexion_coverage'] = stage.last_coverage
 
     def _reshape_head(self, frame: Optional[Frame], face: Face) -> Optional[Frame]:
         """
@@ -932,7 +938,14 @@ class FaceCompositor:
     ) -> Optional[Frame]:
         """Implementation of `composite`."""
         stages = self.last_stage_ms
+        # Route A ran before this and recorded its cost here; the composite's
+        # own stages start fresh, but that one entry has to survive the clear
+        # or the stage is invisible in the latency report — which it was, on
+        # the first footage run, while costing a quarter of the frame.
+        grade_ms = stages.get('skin_grade')
         stages.clear()
+        if grade_ms is not None:
+            stages['skin_grade'] = grade_ms
         mark = time.perf_counter()
 
         def elapsed(name: str) -> None:

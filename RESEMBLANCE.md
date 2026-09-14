@@ -250,6 +250,54 @@ first: the neck and wrists by eye, then `complexion_seam` (hold under 4),
 `complexion_shift` (28 means the cap is binding), and `skin_grade` in the
 per-stage latency report for the pod's own cost.
 
+**First footage verdict, 2026-09-14 — positive on the face, two defects found
+and fixed the same hour.** UK A100 pod, alphaface_256, 92px face at 640×360,
+poor light (a phone torch on the face). The operator's words: *"on the face,
+quite good when on auto"*; on any tone step *"the colour change becomes
+inconsistent, sort of pulsing"*; and *"below the face, neck going towards
+shoulder downwards, not very good."* The REALISM block from the stream stop
+put numbers on all three:
+
+| reading | p50 | p95 | what it said |
+|---|---|---|---|
+| `complexion_gap` | 9.5 | **26.4** | the *target's* measured tone jumped frame to frame under the torch and exposure hunting |
+| `complexion_shift` | 6.2 | **19.1** | the grade chased it — that swing IS the pulsing |
+| `complexion_gain` | 1.37 | **2.00** | the lightness gain sat at its cap on the far frames |
+| `complexion_lum` | −40 | | the face is 40 L units darker than the photographs — lighting, not complexion |
+| `complexion_face` / `_target` | 5.7 / 5.0 | | 40% of the way to the source |
+| `complexion_seam` | **6.3** | 11.7 | the face and neck disagree — the neck was only partly graded |
+| `id_swap` / `id_out` / `id_target` | 0.845 / 0.703 / **0.052** | | leakage very low; the mask still the largest identity loss (−0.121) |
+| latency `total` | 96ms | 127ms | **MISSES** a 67ms deadline; `mask` 17ms and `reshape` 14ms pre-existing, and `skin_grade` was **invisible** — `_composite_impl` cleared it |
+
+Two mechanisms, both confirmed by those numbers and both fixed:
+
+1. **A swatch's L is not a scene quantity.** Under a tone step the reference L
+   was the Monk swatch (235 for `mst02`) and the stage tried to grade a dim
+   webcam face up to it — gain at the 2.0 cap, every exposure wobble doubled.
+   Under `auto` the reference L was a real photograph's, so the gain was 1.3
+   and the same wobble was a third the size. Now a baseline supplies **chroma
+   only**; lightness comes from the photographs as under `auto`. And the gain
+   is bounded to **[0.80, 1.25]**: a real complexion difference under the same
+   light is a modest ratio, and anything past it is the room, which is the
+   target's to keep. The parameter EMA went 0.35 → **0.08** (about a second at
+   15fps) so exposure hunting averages out instead of being followed, and the
+   stage now reads the target's tone from the segmenter's own smoothed sample
+   rather than measuring it a second time.
+2. **The neck was under the lightness gate.** Body skin counted only between
+   0.45× and 1.45× of the face's median L; a torch-lit face with the neck in
+   room light put the neck below that. Gate widened to **[0.30, 1.60]**,
+   chroma tolerance 3.0 → 3.5 MADs. And a new reading, **`complexion_coverage`**
+   (body skin found, as a share of the face's area), separates "the neck was
+   never found" from "the grade did not land there" — the question the
+   operator asked and nothing could answer.
+
+`skin_grade` now survives into the latency report. Its cost is real and was a
+quarter of the frame; **not optimised yet, on purpose** — the operator's
+instruction is to get it working before making it cheap. Note also that the
+texture layer was **on** during this run (`detail_reserve` 0.28 ⇒ the TUNING
+slider at ~0.35) and delivered 77% of its budget — the parked layer, running
+on footage for the first time.
+
 **Built 2026-09-13** — `pipeline/processing/complexion_stage.py`, called from
 `ProcessingPipeline._swap_face` through `FaceCompositor.grade_skin` before
 the swap, on both the live and batch paths, and mirrored in

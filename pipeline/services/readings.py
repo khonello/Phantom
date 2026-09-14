@@ -310,6 +310,20 @@ class Readings:
                     " - at the cap on the far frames, so part of this "
                     "pairing's gap is out of the stage's reach"))
 
+        coverage = data.get('complexion_coverage')
+        if coverage is not None:
+            if coverage['p50'] < 0.15:
+                notes.append(
+                    "     -> the segmenter found almost no skin outside the face "
+                    "({:.2f} of the face's area, p50). Any seam below is a "
+                    "SEGMENTATION failure — the neck was never there to grade. "
+                    "Lighting the face and not the neck is the usual cause.".format(
+                        coverage['p50']))
+            else:
+                notes.append(
+                    "     body skin found: {:.2f} of the face's area (p50), so the "
+                    "neck was there to grade.".format(coverage['p50']))
+
         seam = data.get('complexion_seam')
         neck = data.get('complexion_neck')
         if seam is not None:

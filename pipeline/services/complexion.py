@@ -216,6 +216,8 @@ def resolve_reference(
 
     name = (base or '').strip().lower()
     if source is None:
+        # No photographs to take lightness from; the swatch's own L is the
+        # only value available and is the least trustworthy part of it.
         return Reference(lab=anchor, base=name, disagreement=None)
 
     offset = source.lab[1:] - anchor[1:]
@@ -224,6 +226,12 @@ def resolve_reference(
         offset = offset * (UNDERTONE_BOUND / distance)
     effective = anchor.copy()
     effective[1:] += offset
+    # Lightness from the PHOTOGRAPHS, not the swatch. A swatch's L is a paint
+    # chip under studio-neutral light and says nothing about how bright this
+    # person's skin appears in a frame; aiming at it drove the lightness gain
+    # to its cap on the first footage run (p95 2.00) and read as pulsing on
+    # every tone step while `auto` was steady. The step supplies the tone.
+    effective[0] = source.lab[0]
     return Reference(lab=effective, base=name, disagreement=distance)
 
 
