@@ -541,8 +541,25 @@ were the alternatives. The measurement is scripted end to end:
 The first download arrived CRC-corrupt (`zipfile.testzip` fails on its first
 entry, while RefSel passes); the re-download hit Drive's per-file quota —
 *"may exceed the maximum download quota"* — which resets in about 24 hours.
-Everything else (venv, 4.1 GB of Arc2Face weights, the four detector/parser
-files, the stills) is on the pod's disk with 7.4 GB free. **The retry is:**
+**The pod was terminated that night** (the operator wanted a clean start), so
+the venv, weights and stills are gone with its disk. Nothing else is: the
+setup script is idempotent and carries every fix. **The retry on a fresh pod
+is the setup script first** (~15–20 min, mostly downloads; `setsid`, not
+plain `nohup`), then the stills, then the three commands below. Mind the disk
+— the main checkpoint is 7 GB and the setup is ~11 GB in total, and pip's
+cache filled a 25 GB overlay once already (`rm -rf /root/.cache/pip
+/tmp/pip-*` frees it). Drive's quota is per file, so a new pod may not dodge
+it; the fallback is a browser download pushed with `orchestrator.py push`.
+
+```bash
+python vast/orchestrator.py push tools/routeb_refstar_setup.sh /workspace/routeb_refstar_setup.sh
+python vast/orchestrator.py run "setsid nohup bash /workspace/routeb_refstar_setup.sh > /workspace/refstar-setup.log 2>&1 < /dev/null & disown"
+# ... wait for '== done' in /workspace/refstar-setup.log, then the stills:
+python vast/orchestrator.py run "mkdir -p /workspace/routeb/in && cd /workspace/Phantom && /workspace/venv/bin/python tools/identity_probe.py -s source/two/IMG_3091.jpg source/two/IMG_3623.jpg source/two/IMG_3674.jpg source/two/IMG_3701.jpg source/two/IMG_3745.png source/two/IMG_3751.png -t target/face-3.jpeg --sweep enhance=false,true --save-frames /workspace/routeb/in --execution-provider cuda"
+python vast/orchestrator.py push tools/routeb_refstar_run.sh /workspace/routeb_refstar_run.sh
+```
+
+**Then:**
 
 ```bash
 python vast/orchestrator.py run "cd /workspace/RefSTAR/test/pretrained_models && /workspace/venv-refstar/bin/python -m gdown -O net_g_latest.pth 'https://drive.google.com/uc?id=1kKMO9fSUHf5RbpKFPMaPp3D7gC0n99-m' && /workspace/venv-refstar/bin/python -c \"import zipfile; print(zipfile.ZipFile('net_g_latest.pth').testzip())\""
