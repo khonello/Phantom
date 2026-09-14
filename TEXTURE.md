@@ -178,6 +178,21 @@ is worth doing.
    upsampled** — so a face comfortably over 400px in the original photograph.
    Read the `texture source:` line to confirm which was picked and that it does
    not say "upsampled". If the creases vanish, the picker is the fix.
+
+   **The picker was changed 2026-09-14 so that it chooses this way on its
+   own.** `_texture_score` now scores frontality from `off_axis` (yaw *and*
+   pitch) against the shape picker's 45° limit rather than a lenient /90, at
+   weight 0.45 against sharpness 0.45 (was 0.20 / 0.40), and face size became
+   a **gate** on the whole score — `(extent / 400)²` — rather than a term in
+   the sum, so an upsampled donor can only win when nothing larger exists. On
+   the fixture that produced the bad pick, 28° off axis now loses to frontal
+   (0.393 vs 0.433) while a sharp photograph at 10° still beats a soft frontal
+   one (0.494 vs 0.433) — texture still wants detail, it just no longer wants
+   it at any angle. **Unjudged on footage**: the next `texture source:` line
+   from `source/one` should name a different photograph than face-19, and
+   whether the creases go with it is the question. Expression is still not
+   scored — a neutral face cannot be told from a smiling one without a
+   landmark layout the pack does not promise.
 2. **If they do not vanish, the extraction band is the fix**, not the donor —
    the mark octave is picking up structure that is not skin, and no weighting of
    a bad map helps.

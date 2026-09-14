@@ -29,10 +29,17 @@ from pipeline.services.face_detection import FaceDetector
 # transform and does not correct yaw, so an angled source yields a foreshortened
 # map — but selection can only choose among what was uploaded, and refusing an
 # angled source is the guards' job, not this one's.
+# Reweighted 2026-09-14 after the layer's first footage verdict. At 0.40 / 0.20
+# the picker chose a 369px, upsampled, 28-degrees-off-axis photograph out of a
+# set of 21, and the map it produced painted the donor's creases on a
+# differently-posed face (TEXTURE.md §3-4). Sharpness still matters — a soft
+# donor has nothing to lift — but a foreshortened one lands its marks in the
+# wrong places, and pose now scores against the same 45-degree limit the shape
+# picker uses rather than a lenient /90. Size left this table: see the gate in
+# `_texture_score`.
 _TEXTURE_WEIGHTS = {
-    'sharpness': 0.40,
-    'size': 0.30,
-    'frontality': 0.20,
+    'sharpness': 0.45,
+    'frontality': 0.45,
     'exposure': 0.10,
 }
 
@@ -155,20 +162,28 @@ def _texture_score(frame: Frame, detection: Detection) -> float:
     variance = guards.sharpness(frame, bbox)
     sharpness = variance / (variance + _SHARPNESS_HALF)
 
-    size = min(1.0, min(bbox.w, bbox.h) / _SIZE_FULL)
+    # Size is a GATE on the whole score, not a term in the sum. A face under
+    # `_SIZE_FULL` is upsampled into the canonical crop and its fine octave is
+    # interpolated rather than photographed — the extractor says so itself
+    # ("the band is thinner than it looks"). Squared, so a 369px face keeps
+    # 85% of its score and a 200px one 25%: a small donor can still win when
+    # nothing larger exists, and cannot beat a full-size one on sharpness.
+    gate = min(1.0, min(bbox.w, bbox.h) / _SIZE_FULL) ** 2
 
-    yaw = guards.estimate_yaw(detection)
+    deviation = off_axis(detection)
     # An unreadable pose scores as neutral rather than as frontal. Scoring it
     # frontal would let a model pack without `pose` promote every image to the
     # top of this term, which is a silent change of behaviour with the pack.
-    frontality = 0.5 if yaw is None else max(0.0, 1.0 - abs(yaw) / 90.0)
+    # Yaw AND pitch, against the shape picker's limit: a lowered chin
+    # foreshortens the map vertically exactly as a turned head does across.
+    frontality = (0.5 if deviation is None else
+                  max(0.0, 1.0 - deviation / _SHAPE_FRONTAL_LIMIT))
 
-    return float(
+    return float(gate * (
         _TEXTURE_WEIGHTS['sharpness'] * sharpness
-        + _TEXTURE_WEIGHTS['size'] * size
         + _TEXTURE_WEIGHTS['frontality'] * frontality
         + _TEXTURE_WEIGHTS['exposure'] * _exposure_score(frame, bbox)
-    )
+    ))
 
 
 def off_axis(detection: Detection) -> Optional[float]:

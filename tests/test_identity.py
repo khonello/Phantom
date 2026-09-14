@@ -964,9 +964,14 @@ check('off_axis is None when pose cannot be read',
       db.off_axis(types.SimpleNamespace(
           face=types.SimpleNamespace(pose=None), kps=None)) is None)
 
-# The decisive case: a sharp angled photograph against a softer frontal one.
-# The texture picker must keep preferring the sharp one, and the shape picker
-# must not — that divergence is the entire reason for a second scorer.
+# The decisive case, and it flipped on footage. A sharp photograph 28 degrees
+# off axis against a softer frontal one: the texture picker USED to prefer the
+# sharp one, and that pick — 369px, upsampled, 28 degrees — produced the map
+# that painted the donor's creases on a differently-posed face (TEXTURE.md
+# §3-4). A foreshortened map lands its marks in the wrong places whatever its
+# sharpness, so 28 degrees now loses to frontal. The two pickers still differ
+# — texture weights sharpness where shape barely does — which the mildly
+# angled case below pins.
 _sharp_angled = _shot(sharpness=60.0, yaw=28.0)
 _soft_frontal = _shot(sharpness=14.0, yaw=2.0)
 
@@ -975,14 +980,33 @@ _t_frontal = db._texture_score(*_soft_frontal)
 _s_angled = db._shape_score(*_sharp_angled)
 _s_frontal = db._shape_score(*_soft_frontal)
 
-check('the texture score still prefers the sharp angled photograph',
-      _t_angled > _t_frontal,
-      'angled {:.3f} vs frontal {:.3f}'.format(_t_angled, _t_frontal))
-check('the shape score prefers the frontal one instead',
+check('the texture score no longer prefers a photograph 28 degrees off axis',
+      _t_frontal > _t_angled,
+      'frontal {:.3f} vs angled {:.3f} — the 28-degree donor was the one that '
+      'painted creases on'.format(_t_frontal, _t_angled))
+check('the shape score prefers the frontal one too',
       _s_frontal > _s_angled,
       'frontal {:.3f} vs angled {:.3f}'.format(_s_frontal, _s_angled))
-check('and the two therefore disagree, which is why there are two',
-      (_t_angled > _t_frontal) != (_s_frontal < _s_angled))
+
+# Where the two still part: a sharp photograph only mildly off axis against a
+# soft frontal one. Texture wants the detail; shape wants the geometry.
+_sharp_mild = _shot(sharpness=60.0, yaw=10.0)
+check('texture still takes a sharp photograph over a soft one at a mild angle',
+      db._texture_score(*_sharp_mild) > _t_frontal,
+      'mild {:.3f} vs frontal {:.3f}'.format(db._texture_score(*_sharp_mild), _t_frontal))
+check('shape does not, which is why there are two pickers',
+      db._shape_score(*_soft_frontal) > db._shape_score(*_sharp_mild),
+      'frontal {:.3f} vs mild {:.3f}'.format(
+          db._shape_score(*_soft_frontal), db._shape_score(*_sharp_mild)))
+
+# And the gate: the same photograph at 369px — the real donor's size — scores
+# below itself at full size, because its fine octave would be interpolated.
+_full = _shot(sharpness=60.0, yaw=2.0, extent=420.0)
+_small = _shot(sharpness=60.0, yaw=2.0, extent=369.0)
+check('an upsampled donor scores below the same face at full size',
+      db._texture_score(*_small) < db._texture_score(*_full) * 0.9,
+      '369px {:.3f} vs 420px {:.3f}'.format(
+          db._texture_score(*_small), db._texture_score(*_full)))
 
 # Frontality has to dominate the shape score, or the fix does not hold when a
 # very sharp angled photograph is in the set.

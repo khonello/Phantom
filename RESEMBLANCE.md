@@ -574,7 +574,9 @@ reachable through `set_realism` for a running pipeline, reported by
 2. **Route A**, and the flag matrix A on/off on the cross-tone pair.
 3. **Route B** — time InstantRestore on the 4090; adopt for RENDER and photo
    regardless of the live verdict.
-4. **Un-park texture** (TEXTURE.md §7) over A.
+4. **Un-park texture** (TEXTURE.md §7) over A. *Step 1 of that — the donor
+   picker — landed 2026-09-14 while Route A was under test; inert until
+   `texture_strength` is set, and unjudged on footage.*
 5. **Route D** — the ReSwapper fine-tune, cheapest test of texture in the
    generator.
 6. **Route C** — the latency prototype. The strategic answer if it holds.
