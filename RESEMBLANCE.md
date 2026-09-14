@@ -5,7 +5,7 @@ the source, target feature leakage driven down, until the output is a striking,
 unmistakable resemblance to the source.** Complexion means *all visible skin* —
 neck, ears, chest, hands — not the face alone.
 
-Status: **the core (§3) and Route A are built (2026-09-13). Route A is ON, and after two footage runs on 2026-09-14 the face verdict is positive on the hardest pairing** — see the notes under Route A. **Route B's measurement is set up on the pod and blocked on one download** — see under Route B. C–E planned.
+Status: **the core (§3) is built. Route A is CLOSED, on by default, 2026-09-14** — face verdict positive on the hardest pairing, one limitation accepted and stated under Route A. **Route B's measurement is scripted and waits on a fresh pod** — see under Route B. C–E planned.
 This is the implementation approach agreed 2026-09-13, written before the
 first line of code so the routes are judged against what they were meant to
 deliver rather than what they happened to do.
@@ -319,13 +319,39 @@ source tone step several classes from the target's measured tone licenses a
 larger gain than `auto` should ever take, which is what the operator proposed
 the dropdown for in the first place.
 
-**Checkpoint, end of 2026-09-14 — Route A is built and working, not yet
-closed.** Every defect footage produced has a measured cause and a shipped
-fix; the face verdict on the hardest pairing is positive. Two things remain
-unjudged and decide the close: the MY TONE lightness change (does the
-neck/shoulder step go, and what does a 2.5× gain cost in noise on dark
-skin), and the texture donor picker. When those are seen, the default flips
-from 0 to on and Route A closes. Until then: on in `.env`, off in config.
+**CLOSED, end of 2026-09-14 — on by default (`skin_complexion` 1.0), one
+limitation accepted.** The operator asked for the close and the record
+supports it: every defect footage produced has a measured cause and a
+shipped fix, and the face verdict on the hardest pairing in §3.3 is
+*"phenomenal"*, *"closer to the source than the rest of the body"*, *"better
+than what we had before today's work"*.
+
+**The accepted limitation — the neck and shoulders on a fair-on-dark
+pairing.** MY TONE was tried at the darkest step against the source's fair
+one; in the operator's words, the result *"still looks quite different from
+face, complexion is not very close … neck and shoulder did not meet face."*
+Two things about that, both stated rather than argued away:
+
+- It could not be confirmed that the pod carried `997ee11` (the declared-tone
+  gain) during the try — it was pushed after the second footage run, reaches
+  the pipeline only on a `resume`, and without it `set_realism` rejects the
+  field while the dropdown appears to work. The pod was terminated that night,
+  so this is unverifiable now. A fresh pod carries everything.
+- **But the limit is real either way.** Carrying dark skin 30+ L units up to
+  meet a face the swapper generated fair is at the edge of what a lightness
+  gain can do believably: it multiplies the camera's noise on that skin with
+  it, and lifting L does not supply the translucency fair skin has. The
+  operator's own read is the right one — *"if the person testing is fair,
+  things will be so much better"* — a pairing without that gap has nothing
+  here to fail. Recorded in docs/ACCEPTED_RISKS.md terms: known, bounded, and
+  the remedy for the hardest pairing is a route that generates the neck rather
+  than grades it (C, head composite; or the STUDIO head swaps in E).
+
+**What closes with it:** `skin_complexion` default 0 → **1.0**;
+`complexion_base` and `complexion_target_base` stay `auto`. `SKIN_COMPLEXION=`
+blank now means on; `0` turns it off. The texture donor picker remains
+unjudged and moves to the texture un-park (§8 step 4), which the operator's
+slider observation has just made the next thing worth footage.
 
 **And a texture verdict that reverses the last one.** The layer's only footage
 verdict had been 2026-09-10's *net-negative* — smoother, creases painted on,
@@ -670,7 +696,7 @@ D and E whenever there is a pod hour.**
 
 | Route | Key | Off | Lives on |
 |---|---|---|---|
-| A | `COMPLEXION_BASE=` (baseline, blank is `auto`), `SKIN_COMPLEXION=` (+ `SKIN_COMPLEXION_HANDS=`) | blank | **main, built; ON in the operator's `.env` and under test since 2026-09-14** |
+| A | `COMPLEXION_BASE=` (baseline, blank is `auto`), `SKIN_COMPLEXION=` (+ `SKIN_COMPLEXION_HANDS=`, `COMPLEXION_TARGET_BASE=`) | **`SKIN_COMPLEXION=0`** (default is on) | **main, CLOSED, on by default since 2026-09-14** |
 | B | `ENHANCER_MODEL=` | default model | main, registry entry |
 | C | `REENACT=` | blank | long-lived branch |
 | D | `IDENTITY_MODEL=` | blank | long-lived branch; output consumed on main |

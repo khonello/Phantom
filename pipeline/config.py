@@ -393,7 +393,15 @@ class FaceSwapConfig:
     # carry the source's tone, and the face and the neck agree because one
     # stage graded both. Chroma shifted, lightness scaled, bounded, smoothed
     # on its parameters. 0 is off. See pipeline/processing/complexion_stage.py.
-    skin_complexion: float = 0.0
+    #
+    # ON by default since 2026-09-14, earned on footage: two live runs on a
+    # fair-source / dark-target pairing — the hardest in RESEMBLANCE.md §3.3 —
+    # and the operator's verdict on the face was "phenomenal", "closer to the
+    # source than anything before". The known limit is stated there too: the
+    # neck and shoulders on that pairing do not reach the face, because a
+    # lightness gain cannot believably carry dark skin 30+ L units. A pairing
+    # without that gap sees none of it.
+    skin_complexion: float = 1.0
     # Whether that grade reaches body skin outside the corridor below the
     # face — hands and arms. A cross-tone hand recolour is where the eye
     # catches it; a graded neck over an ungraded wrist is the other failure.

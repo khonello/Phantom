@@ -158,7 +158,8 @@ check('strength 0 returns the same frame object',
 check('no reference returns the same frame object',
       stage_for(1.0).apply(frame, face, None) is frame)
 check('the stage reports itself disabled at 0', not stage_for(0.0).enabled())
-check('a config default is off', FaceSwapConfig().skin_complexion == 0.0)
+check('the config default is ON, earned on footage 2026-09-14',
+      FaceSwapConfig().skin_complexion == 1.0)
 
 # ── On, at full strength ───────────────────────────────────────────────
 print('\nFull strength')
