@@ -103,6 +103,15 @@ _HARMONISE_L_RATIO = 0.82
 _HARMONISE_MAX_GAIN = 2.0
 _HARMONISE_MAX_SHIFT = 20.0
 
+# Headroom. A gain is applied to every skin pixel, and the face's MEDIAN is
+# the brightest large region on most people — so a gain that carries the
+# median past this ceiling has already flattened the highlights above it to
+# white. Under strong, even light a declared class ratio of 2.5 on a face at
+# L 200 would do exactly that to the whole person at once: consistent, and
+# ruined. The gain is limited so the median lands no higher than this, which
+# on a bright frame quietly reduces a large ratio to what the frame can hold.
+_L_HEADROOM = 232.0
+
 
 class ComplexionStage:
     """
@@ -219,6 +228,8 @@ class ComplexionStage:
         else:
             ratio = float(reference[0]) / max(float(target[0]), 1.0)
             gain = float(np.clip(ratio ** strength, _MIN_GAIN, _MAX_GAIN))
+        # Never past the frame's headroom, whichever regime licensed the gain.
+        gain = min(gain, max(1.0, _L_HEADROOM / max(float(target[0]), 1.0)))
 
         if self._shift is None or self._gain is None:
             self._shift, self._gain = shift.astype(np.float32), gain
@@ -274,6 +285,7 @@ class ComplexionStage:
         # Lift only toward the floor ratio, never past it, never down.
         wanted = max(ratio, _HARMONISE_L_RATIO)
         gain = float(np.clip((wanted / max(ratio, 1e-3)) ** strength, 1.0, _HARMONISE_MAX_GAIN))
+        gain = min(gain, max(1.0, _L_HEADROOM / max(float(body_lab[0]), 1.0)))
 
         if self._h_shift is None or self._h_gain is None:
             self._h_shift, self._h_gain = shift.astype(np.float32), gain

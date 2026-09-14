@@ -367,6 +367,22 @@ hue — the footage case):
 
 Both unjudged on footage; the fresh-pod session is what judges them.
 
+**And the question the operator asked next — strong, even light.** Under
+blasting light face and body stay consistent *by construction*: one chroma
+offset and one gain, applied identically to every skin pixel, cannot change
+the relationship between two regions, and the harmoniser does nothing when
+the body is already in the face's light (pinned: neck/face L 0.85 → 0.85,
+correction ≈ 0). What could go wrong was **clipping**: a declared class ratio
+of 2.5 on a face the camera already renders at L 200 flattens the whole
+person to white — consistent, and ruined. Fixed with a **headroom guard**
+(`_L_HEADROOM` 232): neither gain may carry the face's or body's median past
+it, so on a bright frame a large licensed ratio quietly becomes what the
+frame can hold (pinned: gain 2.5 → 1.16, face median 231, <5% of pixels at
+white). The one residual that stays is the colour space's: near white the
+sRGB gamut cannot hold skin chroma, and a brighter face loses ~2 units the
+neck keeps. No correction can put back a colour that does not exist at that
+brightness; that is the ceiling under blasting light, and it is small.
+
 **What closes with it:** `skin_complexion` default 0 → **1.0**;
 `complexion_base` and `complexion_target_base` stay `auto`. `SKIN_COMPLEXION=`
 blank now means on; `0` turns it off. The texture donor picker remains

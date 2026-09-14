@@ -426,6 +426,40 @@ check('a body already close to the face is barely touched',
       same_light.last_harmonise is None or same_light.last_harmonise < 3.0,
       'corrected {:.1f}'.format(same_light.last_harmonise or 0.0))
 
+# ── Blasting light: consistent, and not clipped to white ────────────────
+print('\nStrong even light')
+
+# Everything bright, face and body under the SAME light: a fair source
+# declared over a dark target that the camera has already rendered at L 200.
+BRIGHT = (200, 142, 148)
+bright = scene(skin_lab=BRIGHT, neck_shade=0.85)
+lit = declared_stage(0.7)
+lit_out = settle(lit, bright, face, fair_ref)
+face_l = median_lab(lit_out, FOREHEAD)[0]
+neck_l = median_lab(lit_out, NECK)[0]
+check('the class ratio is held back by the frame\'s headroom rather than clipping',
+      lit.last_gain is not None and lit.last_gain < 1.3 and face_l <= complexion_stage._L_HEADROOM + 3,
+      'gain {:.2f}, face L {:.0f} (ceiling {:.0f})'.format(
+          lit.last_gain or 0.0, face_l, complexion_stage._L_HEADROOM))
+check('so the face is not flattened to white',
+      float((cv2.cvtColor(lit_out, cv2.COLOR_BGR2LAB)[FOREHEAD][:, :, 0] >= 254).mean()) < 0.05)
+check('face and neck keep their relationship under even light',
+      abs(neck_l / face_l - median_lab(bright, NECK)[0] / median_lab(bright, FOREHEAD)[0]) < 0.06,
+      'neck/face L {:.2f} -> {:.2f}'.format(
+          median_lab(bright, NECK)[0] / median_lab(bright, FOREHEAD)[0], neck_l / face_l))
+# Near white the sRGB gamut cannot hold the chroma: the same LAB target
+# round-trips to (136, 144) at L 231 and (138, 144) at L 196, so a brighter
+# face loses ~2 units the neck keeps, and no correction can put back a colour
+# that does not exist at that brightness. That is the ceiling under blasting
+# light, and it is a property of the colour space, not of the stage.
+check('and agree in chroma to within the gamut loss near white',
+      complexion.chroma_distance(median_lab(lit_out, FOREHEAD), median_lab(lit_out, NECK)) < 2.5,
+      '{:.2f} units'.format(complexion.chroma_distance(median_lab(lit_out, FOREHEAD), median_lab(lit_out, NECK))))
+check('the harmoniser had only that gamut residual to chase',
+      lit.last_harmonise is None or lit.last_harmonise < 2.0,
+      'corrected {:.1f}'.format(lit.last_harmonise or 0.0))
+check('the wall is byte-identical', np.array_equal(lit_out[WALL], bright[WALL]))
+
 # ── The compositor's wiring ────────────────────────────────────────────
 print('\nCompositor wiring')
 
