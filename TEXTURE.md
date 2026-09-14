@@ -1,7 +1,12 @@
 # Texture — why the swapped face reads as too clean
 
-**Parked.** Read this before restarting it; two things were fixed, one remains,
-and the layer stays off.
+**Parked — and now contested by footage.** Read this before restarting it;
+two things were fixed, one remains, and the layer stays off in config. But on
+2026-09-14, with Route A's whole-skin complexion grade underneath it, the
+operator raised the slider on a live call and reported the face becoming
+*more* realistic — the opposite of the 2026-09-10 verdict below. See
+RESEMBLANCE.md Route A's checkpoint note; the sequencing (complexion first)
+may be what changed, and the donor picker was rewritten the same day.
 
 The swapped face carries roughly 58% of the frame's high-frequency energy
 against an ideal of 1.00. That deficit is what reads as plastic, and

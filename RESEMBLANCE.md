@@ -319,6 +319,29 @@ source tone step several classes from the target's measured tone licenses a
 larger gain than `auto` should ever take, which is what the operator proposed
 the dropdown for in the first place.
 
+**Checkpoint, end of 2026-09-14 — Route A is built and working, not yet
+closed.** Every defect footage produced has a measured cause and a shipped
+fix; the face verdict on the hardest pairing is positive. Two things remain
+unjudged and decide the close: the MY TONE lightness change (does the
+neck/shoulder step go, and what does a 2.5× gain cost in noise on dark
+skin), and the texture donor picker. When those are seen, the default flips
+from 0 to on and Route A closes. Until then: on in `.env`, off in config.
+
+**And a texture verdict that reverses the last one.** The layer's only footage
+verdict had been 2026-09-10's *net-negative* — smoother, creases painted on,
+parked at 0. On this run, with Route A underneath it, the operator raised the
+TUNING slider and reported: *"when I increase the texture slider, I notice
+that the texture becomes well good, see some displacement and things that
+make the whole thing realistic."* The REALISM blocks agree the layer was
+running (`detail_reserve` 0.28–0.35, delivered 62–77% of budget). This is the
+sequencing argument of §2 showing up in footage — texture over correct
+complexion reads as skin, texture over the target's colour did not. **Caveat
+attached:** whether the pod carried the new donor picker (`a6d2c82`) or the
+old one during that run is unknown from here; the `Texture source:` line in
+the pod log names the photograph and settles it. Either way, `texture_strength`
+is now a candidate to un-park rather than a parked layer, and Route B is the
+principled version of what it does by hand.
+
 **The block from that run settled it, and the fix landed the same day.**
 `complexion_gain` p50 = p95 = max = **1.250** — pinned on every frame;
 `complexion_lum` −36; **`complexion_coverage` 4.63**, so the neck and
