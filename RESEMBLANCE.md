@@ -5,7 +5,7 @@ the source, target feature leakage driven down, until the output is a striking,
 unmistakable resemblance to the source.** Complexion means *all visible skin* —
 neck, ears, chest, hands — not the face alone.
 
-Status: **the core (§3) and Route A are built, 2026-09-13, both off by default; Route A is unjudged on footage. B–E planned.**
+Status: **the core (§3) and Route A are built (2026-09-13). Route A is ON and under test on footage as of 2026-09-14** — see the note under Route A. B–E planned.
 This is the implementation approach agreed 2026-09-13, written before the
 first line of code so the routes are judged against what they were meant to
 deliver rather than what they happened to do.
@@ -233,6 +233,22 @@ that means something else.
 
 **Delivers:** the source's complexion on the face *and* on every other visible
 skin pixel — neck, ears, chest, hands — with no colour step at the jaw.
+
+**Under test on footage since 2026-09-14.** Switched on live against the UK
+A100 pod (`skin_complexion=1.0` through `tools/realism.py`, mirrored as
+`SKIN_COMPLEXION=1.0` in the operator's `.env`), together with the four levers
+turned on the day before — `identity_push` 0.25, `complexion_keep` 0.4,
+`diffuse_strength` 0.3, `shape_warp` 0.3 — and `identity_probe=5`. The
+baseline was being driven from the new dropdown during the session (`mst03`,
+then `mst02`). **All five are on together**, so the first readings are one
+combined result; attribution needs them flipped one at a time mid-stream,
+and Route A is the one to isolate first because it is the only one that
+touches skin outside the face. The config default stays `0.0` until the
+footage verdict is in; "on" here means the operator's `.env` and the live
+pipeline, which is the same mechanism the four levers use. What to read
+first: the neck and wrists by eye, then `complexion_seam` (hold under 4),
+`complexion_shift` (28 means the cap is binding), and `skin_grade` in the
+per-stage latency report for the pod's own cost.
 
 **Built 2026-09-13** — `pipeline/processing/complexion_stage.py`, called from
 `ProcessingPipeline._swap_face` through `FaceCompositor.grade_skin` before
@@ -475,7 +491,7 @@ D and E whenever there is a pod hour.**
 
 | Route | Key | Off | Lives on |
 |---|---|---|---|
-| A | `COMPLEXION_BASE=` (baseline, blank is `auto`), `SKIN_COMPLEXION=` (+ `SKIN_COMPLEXION_HANDS=`) | blank | **main, built, off** |
+| A | `COMPLEXION_BASE=` (baseline, blank is `auto`), `SKIN_COMPLEXION=` (+ `SKIN_COMPLEXION_HANDS=`) | blank | **main, built; ON in the operator's `.env` and under test since 2026-09-14** |
 | B | `ENHANCER_MODEL=` | default model | main, registry entry |
 | C | `REENACT=` | blank | long-lived branch |
 | D | `IDENTITY_MODEL=` | blank | long-lived branch; output consumed on main |
