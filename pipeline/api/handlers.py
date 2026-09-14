@@ -611,6 +611,7 @@ def handle_get_stats(
             'skin_model': config.skin_model,
             'skin_complexion': config.skin_complexion,
             'skin_complexion_hands': config.skin_complexion_hands,
+            'skin_harmonise': config.skin_harmonise,
             'complexion_base': config.complexion_base,
             'complexion_target_base': config.complexion_target_base,
             # A shape-aware model whose contour is being clipped back off is
@@ -988,6 +989,7 @@ _REALISM_FIELDS: Dict[str, Any] = {
     # source's complexion and there is nothing past it.
     'skin_complexion': lambda v: min(1.0, max(0.0, float(v))),
     'skin_complexion_hands': lambda v: bool(v),
+    'skin_harmonise': lambda v: min(1.0, max(0.0, float(v))),
     'complexion_base': (
         lambda v: str(v).strip().lower()
         if str(v).strip().lower() in complexion.BASES else None),

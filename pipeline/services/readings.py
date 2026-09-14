@@ -337,6 +337,14 @@ class Readings:
                     "     body skin found: {:.2f} of the face's area (p50), so the "
                     "neck was there to grade.".format(coverage['p50']))
 
+        harmonise = data.get('complexion_harmonise')
+        if harmonise is not None and harmonise['p50'] > 1.0:
+            notes.append(
+                "     the second pass corrected the body by {:.1f} units of chroma "
+                "to meet the face (p50) — the global grade alone left them that "
+                "far apart. Whether it closed is the seam line.".format(
+                    harmonise['p50']))
+
         seam = data.get('complexion_seam')
         neck = data.get('complexion_neck')
         if seam is not None:

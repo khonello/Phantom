@@ -128,6 +128,7 @@ def _render(data: Dict[str, Any]) -> List[str]:
     out.append(_line('source_blend', ident.get('source_blend')))
     out.append(_line('skin_model', ident.get('skin_model')))
     out.append(_line('skin_complexion', ident.get('skin_complexion')))
+    out.append(_line('skin_harmonise', ident.get('skin_harmonise')))
     out.append(_line('complexion_base', ident.get('complexion_base')))
     out.append(_line('complexion_target_base', ident.get('complexion_target_base')))
 

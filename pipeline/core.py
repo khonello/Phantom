@@ -213,6 +213,11 @@ def parse_args() -> None:
                              'swap, as the fraction of the gap to close (0-1, 0 is off)',
                         dest='skin_complexion', type=float,
                         default=_env_float('SKIN_COMPLEXION'))
+    program.add_argument('--skin-harmonise',
+                        help='after the grade, correct body skin toward the graded face '
+                             '(0-1 of the residual; 0 is off)',
+                        dest='skin_harmonise', type=float,
+                        default=_env_float('SKIN_HARMONISE'))
     program.add_argument('--no-skin-complexion-hands',
                         help='keep that grade off hands and arms',
                         dest='skin_complexion_hands', action='store_false',
@@ -339,6 +344,7 @@ def parse_args() -> None:
         ('skin_model', args.skin_model),
         ('skin_complexion', args.skin_complexion),
         ('skin_complexion_hands', args.skin_complexion_hands),
+        ('skin_harmonise', args.skin_harmonise),
         ('complexion_base', args.complexion_base),
         ('complexion_target_base', args.complexion_target_base),
         ('texture_strength', args.texture_strength),

@@ -406,6 +406,12 @@ class FaceSwapConfig:
     # face — hands and arms. A cross-tone hand recolour is where the eye
     # catches it; a graded neck over an ungraded wrist is the other failure.
     skin_complexion_hands: bool = True
+    # Second pass of Route A: after the grade, correct the BODY skin toward
+    # the graded FACE skin — chroma fully, lightness toward a plausible
+    # neck-to-face ratio, both bounded. Makes the face and the neck agree
+    # whatever left them apart, which is the operator's complaint on a
+    # fair-on-dark pairing. Fraction of the residual to remove; 0 is off.
+    skin_harmonise: float = 0.7
     # The baseline the grade aims at: `auto` is the median of the source
     # photographs; an `mstNN` Monk Skin Tone step is an operator-chosen anchor
     # with the photographs supplying undertone inside a bound. A prior, not a

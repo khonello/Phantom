@@ -350,6 +350,82 @@ check('while the shading ratio still survives',
 check('and the wall is still byte-identical',
       np.array_equal(declared_out[WALL], dark_frame[WALL]))
 
+# ── Harmonise: the body meets the face whatever left them apart ────────
+print('\nHarmonise')
+
+CHEST = (slice(int(FY + FS * 1.5), int(FY + FS * 1.9)), slice(int(FX), int(FX + FS)))
+
+
+def torch_scene(skin_lab: tuple, neck_shade: float, hue: int) -> np.ndarray:
+    """A face under a torch, the neck and a wide chest band in room light."""
+    f = np.full((H, W, 3), (200, 120, 40), dtype=np.uint8)
+    cv2.ellipse(f, (int(FX + FS / 2), int(FY + FS / 2)),
+                (int(FS * 0.42), int(FS * 0.5)), 0, 0, 360, lab_to_bgr(skin_lab), -1)
+    for index, colour in ((0, (20, 20, 20)), (1, (20, 20, 20)),
+                          (3, (40, 40, 200)), (4, (40, 40, 200))):
+        cv2.circle(f, (int(face.kps[index][0]), int(face.kps[index][1])), 8, colour, -1)
+    shaded = (int(skin_lab[0] * neck_shade), skin_lab[1] + hue, skin_lab[2])
+    cv2.rectangle(f, (int(FX + FS * 0.3), int(FY + FS * 0.95)),
+                  (int(FX + FS * 0.7), int(FY + FS * 1.4)), lab_to_bgr(shaded), -1)
+    cv2.rectangle(f, (int(FX - FS * 0.2), int(FY + FS * 1.4)),
+                  (int(FX + FS * 1.2), H), lab_to_bgr(shaded), -1)
+    return f
+
+
+torch = torch_scene(DARK, 0.35, 4)
+
+
+def declared_stage(harmonise: float) -> ComplexionStage:
+    st = stage_for(1.0)
+    st.config.complexion_base = 'mst03'
+    st.config.complexion_target_base = 'mst08'
+    st.config.skin_harmonise = harmonise
+    return st
+
+
+check('the config default harmonises', FaceSwapConfig().skin_harmonise > 0.0)
+
+off_stage = declared_stage(0.0)
+off_out = settle(off_stage, torch, face, fair_ref)
+off_seam = complexion.chroma_distance(median_lab(off_out, FOREHEAD), median_lab(off_out, CHEST))
+check('without it a body in a different light stays apart from the face',
+      off_seam > 2.0 and off_stage.last_harmonise is None,
+      'face-chest {:.1f} units'.format(off_seam))
+
+on_stage = declared_stage(0.7)
+on_out = settle(on_stage, torch, face, fair_ref)
+on_seam = complexion.chroma_distance(median_lab(on_out, FOREHEAD), median_lab(on_out, CHEST))
+check('at the default the chest meets the face in chroma',
+      on_seam < 1.5, 'face-chest {:.1f} units (was {:.1f})'.format(on_seam, off_seam))
+check('and the neck does too',
+      complexion.chroma_distance(median_lab(on_out, FOREHEAD), median_lab(on_out, NECK)) < 1.5)
+ratio_off = median_lab(off_out, CHEST)[0] / median_lab(off_out, FOREHEAD)[0]
+ratio_on = median_lab(on_out, CHEST)[0] / median_lab(on_out, FOREHEAD)[0]
+check('the torch-lit lightness ratio is lifted toward a plausible neck',
+      ratio_on > ratio_off + 0.15 and ratio_on <= complexion_stage._HARMONISE_L_RATIO + 0.02,
+      'chest/face L {:.2f} -> {:.2f}, floor {:.2f}'.format(
+          ratio_off, ratio_on, complexion_stage._HARMONISE_L_RATIO))
+check('the lift is bounded by the harmoniser\'s own gain cap',
+      on_stage._h_gain is not None and on_stage._h_gain <= complexion_stage._HARMONISE_MAX_GAIN + 1e-6)
+check('it reports what it had to correct',
+      on_stage.last_harmonise is not None and on_stage.last_harmonise > 1.0,
+      '{:.1f} units'.format(on_stage.last_harmonise or 0.0))
+check('the wall is still byte-identical after both passes',
+      np.array_equal(on_out[WALL], torch[WALL]))
+
+full_stage = declared_stage(1.0)
+full_out = settle(full_stage, torch, face, fair_ref)
+check('at 1.0 the chroma seam closes entirely',
+      complexion.chroma_distance(median_lab(full_out, FOREHEAD), median_lab(full_out, CHEST)) < 0.6)
+
+# On a body already in the face's light, the harmoniser has little to do and
+# does not disturb what the global grade delivered.
+same_light = declared_stage(0.7)
+same_out = settle(same_light, scene(skin_lab=DARK), face, fair_ref)
+check('a body already close to the face is barely touched',
+      same_light.last_harmonise is None or same_light.last_harmonise < 3.0,
+      'corrected {:.1f}'.format(same_light.last_harmonise or 0.0))
+
 # ── The compositor's wiring ────────────────────────────────────────────
 print('\nCompositor wiring')
 

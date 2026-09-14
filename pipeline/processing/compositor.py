@@ -638,6 +638,11 @@ class FaceCompositor:
                 # segmentation failure; healthy means the grade landed there
                 # and the seam is something else.
                 self.last_complexion['complexion_coverage'] = stage.last_coverage
+            if stage.last_harmonise is not None:
+                # What the second pass had to correct on the body to meet the
+                # face, in chroma units. Large means the global grade alone
+                # left them apart; the seam reading says whether it closed.
+                self.last_complexion['complexion_harmonise'] = stage.last_harmonise
 
     def _reshape_head(self, frame: Optional[Frame], face: Face) -> Optional[Frame]:
         """

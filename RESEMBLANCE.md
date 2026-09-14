@@ -347,6 +347,26 @@ Two things about that, both stated rather than argued away:
   the remedy for the hardest pairing is a route that generates the neck rather
   than grades it (C, head composite; or the STUDIO head swaps in E).
 
+**Reopened the same night at the operator's request, to close it well.** Two
+additions, both aimed at the neck and both pinned on a torch-lit synthetic
+scene (face under one light, body at a fifth of its lightness in a warmer
+hue — the footage case):
+
+- **A second seed** (`skin.py`). The corridor directly under the face hull is
+  sampled, admitted by a loose test against the face model, and fitted as its
+  own colour model; a pixel is skin if *either* model says so. Without it the
+  body in that scene is invisible (0.00 coverage); with it, neck 0.77 and
+  chest 1.00. `last_neck_seeded` says whether it engaged.
+- **A harmoniser** (`skin_harmonise`, default **0.7**, `SKIN_HARMONISE=`).
+  After the grade, the body is corrected toward the *graded face* — chroma
+  fully, lightness toward a plausible neck-to-face floor of 0.82, gain capped
+  at 2×. This makes `complexion_seam` go to zero *by construction*, whatever
+  left the two apart. On the torch scene: face–chest 3.2 → **1.0** units at
+  0.7, 0.0 at 1.0; lightness ratio 0.34 → 0.62. A body already in the face's
+  light is barely touched. `complexion_harmonise` reports what it corrected.
+
+Both unjudged on footage; the fresh-pod session is what judges them.
+
 **What closes with it:** `skin_complexion` default 0 → **1.0**;
 `complexion_base` and `complexion_target_base` stay `auto`. `SKIN_COMPLEXION=`
 blank now means on; `0` turns it off. The texture donor picker remains

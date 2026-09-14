@@ -86,6 +86,23 @@ _PARAM_ALPHA = 0.08
 # its centre. Only consulted when hands are switched off.
 _NECK_CORRIDOR = 1.25
 
+# Harmonisation — the second pass, body toward face. After the grade, the
+# face's skin and the body's skin are measured on the GRADED frame and the
+# body is corrected toward the face: chroma all the way, lightness toward a
+# plausible neck-to-face ratio. This is what makes `complexion_seam` go to
+# zero whatever caused it, which is the number the operator's complaint maps
+# to — "the neck and shoulders do not meet the face". Measured 2026-09-14 on
+# a fair-on-dark pairing after a declared-tone gain: still 6 units apart.
+#
+# A neck is darker than the forehead on everyone — it sits in the jaw's
+# shadow — so lightness is not matched, it is brought toward a floor ratio.
+# Under ordinary light the ratio is already ~0.85 and this does little; under
+# a torch at the face it is ~0.3, and lifting it is correcting a light that
+# was never the person's. Bounded, so a body already close is left alone.
+_HARMONISE_L_RATIO = 0.82
+_HARMONISE_MAX_GAIN = 2.0
+_HARMONISE_MAX_SHIFT = 20.0
+
 
 class ComplexionStage:
     """
@@ -109,17 +126,24 @@ class ComplexionStage:
         self.last_coverage: Optional[float] = None
         self._shift: Optional[np.ndarray] = None
         self._gain: Optional[float] = None
+        # The harmoniser's smoothed correction and what it applied.
+        self._h_shift: Optional[np.ndarray] = None
+        self._h_gain: Optional[float] = None
+        self.last_harmonise: Optional[float] = None
 
     def reset(self) -> None:
         """Drop the smoothed parameters. Face lost, source changed."""
         self._shift = None
         self._gain = None
+        self._h_shift = None
+        self._h_gain = None
 
     def clear_readings(self) -> None:
         """Drop the last frame's readings, per frame."""
         self.last_shift = None
         self.last_gain = None
         self.last_coverage = None
+        self.last_harmonise = None
 
     def enabled(self) -> bool:
         """Whether `skin_complexion` asks for anything at all."""
@@ -215,7 +239,53 @@ class ComplexionStage:
             body = _neck_only(body, face)
         alpha = np.maximum(masks.face, body)
 
-        return _apply(frame, alpha, self._shift, self._gain)
+        graded = _apply(frame, alpha, self._shift, self._gain)
+        return self._harmonise(graded, masks.face, body)
+
+    def _harmonise(self, graded: Frame, face_mask: Mask, body: Mask) -> Frame:
+        """
+        Second pass: correct the body toward the graded face.
+
+        Args:
+            graded: The frame after the global grade
+            face_mask: The face skin mask
+            body: The body skin mask (hands already removed if switched off)
+
+        Returns:
+            The frame with the body harmonised, or `graded` unchanged when the
+            knob is off or either region cannot be measured
+        """
+        strength = float(np.clip(
+            float(getattr(self.config, 'skin_harmonise', 0.0) or 0.0), 0.0, 1.0))
+        if strength <= 0.0:
+            return graded
+
+        face_lab = complexion.masked_lab(graded, face_mask)
+        body_lab = complexion.masked_lab(graded, body)
+        if face_lab is None or body_lab is None:
+            return graded
+
+        shift = (face_lab[1:] - body_lab[1:]) * strength
+        magnitude = float(np.hypot(shift[0], shift[1]))
+        if magnitude > _HARMONISE_MAX_SHIFT:
+            shift = shift * (_HARMONISE_MAX_SHIFT / magnitude)
+
+        ratio = float(body_lab[0]) / max(float(face_lab[0]), 1.0)
+        # Lift only toward the floor ratio, never past it, never down.
+        wanted = max(ratio, _HARMONISE_L_RATIO)
+        gain = float(np.clip((wanted / max(ratio, 1e-3)) ** strength, 1.0, _HARMONISE_MAX_GAIN))
+
+        if self._h_shift is None or self._h_gain is None:
+            self._h_shift, self._h_gain = shift.astype(np.float32), gain
+        else:
+            a = _PARAM_ALPHA
+            self._h_shift = (a * shift + (1.0 - a) * self._h_shift).astype(np.float32)
+            self._h_gain = a * gain + (1.0 - a) * self._h_gain
+
+        self.last_harmonise = float(np.hypot(self._h_shift[0], self._h_shift[1]))
+        if self.last_harmonise < complexion.CLOSE and abs(self._h_gain - 1.0) < 0.02:
+            return graded
+        return _apply(graded, body, self._h_shift, self._h_gain)
 
 
 def _apply(frame: Frame, alpha: Mask, shift: np.ndarray, gain: float) -> Frame:

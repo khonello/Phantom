@@ -94,6 +94,20 @@ _FACE_GROW = 0.08
 # a bright spot on a wall, an earring — and is dropped. Hands are far larger.
 _MIN_COMPONENT = 0.05
 
+# The second seed: a corridor directly under the face hull, where the pixels
+# are the person's neck and chest under THEIR OWN light — which on a call is
+# routinely not the face's light (a lamp, a window, a phone torch held at the
+# face). A model fitted from the face alone gates on the face's lightness and
+# loses whatever sits in a different light; measured 2026-09-14, that was the
+# shoulders. Width in face widths either side of centre, depth in face heights
+# below the hull, and a loose admission test so the corridor sample is skin
+# and not a collar.
+_NECK_WIDTH = 0.55
+_NECK_DEPTH = 0.7
+_NECK_ADMIT_CHROMA = 6.0     # MADs from the FACE model, loose on purpose
+_NECK_ADMIT_L_LOW = 0.12     # of the face's L — a neck in deep shadow still counts
+_NECK_ADMIT_L_HIGH = 1.6
+
 # Smoothing. The parameters are medians already, but under a hunting
 # auto-exposure the face's median moves every frame and a fast EMA follows
 # it; 0.25 is roughly four frames at 15fps. The mask edge a little slower.
@@ -201,6 +215,12 @@ class SkinSegmenter:
         self._spread: Optional[np.ndarray] = None
         self._lightness: Optional[float] = None
         self._body: Optional[Mask] = None
+        # The neck model, when the corridor under the face yields one.
+        self._neck_centre: Optional[np.ndarray] = None
+        self._neck_spread: Optional[np.ndarray] = None
+        self._neck_lightness: Optional[float] = None
+        # Whether the last frame found a neck model — for the readings.
+        self.last_neck_seeded: bool = False
 
     def reset(self) -> None:
         """Drop the smoothed model. Face lost, source changed, stream restart."""
@@ -208,6 +228,9 @@ class SkinSegmenter:
         self._spread = None
         self._lightness = None
         self._body = None
+        self._neck_centre = None
+        self._neck_spread = None
+        self._neck_lightness = None
 
     @property
     def sample_lab(self) -> Optional[np.ndarray]:
@@ -320,25 +343,7 @@ class SkinSegmenter:
             self._spread = (a * spread + (1.0 - a) * self._spread).astype(np.float32)
             self._lightness = a * lightness + (1.0 - a) * self._lightness
 
-        # Score every pixel: chroma distance in units of the spread, ramped
-        # from 1 at one spread to 0 at the tolerance, gated on lightness.
-        # Squared distance against a squared ramp avoids a sqrt over the frame.
-        delta = chroma.astype(np.float32)
-        delta -= self._centre
-        delta /= self._spread
-        np.multiply(delta, delta, out=delta)
-        distance2 = delta[:, :, 0]
-        distance2 += delta[:, :, 1]
-        # Ramp in distance: 1 - (d - 1) / (T - 1). Written on d^2 through the
-        # identity d = sqrt(d2) only where it matters, which is the ramp band.
-        score = np.sqrt(distance2, out=distance2)
-        score -= 1.0
-        score /= (_CHROMA_TOLERANCE - 1.0)
-        np.subtract(1.0, score, out=score)
-        np.clip(score, 0.0, 1.0, out=score)
-        low = self._lightness * _L_LOW
-        high = self._lightness * _L_HIGH
-        score[(light <= low) | (light >= high)] = 0.0
+        score = _score(chroma, light, self._centre, self._spread, self._lightness)
 
         # Body is skin outside the grown face hull. The ring between the hull
         # and its growth is the jaw feather and belongs to neither.
@@ -346,6 +351,43 @@ class SkinSegmenter:
         grow = max(1, int(round(extent * _FACE_GROW)))
         hull = _hull_mask(face, (work_h, work_w), _WORK_SCALE)
         grown = cv2.dilate(hull, self._kernel(grow))
+
+        # The second seed. Skin in the corridor under the face, admitted by a
+        # loose test against the FACE model, then fitted as its own model so
+        # the neck's light gates the neck. A pixel is skin if EITHER model
+        # says so.
+        self.last_neck_seeded = False
+        corridor = _neck_corridor(face, hull, (work_h, work_w), _WORK_SCALE)
+        if corridor is not None:
+            admit = corridor & (grown <= 0.5)
+            if int(admit.sum()) >= _MIN_SAMPLE:
+                loose = _score(chroma, light, self._centre,
+                               self._spread * (_NECK_ADMIT_CHROMA / _CHROMA_TOLERANCE),
+                               self._lightness, low=_NECK_ADMIT_L_LOW, high=_NECK_ADMIT_L_HIGH)
+                seed = admit & (loose > 0.5)
+                if int(seed.sum()) >= _MIN_SAMPLE:
+                    neck_sample = chroma[seed]
+                    n_centre = np.median(neck_sample, axis=0).astype(np.float32)
+                    n_spread = np.maximum(
+                        np.median(np.abs(neck_sample - n_centre), axis=0) * 1.4826,
+                        _MIN_SPREAD).astype(np.float32)
+                    n_light = float(np.median(light[seed]))
+                    if (self._neck_centre is None or self._neck_spread is None
+                            or self._neck_lightness is None):
+                        self._neck_centre, self._neck_spread, self._neck_lightness = (
+                            n_centre, n_spread, n_light)
+                    else:
+                        a = _PARAM_ALPHA
+                        self._neck_centre = (a * n_centre + (1.0 - a) * self._neck_centre).astype(np.float32)
+                        self._neck_spread = (a * n_spread + (1.0 - a) * self._neck_spread).astype(np.float32)
+                        self._neck_lightness = a * n_light + (1.0 - a) * self._neck_lightness
+                    self.last_neck_seeded = True
+        if (self.last_neck_seeded and self._neck_centre is not None
+                and self._neck_spread is not None and self._neck_lightness is not None):
+            neck_score = _score(chroma, light, self._neck_centre,
+                                self._neck_spread, self._neck_lightness)
+            np.maximum(score, neck_score, out=score)
+
         score[grown > 0.5] = 0.0
 
         body = self._clean(score, face_area=float(np.count_nonzero(hull > 0.5)))
@@ -387,6 +429,67 @@ class SkinSegmenter:
         # score means a removed speck cannot bleed back in at the edge.
         soft = cv2.GaussianBlur(keep.astype(np.float32), (0, 0), _FEATHER)
         return np.asarray(np.clip(soft, 0.0, 1.0), dtype=np.float32)
+
+
+def _score(
+    chroma: np.ndarray, light: np.ndarray,
+    centre: np.ndarray, spread: np.ndarray, lightness: float,
+    low: float = _L_LOW, high: float = _L_HIGH,
+) -> np.ndarray:
+    """
+    Skin score per pixel against one colour model.
+
+    Chroma distance in units of the model's spread, ramped from 1 at one
+    spread to 0 at `_CHROMA_TOLERANCE`, gated on lightness as multiples of the
+    model's own L. One function for the face model and the neck model, so the
+    two cannot disagree about what "matches" means.
+    """
+    delta = chroma.astype(np.float32)
+    delta -= centre
+    delta /= spread
+    np.multiply(delta, delta, out=delta)
+    distance2 = delta[:, :, 0]
+    distance2 += delta[:, :, 1]
+    score = np.sqrt(distance2, out=distance2)
+    score -= 1.0
+    score /= (_CHROMA_TOLERANCE - 1.0)
+    np.subtract(1.0, score, out=score)
+    np.clip(score, 0.0, 1.0, out=score)
+    score[(light <= lightness * low) | (light >= lightness * high)] = 0.0
+    return np.asarray(score, dtype=np.float32)
+
+
+def _neck_corridor(
+    face: Face, hull: Mask, shape: Tuple[int, int], scale: float,
+) -> Optional[np.ndarray]:
+    """
+    The region directly under the face hull, at working scale, as a boolean.
+
+    Where the neck and upper chest are on anyone facing a camera. Bounded by
+    face widths either side of the face's centre and face heights below the
+    hull's lowest point, so a raised hand or a wall never lands in it.
+    """
+    bbox = getattr(face, 'bbox', None)
+    if bbox is None:
+        return None
+    box = np.asarray(bbox, dtype=np.float64).reshape(-1) * scale
+    if box.size < 4:
+        return None
+    rows = np.flatnonzero(hull.max(axis=1) > 0.5)
+    if rows.size == 0:
+        return None
+    width = max(box[2] - box[0], 1.0)
+    height = max(box[3] - box[1], 1.0)
+    cx = (box[0] + box[2]) / 2.0
+    top = int(rows[-1]) + 1
+    bottom = min(shape[0], int(top + height * _NECK_DEPTH))
+    left = max(0, int(cx - width * _NECK_WIDTH))
+    right = min(shape[1], int(cx + width * _NECK_WIDTH))
+    if bottom <= top or right <= left:
+        return None
+    region = np.zeros(shape, dtype=bool)
+    region[top:bottom, left:right] = True
+    return region
 
 
 def _face_extent(face: Face) -> float:

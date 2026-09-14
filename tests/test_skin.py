@@ -186,6 +186,63 @@ check('and does not take the lighter wall patch for skin',
       coverage(dark_masks.body, PATCH) < 0.2,
       '{:.2f}'.format(coverage(dark_masks.body, PATCH)))
 
+# ── The second seed: a body in a different light than the face ─────────
+print('\nSecond seed')
+
+
+def torch_scene(neck_shade: float, hue: int) -> np.ndarray:
+    """Face under a torch; neck and a wide chest band in room light."""
+    f = np.full((H, W, 3), (200, 120, 40), dtype=np.uint8)
+    cv2.ellipse(f, (int(FX + FS / 2), int(FY + FS / 2)),
+                (int(FS * 0.42), int(FS * 0.5)), 0, 0, 360, lab_to_bgr(SKIN), -1)
+    for index, colour in ((0, (20, 20, 20)), (1, (20, 20, 20)),
+                          (3, (40, 40, 200)), (4, (40, 40, 200))):
+        cv2.circle(f, (int(face.kps[index][0]), int(face.kps[index][1])), 8, colour, -1)
+    shaded = (int(SKIN[0] * neck_shade), SKIN[1] + hue, SKIN[2])
+    cv2.rectangle(f, (int(FX + FS * 0.3), int(FY + FS * 0.95)),
+                  (int(FX + FS * 0.7), int(FY + FS * 1.4)), lab_to_bgr(shaded), -1)
+    cv2.rectangle(f, (int(FX - FS * 0.2), int(FY + FS * 1.4)),
+                  (int(FX + FS * 1.2), H), lab_to_bgr(shaded), -1)
+    return f
+
+
+CHEST = (slice(int(FY + FS * 1.5), int(FY + FS * 1.9)), slice(int(FX), int(FX + FS)))
+
+# The case measured on footage 2026-09-14: a phone torch on the face put the
+# shoulders at a fraction of the face's lightness and in a warmer hue, and the
+# face-fitted model lost them. Below the face gate on purpose.
+torch = torch_scene(0.20, 6)
+seeded = skin.SkinSegmenter()
+torch_masks = None
+for _ in range(3):
+    torch_masks = seeded.segment(torch, face)
+assert torch_masks is not None
+check('a neck at a fifth of the face\'s lightness and a warmer hue is found',
+      coverage(torch_masks.body, NECK) > 0.6 and seeded.last_neck_seeded,
+      'neck {:.2f}, neck model seeded'.format(coverage(torch_masks.body, NECK)))
+check('and the chest band with it',
+      coverage(torch_masks.body, CHEST) > 0.8,
+      '{:.2f}'.format(coverage(torch_masks.body, CHEST)))
+check('the blue wall is still not skin', coverage(torch_masks.body, WALL) < 0.02)
+
+# The counterfactual, so the claim is about the seed and not the gate.
+_corridor = skin._neck_corridor
+skin._neck_corridor = lambda *a, **k: None
+try:
+    unseeded = skin.SkinSegmenter()
+    plain = None
+    for _ in range(3):
+        plain = unseeded.segment(torch, face)
+    assert plain is not None
+    check('without the second seed the same body is invisible',
+          coverage(plain.body, NECK) < 0.05 and coverage(plain.body, CHEST) < 0.05,
+          'neck {:.2f} chest {:.2f}'.format(coverage(plain.body, NECK), coverage(plain.body, CHEST)))
+finally:
+    skin._neck_corridor = _corridor
+
+check('reset drops the neck model too',
+      (seeded.reset() or True) and seeded._neck_centre is None)
+
 # ── State ──────────────────────────────────────────────────────────────
 print('\nState')
 
