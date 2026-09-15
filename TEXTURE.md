@@ -1,12 +1,17 @@
 # Texture — why the swapped face reads as too clean
 
-**Parked — and now contested by footage.** Read this before restarting it;
-two things were fixed, one remains, and the layer stays off in config. But on
-2026-09-14, with Route A's whole-skin complexion grade underneath it, the
-operator raised the slider on a live call and reported the face becoming
-*more* realistic — the opposite of the 2026-09-10 verdict below. See
-RESEMBLANCE.md Route A's checkpoint note; the sequencing (complexion first)
-may be what changed, and the donor picker was rewritten the same day.
+**UN-PARKED 2026-09-15 — on by default at `texture_strength` 0.4.** Two live
+sessions, 2026-09-14 and 2026-09-15, with Route A's whole-skin complexion
+grade underneath it and (on the second) the rewritten donor picker: the
+operator raised the slider to ~0.4 and reported the face becoming *more*
+realistic — *"works quite very well"*. The readings agree the layer ran
+(`detail_reserve` 0.31, delivered 62% of a 2.8-unit budget). The
+2026-09-10 net-negative verdict below stands as a record of what the layer
+did **on a face still carrying the target's colour, with a 28°-off-axis
+upsampled donor** — both of which changed before it was judged again. The
+sequencing in RESEMBLANCE.md §2 (complexion first, texture over it) is what
+this reversal is evidence for. Everything below the line is history and
+mechanism; the open items in §6 remain open.
 
 The swapped face carries roughly 58% of the frame's high-frequency energy
 against an ideal of 1.00. That deficit is what reads as plastic, and

@@ -468,7 +468,14 @@ class FaceSwapConfig:
     # Above 1.0 (to `texture.STRENGTH_MAX`) deliberately exceeds measured parity.
     # Not a shipping value — the desktop slider stops at 1.0 — but the one run
     # that separates "the map is weak" from "the budget is small".
-    texture_strength: float = 0.0
+    # ON at 0.4 since 2026-09-15, earned on footage twice: the operator ran the
+    # TUNING slider up on two live sessions (readings put it at ~0.4) with
+    # Route A's complexion grade underneath and reported the face becoming
+    # MORE realistic — the reverse of the 2026-09-10 verdict that parked it at
+    # 0, which was measured on a face still carrying the target's colour and
+    # with the donor picker that chose a 28-degree, upsampled photograph. Both
+    # of those changed before this did. See TEXTURE.md and RESEMBLANCE.md.
+    texture_strength: float = 0.4
 
     # The three shaping knobs behind that strength. They decide *what* the layer
     # carries; `texture_strength` decides how much of it. All three only matter

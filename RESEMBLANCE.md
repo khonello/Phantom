@@ -784,9 +784,9 @@ lost by waiting: B is scripted end to end and E is registry entries.
 1. ~~**Core**~~ — done.
 2. ~~**Route A**~~ — **final**, 2026-09-15: *"done and fully acceptable"* on
    the hardest pairing. Nothing owed.
-3. **Un-park texture** (TEXTURE.md §7) over A. The donor picker landed
-   2026-09-14; the operator's slider observation the same night reversed the
-   layer's verdict. Judge with the new picker, read `Texture source:`.
+3. ~~**Un-park texture**~~ — **done, 2026-09-15**: on by default at 0.4,
+   judged on two live sessions over Route A (*"works quite very well"*).
+   TEXTURE.md's header records the reversal and why.
 4. **Live cost.** Deferred by instruction until things worked; they do. The
    frame misses its 67ms deadline by 30–40ms and that is felt as lag on a
    call: `skin_grade` ~10ms, `mask` 17–23ms, `reshape` 14ms. Route A's cost

@@ -273,7 +273,8 @@ def add(strength, blended=None, target=None, mask=None):
     ) - base
 
 
-check('texture defaults to off', FaceSwapConfig().texture_strength == 0.0)
+check('texture defaults ON at 0.4, earned on footage 2026-09-15',
+      FaceSwapConfig().texture_strength == 0.4)
 check('at strength 0 the frame is untouched',
       not np.any(add(0.0)),
       'the layer must cost nothing and change nothing when off')
