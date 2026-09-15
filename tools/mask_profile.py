@@ -139,6 +139,48 @@ def main() -> int:
     p50, p95 = _timed(lambda: masker.build(
         face, matrix, aligned, frame.shape[:2], swapped=aligned, template=template))
     print('  build, occluder OFF   p50 {:6.2f}ms  p95 {:6.2f}ms   (hull, valid, erode, feather only)'.format(p50, p95))
+
+    # The decisive comparison. A session "on CUDA" still runs any node the
+    # CUDA provider does not support on the CPU, with a device round trip on
+    # either side of it, and `get_providers()` says nothing about nodes. The
+    # same graph CPU-only puts a floor under that: a CUDA run close to the
+    # CPU-only run was never really on the GPU. ORT's verbose log names the
+    # nodes it placed on the CPU, so the cause arrives with the number.
+    import io                                                        # noqa: E402
+    import contextlib                                                # noqa: E402
+    import onnxruntime as ort                                        # noqa: E402
+    model_path = masker._resolve_model_path()
+    print()
+    print('model:', model_path)
+
+    cpu_only = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'])
+    p50, p95 = _timed(lambda: cpu_only.run(None, inputs), runs=20)
+    print('  CPU-only session.run  p50 {:6.2f}ms  p95 {:6.2f}ms'.format(p50, p95))
+
+    options = ort.SessionOptions()
+    options.log_severity_level = 0
+    options.log_verbosity_level = 1
+    buffer = io.StringIO()
+    with contextlib.redirect_stderr(buffer), contextlib.redirect_stdout(buffer):
+        verbose = ort.InferenceSession(
+            model_path, options,
+            providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
+        verbose.run(None, inputs)
+    log = buffer.getvalue()
+    placed_cpu = [ln for ln in log.splitlines()
+                  if 'CPUExecutionProvider' in ln and ('Node(s) placed' in ln or 'placed on' in ln.lower())]
+    fallback = [ln.strip() for ln in log.splitlines() if 'Fallback to CPU' in ln or 'not supported' in ln.lower()]
+    if placed_cpu or fallback:
+        print('  ORT placed nodes on the CPU inside the CUDA session:')
+        for ln in (placed_cpu + fallback)[:12]:
+            print('    ' + ln.strip()[:160])
+    else:
+        # The placement lines are only emitted while the graph is partitioned;
+        # print whatever mentions the CPU provider so nothing is hidden.
+        mentions = [ln.strip()[:160] for ln in log.splitlines() if 'CPU' in ln][:8]
+        print('  no explicit CPU placements logged; CPU mentions:', len(mentions))
+        for ln in mentions:
+            print('    ' + ln)
     return 0
 
 
