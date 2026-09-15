@@ -74,7 +74,14 @@ def main() -> int:
     parser.add_argument('--image', default='target/face-3.jpeg')
     args = parser.parse_args()
 
-    FaceSwapConfig().execution_providers = decode_execution_providers(['cuda'])
+    # The pipeline's own load order, so CUDA initialises the way it does for
+    # a real session: the detector comes up first and brings cuDNN into the
+    # process with it. A bare `import onnxruntime` here left every node on
+    # the CPU and timed nothing useful.
+    config = FaceSwapConfig()
+    config.execution_providers = decode_execution_providers(['cuda'])
+    from pipeline.services.face_detection import FaceDetector      # noqa: E402
+    FaceDetector(config).detect_one(np.zeros((64, 64, 3), np.uint8))
 
     rewritten_path = graph_fixes.cuda_sibling(args.model)
     if os.path.isfile(rewritten_path):
