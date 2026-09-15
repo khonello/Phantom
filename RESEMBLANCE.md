@@ -844,8 +844,18 @@ lost by waiting: B is scripted end to end and E is registry entries.
    but the operator chose alphaface by eye), **fp16 alphaface** (a numerics
    change — `tools/convert_fp16.py`, then an A/B on footage), or the **torch
    port** of the compositor (PERFORMANCE_AUDIT.md §5), which makes the pod's
-   CPU irrelevant. That is a product decision, recorded here rather than
-   made.
+   CPU irrelevant.
+
+   **Decided 2026-09-15: alphaface stays the default.** The operator chose it
+   by eye for likeness, and likeness is what this document exists for; a
+   swap model is not traded for 16ms without footage saying the difference is
+   small. The ~5ms miss at p50 is carried as a known: at 15fps it costs about
+   one evicted frame in fifteen and a slightly higher playout delay, no audio
+   desync, no stutter at p50. `inswapper_128` remains a live `set_realism`
+   A/B on any session (`swapper_model=inswapper_128`), and the fp16 alphaface
+   route is the lever to reach for if a live PERF block confirms the miss.
+   **The live-cost item is closed as lossless**; what remains is a live
+   reading from a real seated frame, taken free on the next Route D session.
 5. **Route D** — the ReSwapper fine-tune; live by nature, a branch.
 6. **Route C** — the reenactment latency prototype; live by nature, a branch.
 
