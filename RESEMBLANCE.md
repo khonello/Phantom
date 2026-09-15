@@ -810,9 +810,42 @@ lost by waiting: B is scripted end to end and E is registry entries.
    onnx/onnxruntime exist. Worth carrying as a lesson: **a session's provider
    list says nothing about its nodes; the placement log does.**
 
-   Remaining: `skin_grade` (Route A's segmenter, every frame; the every-2nd-
-   frame reuse and half-resolution grading are the levers) and `reshape`
-   (`shape_warp` remapping the whole frame). Both next.
+   **`reshape` and `skin_grade` — cut the same day, both pinned against the
+   behaviour they replaced.** Reshape's 14ms was a 4096×106×2 float64
+   broadcast and its exp for a field that is zero over most of the frame; it
+   now computes only within reach of the head, in float32, and remaps only
+   the field's support with a margin of its largest displacement — field
+   within 3e-6 px, render within 1 LSB on 0.008% of pixels, outside the
+   support byte-identical. 35 → 10ms on a laptop. The grade converted the
+   same pixels through LAB three times; it is one pass now (byte-identical
+   with the harmoniser off; skin medians identical with it on), its medians
+   read a 2×2 subsample (within 0.5 units), its write-back is a `np.where`,
+   and the body mask is refitted every second frame while the face mask is
+   rebuilt every frame — the `_MATTE_INTERVAL` trade, stated in the constant.
+   On the pod, same frame: `skin_grade` 23.6 → 15.4ms, `mask` 5.6 → 4.5,
+   total 88 → 79 on a 167px face with the whole torso in the grade's ROI.
+   InsightFace's `genderage` model, which nothing read, no longer runs.
+
+   **And a false lead, ruled out with numbers rather than shipped.**
+   `tools/placement_audit.py` found 144 CPU-placed nodes in `alphaface_256`
+   with 72 Memcpy nodes around them — AdaIN's `H×W` computed from the runtime
+   `Shape`, copied to the GPU for every division. Freezing the batch to 1 and
+   constant-folding removes all 144 (exact, CPU-vs-CPU diff 0) and changes the
+   time by **0.2ms**: 22.8 → 22.6. CUDA graphs on the folded graph: 22.85,
+   bit-identical. So alphaface is genuinely ~23ms of compute on this card,
+   1528 → 665 nodes notwithstanding, and neither trick is worth carrying.
+
+   **Where the deadline stands, honestly.** On a live frame the sum is now
+   roughly 68–72ms against 66.7 — at the line at p50, over at p95, down from
+   114 in the morning. The two largest terms are not ours to cut losslessly:
+   alphaface's 23ms is the model, and detect's 15ms is 2ms of inference plus
+   InsightFace's own post-processing and two landmark models. Holding the
+   deadline from here needs one of: **inswapper_128** (7ms; holds with room,
+   but the operator chose alphaface by eye), **fp16 alphaface** (a numerics
+   change — `tools/convert_fp16.py`, then an A/B on footage), or the **torch
+   port** of the compositor (PERFORMANCE_AUDIT.md §5), which makes the pod's
+   CPU irrelevant. That is a product decision, recorded here rather than
+   made.
 5. **Route D** — the ReSwapper fine-tune; live by nature, a branch.
 6. **Route C** — the reenactment latency prototype; live by nature, a branch.
 
