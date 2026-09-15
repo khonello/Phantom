@@ -137,10 +137,19 @@ class FaceDetector:
         with self._lock:
             if self._analyser is None:
                 root = _get_insightface_root()
+                # Everything the pack offers except `genderage`: nothing in
+                # the pipeline reads gender or age, and the model was running
+                # on every detected face regardless. Detection, both landmark
+                # models (the 3D one is where `pose` comes from — see
+                # `guards.estimate_yaw`) and recognition (the identity guard
+                # and the probe) all stay.
                 self._analyser = insightface.app.FaceAnalysis(
                     name='buffalo_l',
                     root=root,
                     providers=self.config.execution_providers,
+                    allowed_modules=[
+                        'detection', 'landmark_2d_106', 'landmark_3d_68', 'recognition',
+                    ],
                 )
 
             if self._prepared_size != size:

@@ -448,6 +448,15 @@ check('pixels outside every skin mask are the input\'s own',
       np.array_equal(fused_out[np.maximum(fused_masks.face, fused_masks.body) <= 0.0],
                      torch[np.maximum(fused_masks.face, fused_masks.body) <= 0.0]))
 
+# The harmoniser's medians read every other row and column. Bound what that
+# costs against the full read on the torch scene's graded body.
+_lab_full = cv2.cvtColor(torch, cv2.COLOR_BGR2LAB).astype(np.float32)
+_full_body = np.median(_lab_full[fused_masks.body > 0.5], axis=0)
+_sub_body = complexion_stage._lit_median(_lab_full, fused_masks.body)
+check('the subsampled median is within half a unit of the full one',
+      _sub_body is not None and float(np.abs(_sub_body - _full_body).max()) < 0.5,
+      'max |diff| {:.2f}'.format(float(np.abs(_sub_body - _full_body).max()) if _sub_body is not None else 99.0))
+
 # ── Blasting light: consistent, and not clipped to white ────────────────
 print('\nStrong even light')
 

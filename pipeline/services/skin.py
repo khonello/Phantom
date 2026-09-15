@@ -117,6 +117,15 @@ _MASK_ALPHA = 0.6
 # Feather at the body mask's edge, in pixels at working scale.
 _FEATHER = 2.0
 
+# The body mask and the colour models are refitted every Nth frame and reused
+# between; the face mask is rebuilt every frame. Same trade the desktop matte
+# makes (`backgrounds._MATTE_INTERVAL`), for the same reason: a skin boundary
+# is slowly varying, the mask is already an EMA, and one frame stale on the
+# neck and shoulders — 67ms at 15fps, far from the face edge — costs a sliver
+# at the collar on the fastest movement, where the stage's cost was measured
+# at 8ms of a 67ms deadline on the pod. Set to 1 to refit every frame.
+_BODY_INTERVAL = 2
+
 
 @dataclass(frozen=True)
 class SkinBackend:
@@ -221,6 +230,11 @@ class SkinSegmenter:
         self._neck_lightness: Optional[float] = None
         # Whether the last frame found a neck model — for the readings.
         self.last_neck_seeded: bool = False
+        # The last body mask at full size and the frame shape it was fitted
+        # on, reused on the frames between refits.
+        self._body_full: Optional[Mask] = None
+        self._body_shape: Optional[Tuple[int, int]] = None
+        self._tick = 0
 
     def reset(self) -> None:
         """Drop the smoothed model. Face lost, source changed, stream restart."""
@@ -231,6 +245,9 @@ class SkinSegmenter:
         self._neck_centre = None
         self._neck_spread = None
         self._neck_lightness = None
+        self._body_full = None
+        self._body_shape = None
+        self._tick = 0
 
     @property
     def sample_lab(self) -> Optional[np.ndarray]:
@@ -317,6 +334,14 @@ class SkinSegmenter:
         if masks is None:
             return None
         face_full, face_small = masks
+
+        # Between refits the body mask is the last one; the face mask above
+        # is this frame's. A frame of a different size always refits.
+        due = (self._body_full is None or self._body_shape != (height, width)
+               or self._tick % _BODY_INTERVAL == 0)
+        self._tick += 1
+        if not due and self._body_full is not None:
+            return SkinMasks(face=face_full, body=self._body_full)
 
         small = cv2.resize(frame, (work_w, work_h), interpolation=cv2.INTER_AREA)
         lab = cv2.cvtColor(small, cv2.COLOR_BGR2LAB)
@@ -406,8 +431,10 @@ class SkinSegmenter:
             cv2.addWeighted(body, _MASK_ALPHA, self._body, 1.0 - _MASK_ALPHA, 0.0, dst=body)
         self._body = body
 
-        body_full = cv2.resize(body, (width, height), interpolation=cv2.INTER_LINEAR)
-        return SkinMasks(face=face_full, body=np.asarray(body_full, dtype=np.float32))
+        body_full = np.asarray(
+            cv2.resize(body, (width, height), interpolation=cv2.INTER_LINEAR), dtype=np.float32)
+        self._body_full, self._body_shape = body_full, (height, width)
+        return SkinMasks(face=face_full, body=body_full)
 
     _kernels: Dict[int, np.ndarray] = {}
 

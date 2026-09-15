@@ -271,6 +271,47 @@ check('a face too small to sample declines rather than raising',
 check('a face without keypoints declines rather than raising',
       skin.SkinSegmenter().segment(frame, MagicMock(kps=None)) is None)
 
+# ── The body is refitted every Nth frame, the face every frame ──────────
+print('\nRefit cadence')
+
+cadence = skin.SkinSegmenter()
+first = cadence.segment(frame, face)
+second = cadence.segment(frame, face)
+third = cadence.segment(frame, face)
+assert first is not None and second is not None and third is not None
+check('the interval is the documented one', skin._BODY_INTERVAL == 2)
+check('the frame between refits reuses the body mask (same array)',
+      second.body is first.body)
+check('and the refit frame fits a new one', third.body is not second.body)
+check('the face mask is rebuilt on every frame, reused body or not',
+      second.face is not first.face and np.array_equal(second.face, first.face))
+
+# A face that moves between refits must still get a fresh face mask; the
+# stale part is only the body.
+moved = make_face()
+moved.kps = face.kps + np.array([12.0, 0.0], dtype=np.float32)
+moved.bbox = face.bbox + np.array([12.0, 0.0, 12.0, 0.0], dtype=np.float32)
+cadence.reset()
+cadence.segment(frame, face)
+between = cadence.segment(frame, moved)
+assert between is not None
+check('a moved face gets its own mask on a reused-body frame',
+      float(np.abs(between.face - first.face).max()) > 0.5)
+check('reset forces a refit on the next frame',
+      (cadence.reset() or True) and cadence.segment(frame, face) is not None
+      and cadence._tick == 1)
+
+# Different frame sizes never share a body mask.
+cadence.reset()
+cadence.segment(frame, face)
+smaller = cv2.resize(frame, (320, 180))
+small_face = make_face()
+small_face.kps = face.kps / 2.0
+small_face.bbox = face.bbox / 2.0
+resized = cadence.segment(smaller, small_face)
+check('a frame of another size refits rather than reusing',
+      resized is not None and resized.body.shape == (180, 320))
+
 # ── Feeding the complexion reading ─────────────────────────────────────
 print('\nFeeding the complexion reading')
 

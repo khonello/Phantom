@@ -310,7 +310,7 @@ class ComplexionStage:
         # construction rather than by luck.
         result = frame.copy()
         touched = weight[:, :, 0] > 0.0
-        np.copyto(result[y0:y1, x0:x1], out_roi, where=touched[:, :, None])
+        result[y0:y1, x0:x1] = np.where(touched[:, :, None], out_roi, roi)
         return result
 
     def _harmonise_params(
@@ -383,12 +383,16 @@ def _lit_median(lab: np.ndarray, mask: Mask) -> Optional[np.ndarray]:
     Median LAB of the lit pixels under a mask — `complexion.masked_lab`'s rule
     on a float LAB array that has already been converted.
     """
-    inside = mask > 0.5
-    if int(inside.sum()) < complexion.MIN_PIXELS:
+    # Every other row and column. A median over tens of thousands of skin
+    # pixels moves by well under a unit when a quarter of them are read, and
+    # the result is EMA'd behind it; the full read was 3ms of the stage on the
+    # pod for a statistic that cannot use the precision.
+    inside = mask[::2, ::2] > 0.5
+    if int(inside.sum()) < complexion.MIN_PIXELS // 4:
         return None
-    pixels = lab[inside]
+    pixels = lab[::2, ::2][inside]
     lit = (pixels[:, 0] > complexion.L_FLOOR) & (pixels[:, 0] < complexion.L_CEILING)
-    if int(lit.sum()) >= complexion.MIN_PIXELS:
+    if int(lit.sum()) >= complexion.MIN_PIXELS // 4:
         pixels = pixels[lit]
     return np.asarray(np.median(pixels, axis=0), dtype=np.float64)
 
