@@ -75,7 +75,12 @@ def main() -> int:
     frame = cv2.imread(args.image)
     if frame is None:
         raise SystemExit('unreadable image: {}'.format(args.image))
-    frame = cv2.resize(frame, (640, 360)) if frame.shape[1] > 640 else frame
+    # Down to a webcam-sized frame, aspect preserved, so the face lands at the
+    # ~90px the live path actually sees.
+    scale = 640.0 / max(frame.shape[:2])
+    if scale < 1.0:
+        frame = cv2.resize(frame, (int(frame.shape[1] * scale), int(frame.shape[0] * scale)),
+                           interpolation=cv2.INTER_AREA)
     detection = detector.detect_one(frame)
     if detection is None:
         raise SystemExit('no face in {}'.format(args.image))
