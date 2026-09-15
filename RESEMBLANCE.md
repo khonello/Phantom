@@ -5,7 +5,7 @@ the source, target feature leakage driven down, until the output is a striking,
 unmistakable resemblance to the source.** Complexion means *all visible skin* —
 neck, ears, chest, hands — not the face alone.
 
-Status: **the core (§3) is built. Route A is CLOSED, on by default, 2026-09-14** — face verdict positive on the hardest pairing, one limitation accepted and stated under Route A. **Route B's measurement is scripted and waits on a fresh pod** — see under Route B. C–E planned.
+Status: **the core (§3) is built. Route A is CLOSED, on by default, 2026-09-14** — face verdict positive on the hardest pairing, one limitation accepted and stated under Route A. **Live work first, by decision (2026-09-15, §8): Route B and E wait until the live list is clear.** Route B's measurement is scripted and ready; C–E planned.
 This is the implementation approach agreed 2026-09-13, written before the
 first line of code so the routes are judged against what they were meant to
 deliver rather than what they happened to do.
@@ -762,18 +762,37 @@ reachable through `set_realism` for a running pipeline, reported by
 
 ## 8. Order of work
 
-1. **Core** — §3.1 first, because it changes what every later result means;
-   then §3.2, §3.3, §3.4.
-2. **Route A**, and the flag matrix A on/off on the cross-tone pair.
-3. **Route B** — time InstantRestore on the 4090; adopt for RENDER and photo
-   regardless of the live verdict.
-4. **Un-park texture** (TEXTURE.md §7) over A. *Step 1 of that — the donor
-   picker — landed 2026-09-14 while Route A was under test; inert until
-   `texture_strength` is set, and unjudged on footage.*
-5. **Route D** — the ReSwapper fine-tune, cheapest test of texture in the
-   generator.
-6. **Route C** — the latency prototype. The strategic answer if it holds.
-7. **Route E** — E4S and REFace on stills, whenever there is a pod hour.
+**Decision, 2026-09-15: live work first.** The live call is the product, and
+the operator asked that everything non-live wait until the live list is
+clear — the same priority CLAUDE.md has held from the start (*"development is
+focused on the live call path; batch follows"*). Route B and Route E are
+RENDER/photo by nature, seconds per image, so they wait. Nothing about them is
+lost by waiting: B is scripted end to end and E is registry entries.
+
+**The live list, in order:**
+
+1. ~~**Core**~~ — done.
+2. **Route A** — closed and on; its last owed footage look is the second
+   seed and the harmoniser on the neck (verified on the 2026-09-15 pod
+   session, or the neck becomes the stated limit and A is final).
+3. **Un-park texture** (TEXTURE.md §7) over A. The donor picker landed
+   2026-09-14; the operator's slider observation the same night reversed the
+   layer's verdict. Judge with the new picker, read `Texture source:`.
+4. **Live cost.** Deferred by instruction until things worked; they do. The
+   frame misses its 67ms deadline by 30–40ms and that is felt as lag on a
+   call: `skin_grade` ~10ms, `mask` 17–23ms, `reshape` 14ms. Route A's cost
+   comes first (the segmenter at half the stage), then the two pre-existing
+   ones.
+5. **Route D** — the ReSwapper fine-tune; live by nature, a branch.
+6. **Route C** — the reenactment latency prototype; live by nature, a branch.
+
+**Then the non-live list:**
+
+7. **Route B** — the retry is the setup script plus three commands, recorded
+   under Route B. Adopt for RENDER and photo if `restore_probe` says it
+   beats GPEN on identity *and* cheek detail — or close it as unnecessary if
+   the un-parked texture layer already does the job.
+8. **Route E** — E4S and REFace on stills, whenever there is a pod hour.
 
 ---
 
