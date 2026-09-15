@@ -788,10 +788,31 @@ lost by waiting: B is scripted end to end and E is registry entries.
    judged on two live sessions over Route A (*"works quite very well"*).
    TEXTURE.md's header records the reversal and why.
 4. **Live cost.** Deferred by instruction until things worked; they do. The
-   frame misses its 67ms deadline by 30–40ms and that is felt as lag on a
-   call: `skin_grade` ~10ms, `mask` 17–23ms, `reshape` 14ms. Route A's cost
-   comes first (the segmenter at half the stage), then the two pre-existing
-   ones.
+   frame missed its 67ms deadline by 30–47ms and that is felt as lag on a
+   call: `mask` 17–26ms, `skin_grade` 10–16ms, `reshape` 14ms.
+
+   **`mask` — found and fixed, 2026-09-15, 18ms → 3.7ms.** Profiled rather
+   than guessed (`tools/mask_profile.py`): the CPU work around XSeg was
+   0.5ms; the inference was 18ms on an RTX 5880 Ada that should do it in 3.
+   ORT's verbose placement log named the cause — **six of the graph's 362
+   nodes were on the CPU behind a session that reported CUDA**: every
+   `ConvTranspose`, the decoder's upsampling, because the TensorFlow export
+   pads them `[0, 0, 1, 1]` and cuDNN's transposed convolution wants
+   symmetric pads. Six GPU↔CPU round trips per frame, invisible to
+   `execution.verify`, which checks providers and not nodes.
+   `pipeline/services/graph_fixes.py` rewrites each one losslessly — zero
+   pads plus a `Slice` that drops exactly the rows the pads would have — once,
+   beside the original as `dfl_xseg-cuda.onnx`, and the masker prefers it
+   when a GPU provider is asked for. Verified on the pod: **bit-identical
+   output** (`max |diff| = 0.000e+00`), **zero nodes on the CPU**, `raw
+   session.run` 18.3 → 2.96ms, `FaceMasker.build` 18.7 → 3.69ms.
+   `tests/test_graph_fixes.py` pins the rewrite numerically where real
+   onnx/onnxruntime exist. Worth carrying as a lesson: **a session's provider
+   list says nothing about its nodes; the placement log does.**
+
+   Remaining: `skin_grade` (Route A's segmenter, every frame; the every-2nd-
+   frame reuse and half-resolution grading are the levers) and `reshape`
+   (`shape_warp` remapping the whole frame). Both next.
 5. **Route D** — the ReSwapper fine-tune; live by nature, a branch.
 6. **Route C** — the reenactment latency prototype; live by nature, a branch.
 

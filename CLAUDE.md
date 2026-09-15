@@ -2803,6 +2803,21 @@ Library location follows the model weights: `/workspace/templates` when the
 network volume is mounted, else `pipeline/templates/`. Gitignored for the same
 reason weights are — a scene library would bloat every clone and image build.
 
+### A session on CUDA can still run nodes on the CPU
+
+`execution.verify` checks that each session *has* the accelerator; it cannot
+see that ORT placed some of the session's **nodes** on the CPU fallback, with a
+device round trip on either side. That was XSeg for the whole life of this
+project: six `ConvTranspose` layers with asymmetric pads (`[0, 0, 1, 1]`, a
+TensorFlow export artefact cuDNN refuses), the entire decoder upsampling,
+running on the CPU behind a session that reported `CUDAExecutionProvider` —
+**18ms of every frame**, found 2026-09-15 by `tools/mask_profile.py` reading
+ORT's verbose placement log rather than its provider list.
+`pipeline/services/graph_fixes.py` rewrites them losslessly (zero pads + a
+`Slice`) into a `-cuda.onnx` sibling the masker prefers on a GPU: bit-identical
+output, zero CPU nodes, **18.7ms → 3.7ms** for the mask stage. Read a
+model's *placement*, not its provider, before believing a stage's cost.
+
 ### Execution providers — fails closed
 ONNX Runtime does not error when a provider cannot initialise; it silently uses
 CPU. Every model that decides how the output looks is ONNX (swapper, CodeFormer,
