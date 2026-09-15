@@ -5,7 +5,7 @@ the source, target feature leakage driven down, until the output is a striking,
 unmistakable resemblance to the source.** Complexion means *all visible skin* —
 neck, ears, chest, hands — not the face alone.
 
-Status: **the core (§3) is built. Route A is CLOSED, on by default, 2026-09-14** — face verdict positive on the hardest pairing, one limitation accepted and stated under Route A. **Live work first, by decision (2026-09-15, §8): Route B and E wait until the live list is clear.** Route B's measurement is scripted and ready; C–E planned.
+Status: **the core (§3) is built. Route A is FINAL, on by default — third footage run 2026-09-15: "done and fully acceptable"** on the hardest pairing, one limitation accepted and stated under Route A. **Live work first, by decision (2026-09-15, §8): Route B and E wait until the live list is clear.** Route B's measurement is scripted and ready; C–E planned.
 This is the implementation approach agreed 2026-09-13, written before the
 first line of code so the routes are judged against what they were meant to
 deliver rather than what they happened to do.
@@ -365,7 +365,17 @@ hue — the footage case):
   0.7, 0.0 at 1.0; lightness ratio 0.34 → 0.62. A body already in the face's
   light is barely touched. `complexion_harmonise` reports what it corrected.
 
-Both unjudged on footage; the fresh-pod session is what judges them.
+**Judged 2026-09-15, fresh pod, third footage run — Route A is FINAL.** Same
+fair-source / dark-target pairing, same poor light and camera, second seed
+and harmoniser on at their defaults. The operator's words: *"perfect, not
+100% perfect but as I said the odds are against us, lighting and camera
+quality, so I say Route A is done and fully acceptable — and besides, in
+actual usage, source and target skin tone will be quite close."* That last
+clause is the product truth this whole route was tested against its opposite
+of: the test pairing was chosen as the hardest corner of §3.3, and real
+pairings sit near the easy end, where the grade is mostly chroma, the lift
+is small, and the two renderings of skin are already close. No further work
+on Route A's code unless footage from an ordinary pairing asks for it.
 
 **And the question the operator asked next — strong, even light.** Under
 blasting light face and body stay consistent *by construction*: one chroma
@@ -772,9 +782,8 @@ lost by waiting: B is scripted end to end and E is registry entries.
 **The live list, in order:**
 
 1. ~~**Core**~~ — done.
-2. **Route A** — closed and on; its last owed footage look is the second
-   seed and the harmoniser on the neck (verified on the 2026-09-15 pod
-   session, or the neck becomes the stated limit and A is final).
+2. ~~**Route A**~~ — **final**, 2026-09-15: *"done and fully acceptable"* on
+   the hardest pairing. Nothing owed.
 3. **Un-park texture** (TEXTURE.md §7) over A. The donor picker landed
    2026-09-14; the operator's slider observation the same night reversed the
    layer's verdict. Judge with the new picker, read `Texture source:`.
