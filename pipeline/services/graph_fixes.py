@@ -26,7 +26,7 @@ original is never touched, and reverting is deleting a file.
 """
 
 import os
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from pipeline.logging import emit_status, emit_warning
 
@@ -69,7 +69,7 @@ def symmetrise_convtranspose(src: str, dst: str) -> Optional[int]:
 
     graph = model.graph
     rewritten = 0
-    new_nodes: List = []
+    new_nodes: List[Any] = []
     counter = 0
 
     for node in graph.node:

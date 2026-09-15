@@ -108,6 +108,9 @@ class FaceMasker:
         self._input_nchw: bool = False
         self._occluder_ready = False
         self._occluder_attempted = False
+        # Which file the occluder actually loaded — the rewritten sibling when
+        # a GPU provider was asked for, else the original.
+        self.last_model_path: Optional[str] = None
         self._lock = threading.Lock()
         self._white: Optional[Frame] = None
         self._white_shape: Tuple[int, int] = (0, 0)
@@ -601,13 +604,28 @@ class FaceMasker:
             if not self._download_occluder(model_path):
                 return None
 
+        # The export pads its six ConvTranspose layers asymmetrically, which
+        # cuDNN refuses, so ORT ran the whole decoder on the CPU with a device
+        # round trip around each — 18ms of a 67ms frame behind a session that
+        # reported CUDA. `graph_fixes` rewrites them losslessly to zero pads
+        # plus a Slice, once, beside the original; measured 18ms -> 3ms with
+        # every node on the GPU and a bit-identical output. Only when a GPU
+        # provider is asked for: on the CPU the original is already as fast as
+        # it gets, and a rewrite there would be a file nobody needed.
+        load_path = model_path
+        providers = list(getattr(self.config, 'execution_providers', None) or [])
+        if any(p != 'CPUExecutionProvider' for p in providers):
+            from pipeline.services import graph_fixes
+            load_path, _rewritten = graph_fixes.prefer_cuda_copy(model_path)
+        self.last_model_path = load_path
+
         try:
             from pipeline.services.onnx_session import BoundRunner, create_session
 
             # Static shapes: XSeg always sees `_input_size` square, whatever
             # the aligned crop was — the resize above guarantees it.
             session = create_session(
-                self.config, model_path, 'xseg',
+                self.config, load_path, 'xseg',
                 static_shapes=True, bound=True,
             )
             self._runner = BoundRunner(session, 'xseg')
