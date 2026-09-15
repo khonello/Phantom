@@ -76,11 +76,14 @@ MEASURE_SIZE = 256
 # Fewer skin pixels than this and the median is a guess: a face at the edge of
 # the frame, or a mask that mostly landed on the feature exclusions.
 _MIN_PIXELS = 256
+MIN_PIXELS = _MIN_PIXELS
 
 # Lightness outside this band is shadow or specular, and neither carries
 # pigment. Bounds are in OpenCV's 8-bit L, so 255 is white.
 _L_FLOOR = 8.0
 _L_CEILING = 247.0
+L_FLOOR = _L_FLOOR
+L_CEILING = _L_CEILING
 
 # Below this chroma gap the two complexions agree to within what a JPEG at
 # 4:2:0 preserves, and the readings describe noise rather than a transfer.

@@ -426,6 +426,28 @@ check('a body already close to the face is barely touched',
       same_light.last_harmonise is None or same_light.last_harmonise < 3.0,
       'corrected {:.1f}'.format(same_light.last_harmonise or 0.0))
 
+# ── The fused pass is the two passes it replaced ───────────────────────
+print('\nFused pass')
+
+# The grade and the harmoniser used to be two LAB round trips plus two
+# whole-frame conversions to measure between them; they are one pass now.
+# With the harmoniser off the fused grade must equal the standalone `_apply`
+# byte for byte. With it on, the skin it grades must land on the same medians
+# — the only permitted difference is that the harmoniser measures the graded
+# skin in float LAB before rounding rather than after a uint8 round trip.
+fused_stage = declared_stage(0.0)
+fused_out = settle(fused_stage, torch, face, fair_ref)
+fused_masks = fused_stage.segmenter.segment(torch, face)
+assert fused_masks is not None and fused_stage._shift is not None and fused_stage._gain is not None
+standalone = complexion_stage._apply(
+    torch, np.maximum(fused_masks.face, fused_masks.body), fused_stage._shift, fused_stage._gain)
+check('with the harmoniser off the fused grade equals the standalone apply byte for byte',
+      np.array_equal(fused_out, standalone),
+      '{} pixels differ'.format(int((fused_out != standalone).any(axis=2).sum())))
+check('pixels outside every skin mask are the input\'s own',
+      np.array_equal(fused_out[np.maximum(fused_masks.face, fused_masks.body) <= 0.0],
+                     torch[np.maximum(fused_masks.face, fused_masks.body) <= 0.0]))
+
 # ── Blasting light: consistent, and not clipped to white ────────────────
 print('\nStrong even light')
 

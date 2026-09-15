@@ -1150,6 +1150,48 @@ check('keeping the asymmetry is a no-op at 1.0',
           reshape._symmetrise(_ellipse, _anti, keep=1.0) - _anti).max()) < 1e-9)
 
 
+# **The reshape's cost fixes are exact where they claim to be.** The stage was
+# 14ms on the pod, 35ms on a laptop, almost all of it a 4096 x 106 x 2 float64
+# broadcast and its exp for a field that is zero over most of the frame. Two
+# changes: the field is computed only within reach of the head (points where
+# the falloff has already made it ~1e-8 px become exactly zero), and the remap
+# is restricted to the field's support with a margin of its largest
+# displacement. The second claims byte-identity with a whole-frame remap of
+# the same field, and the first claims the pixels outside the support are the
+# input's own — both are checked here rather than trusted.
+_rs_rng = np.random.default_rng(11)
+_rs_frame = _rs_rng.integers(0, 255, (360, 640, 3), dtype=np.uint8)
+_rs_ang = np.linspace(0, 2 * np.pi, 106, endpoint=False)
+_rs_target = np.stack([320 + np.cos(_rs_ang) * 45, 180 + np.sin(_rs_ang) * 50], axis=1)
+_rs_source = np.stack([320 + np.cos(_rs_ang) * 38, 180 + np.sin(_rs_ang) * 50], axis=1)
+_rs_warp = reshape.ShapeWarp.between(_rs_source, _rs_target)
+assert _rs_warp is not None
+_rs_field = _rs_warp.field(_rs_target, (360, 640), 0.5)
+assert _rs_field is not None
+_rs_sx, _rs_sy = _rs_field
+_rs_out = _rs_warp.apply(_rs_frame, _rs_target, 0.5)
+_rs_gx, _rs_gy = np.meshgrid(np.arange(640, dtype=np.float32), np.arange(360, dtype=np.float32))
+_rs_full = cv2.remap(_rs_frame, (_rs_gx - _rs_sx).astype(np.float32),
+                     (_rs_gy - _rs_sy).astype(np.float32),
+                     cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+_rs_diff = np.abs(_rs_out.astype(np.int16) - _rs_full.astype(np.int16))
+check('the ROI remap matches a whole-frame remap to within 1 LSB on a handful of pixels',
+      int(_rs_diff.max()) <= 1 and int((_rs_diff > 0).any(axis=2).sum()) < 200,
+      'max {} on {} of {} pixels — remap quantises coordinates to 1/32 px and the '
+      'small local coordinates round more precisely'.format(
+          int(_rs_diff.max()), int((_rs_diff > 0).any(axis=2).sum()), _rs_out.shape[0] * _rs_out.shape[1]))
+_rs_still = (np.abs(_rs_sx) <= 1e-6) & (np.abs(_rs_sy) <= 1e-6)
+check('pixels outside the field\'s support are the input\'s own',
+      np.array_equal(_rs_out[_rs_still], _rs_frame[_rs_still]))
+check("the field is exactly zero beyond the head's reach (the far-left columns)",
+      float(np.abs(_rs_sx[:, :80]).max()) == 0.0 and float(np.abs(_rs_sy[:, :80]).max()) == 0.0)
+check('and non-zero at the jaw, so the warp still does its job',
+      float(np.abs(_rs_sx[180, 270:290]).max()) > 0.5,
+      '{:.2f} px'.format(float(np.abs(_rs_sx[180, 270:290]).max())))
+check('a warp that moves nothing returns the very same frame object',
+      _rs_warp.apply(_rs_frame, _rs_target, 0.0) is _rs_frame)
+
+
 # **Readings must not carry across frames.** `last_identity` and `last_shape`
 # are written only on a *measured* frame — `identity_probe` samples one in N —
 # while the batch path records on every swapped one. Nothing but

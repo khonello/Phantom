@@ -250,31 +250,99 @@ class ComplexionStage:
             body = _neck_only(body, face)
         alpha = np.maximum(masks.face, body)
 
-        graded = _apply(frame, alpha, self._shift, self._gain)
-        return self._harmonise(graded, masks.face, body)
+        # One pass through LAB for both the grade and the harmoniser. The
+        # grade and the second pass used to convert the same pixels three
+        # times over — the grade's round trip, two whole-frame conversions to
+        # measure the graded skin, and the harmoniser's round trip — which was
+        # most of the stage's 16ms. The harmoniser now measures the graded
+        # skin in float LAB before the single rounding rather than after a
+        # uint8 round trip: a sub-unit difference, in the more accurate
+        # direction, and pinned as such.
+        return self._grade_pixels(frame, alpha, masks.face, body)
 
-    def _harmonise(self, graded: Frame, face_mask: Mask, body: Mask) -> Frame:
+    def _grade_pixels(self, frame: Frame, alpha: Mask, face_mask: Mask, body: Mask) -> Frame:
         """
-        Second pass: correct the body toward the graded face.
+        Apply the smoothed grade, then the harmoniser, in one LAB pass.
 
         Args:
-            graded: The frame after the global grade
-            face_mask: The face skin mask
-            body: The body skin mask (hands already removed if switched off)
+            frame: The target frame, BGR
+            alpha: Every skin pixel's weight — face and body
+            face_mask: The face skin mask alone, for the harmoniser's measure
+            body: The body skin mask alone — what the harmoniser corrects
 
         Returns:
-            The frame with the body harmonised, or `graded` unchanged when the
-            knob is off or either region cannot be measured
+            A new frame; pixels with zero alpha are byte-identical to the input
+        """
+        assert self._shift is not None and self._gain is not None
+        rows = np.flatnonzero(alpha.max(axis=1) > 0.0)
+        cols = np.flatnonzero(alpha.max(axis=0) > 0.0)
+        if rows.size == 0 or cols.size == 0:
+            return frame
+        y0, y1 = int(rows[0]), int(rows[-1]) + 1
+        x0, x1 = int(cols[0]), int(cols[-1]) + 1
+
+        roi = frame[y0:y1, x0:x1]
+        weight = alpha[y0:y1, x0:x1][:, :, None]
+        lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB).astype(np.float32)
+
+        # The grade: L scaled, a/b shifted, blended in by the skin weight.
+        blended = _shift_scale(lab, self._shift, self._gain)
+        blended -= lab
+        blended *= weight
+        blended += lab
+
+        # The harmoniser, measured on the graded skin it is about to correct.
+        correction = self._harmonise_params(
+            blended, face_mask[y0:y1, x0:x1], body[y0:y1, x0:x1])
+        if correction is not None:
+            h_shift, h_gain = correction
+            body_weight = body[y0:y1, x0:x1][:, :, None]
+            second = _shift_scale(blended, h_shift, h_gain)
+            second -= blended
+            second *= body_weight
+            blended += second
+
+        np.rint(blended, out=blended)
+        out_roi = cv2.cvtColor(blended.astype(np.uint8), cv2.COLOR_LAB2BGR)
+
+        # Only the masked pixels are written back, so everything outside the
+        # mask never went through a colour round trip — byte-identical by
+        # construction rather than by luck.
+        result = frame.copy()
+        touched = weight[:, :, 0] > 0.0
+        np.copyto(result[y0:y1, x0:x1], out_roi, where=touched[:, :, None])
+        return result
+
+    def _harmonise_params(
+        self, graded_lab: np.ndarray, face_mask: Mask, body: Mask,
+    ) -> Optional[Tuple[np.ndarray, float]]:
+        """
+        The harmoniser's correction for this frame, smoothed — or None.
+
+        Measures the graded face skin and the graded body skin (medians of the
+        lit pixels, the same rule `complexion.masked_lab` applies) and corrects
+        the body toward the face: chroma fully, lightness toward a plausible
+        neck-to-face floor, both bounded.
+
+        Args:
+            graded_lab: The graded ROI in float LAB
+            face_mask: The face skin mask, ROI coordinates
+            body: The body skin mask, ROI coordinates
+
+        Returns:
+            (shift, gain) to apply to the body, or None when the knob is off,
+            either region is too small to measure, or the correction is below
+            what a 4:2:0 JPEG would carry
         """
         strength = float(np.clip(
             float(getattr(self.config, 'skin_harmonise', 0.0) or 0.0), 0.0, 1.0))
         if strength <= 0.0:
-            return graded
+            return None
 
-        face_lab = complexion.masked_lab(graded, face_mask)
-        body_lab = complexion.masked_lab(graded, body)
+        face_lab = _lit_median(graded_lab, face_mask)
+        body_lab = _lit_median(graded_lab, body)
         if face_lab is None or body_lab is None:
-            return graded
+            return None
 
         shift = (face_lab[1:] - body_lab[1:]) * strength
         magnitude = float(np.hypot(shift[0], shift[1]))
@@ -296,8 +364,33 @@ class ComplexionStage:
 
         self.last_harmonise = float(np.hypot(self._h_shift[0], self._h_shift[1]))
         if self.last_harmonise < complexion.CLOSE and abs(self._h_gain - 1.0) < 0.02:
-            return graded
-        return _apply(graded, body, self._h_shift, self._h_gain)
+            return None
+        return self._h_shift, self._h_gain
+
+
+def _shift_scale(lab: np.ndarray, shift: np.ndarray, gain: float) -> np.ndarray:
+    """A copy of `lab` with L scaled by `gain` and a/b shifted, clipped."""
+    out = lab.copy()
+    out[:, :, 0] *= gain
+    out[:, :, 1] += float(shift[0])
+    out[:, :, 2] += float(shift[1])
+    np.clip(out, 0.0, 255.0, out=out)
+    return out
+
+
+def _lit_median(lab: np.ndarray, mask: Mask) -> Optional[np.ndarray]:
+    """
+    Median LAB of the lit pixels under a mask — `complexion.masked_lab`'s rule
+    on a float LAB array that has already been converted.
+    """
+    inside = mask > 0.5
+    if int(inside.sum()) < complexion.MIN_PIXELS:
+        return None
+    pixels = lab[inside]
+    lit = (pixels[:, 0] > complexion.L_FLOOR) & (pixels[:, 0] < complexion.L_CEILING)
+    if int(lit.sum()) >= complexion.MIN_PIXELS:
+        pixels = pixels[lit]
+    return np.asarray(np.median(pixels, axis=0), dtype=np.float64)
 
 
 def _apply(frame: Frame, alpha: Mask, shift: np.ndarray, gain: float) -> Frame:

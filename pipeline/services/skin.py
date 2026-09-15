@@ -361,9 +361,19 @@ class SkinSegmenter:
         if corridor is not None:
             admit = corridor & (grown <= 0.5)
             if int(admit.sum()) >= _MIN_SAMPLE:
-                loose = _score(chroma, light, self._centre,
-                               self._spread * (_NECK_ADMIT_CHROMA / _CHROMA_TOLERANCE),
-                               self._lightness, low=_NECK_ADMIT_L_LOW, high=_NECK_ADMIT_L_HIGH)
+                # Scored on the corridor's rows and columns only — the loose
+                # test is consulted nowhere else, and the corridor is a
+                # rectangle, so this is the same answer over a fifth of the
+                # pixels.
+                c_rows = np.flatnonzero(corridor.any(axis=1))
+                c_cols = np.flatnonzero(corridor.any(axis=0))
+                r0, r1 = int(c_rows[0]), int(c_rows[-1]) + 1
+                k0, k1 = int(c_cols[0]), int(c_cols[-1]) + 1
+                loose = np.zeros(chroma.shape[:2], dtype=np.float32)
+                loose[r0:r1, k0:k1] = _score(
+                    chroma[r0:r1, k0:k1], light[r0:r1, k0:k1], self._centre,
+                    self._spread * (_NECK_ADMIT_CHROMA / _CHROMA_TOLERANCE),
+                    self._lightness, low=_NECK_ADMIT_L_LOW, high=_NECK_ADMIT_L_HIGH)
                 seed = admit & (loose > 0.5)
                 if int(seed.sum()) >= _MIN_SAMPLE:
                     neck_sample = chroma[seed]
