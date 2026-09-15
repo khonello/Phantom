@@ -90,7 +90,7 @@ else:
     rng = np.random.default_rng(3)
     weight = rng.normal(0, 0.1, (8, 4, 3, 3)).astype(np.float32)
     x = helper.make_tensor_value_info('x', TensorProto.FLOAT, [1, 8, 16, 16])
-    y = helper.make_tensor_value_info('y', TensorProto.FLOAT, None)
+    y = helper.make_tensor_value_info('y', TensorProto.FLOAT, [1, 4, 32, 32])
     node = helper.make_node(
         'ConvTranspose', ['x', 'w'], ['t'], name='conv2d_transpose',
         kernel_shape=[3, 3], strides=[2, 2], pads=[0, 0, 1, 1], dilations=[1, 1])
