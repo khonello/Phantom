@@ -183,6 +183,14 @@ def main() -> int:
         print('    ' + ln.split('] ', 1)[-1].strip()[:200])
     for ln in cpu_nodes[:12]:
         print('    ' + ln.split('] ', 1)[-1].strip()[:200])
+    # The node names follow each CPU placement line.
+    for index, ln in enumerate(lines):
+        if '[CPUExecutionProvider]' in ln and 'placed on' in ln:
+            for follow in lines[index + 1:index + 8]:
+                text = follow.split('] ', 1)[-1].strip()
+                if 'placed on' in text or 'Node placements' in text:
+                    break
+                print('      ' + text[:160])
     syncs = sum(1 for ln in lines if 'wait on Notification' in ln)
     print('  stream hand-offs (GPU<->CPU sync points) in one run:', syncs)
     return 0
